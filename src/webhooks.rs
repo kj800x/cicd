@@ -29,7 +29,7 @@ pub struct CommitAuthor {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Commit {
+pub struct GhCommit {
     pub id: String, // sha
     pub message: String,
     pub timestamp: String, // "2024-05-12T15:35:17-04:00",
@@ -68,7 +68,7 @@ struct PushEvent {
     r#ref: String, // like "refs/heads/branch-name"
     after: String,
     repository: Repository,
-    head_commit: Commit,
+    head_commit: GhCommit,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -161,7 +161,7 @@ pub async fn upsert_repo(
 }
 
 pub async fn upsert_commit(
-    commit: &crate::webhooks::Commit,
+    commit: &crate::webhooks::GhCommit,
     repo_id: u64,
     pool: &Pool<SqliteConnectionManager>,
 ) -> Result<u64, Error> {
