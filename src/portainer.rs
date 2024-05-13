@@ -7,91 +7,156 @@ use std::collections::HashMap;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Container {
-    Id: String,
-    Names: Vec<String>,
-    Image: String,
-    ImageID: String,
-    Command: String,
-    Created: u64,
-    // Ports: Vec<Port>,
-    Labels: Option<HashMap<String, String>>,
-    State: String,
-    Status: String,
-    // HostConfig: HostConfig,
-    // NetworkSettings: NetworkSettings,
-    // Mounts: Vec<Mount>,
+    #[serde(rename = "Id")]
+    id: String,
+    #[serde(rename = "Names")]
+    names: Vec<String>,
+    #[serde(rename = "Image")]
+    image: String,
+    #[serde(rename = "ImageID")]
+    image_id: String,
+    #[serde(rename = "Command")]
+    command: String,
+    #[serde(rename = "Created")]
+    created: u64,
+    // #[serde(rename = "Ports")]
+    // ports: Vec<Port>,
+    #[serde(rename = "Labels")]
+    labels: Option<HashMap<String, String>>,
+    #[serde(rename = "State")]
+    state: String,
+    #[serde(rename = "Status")]
+    status: String,
+    // #[serde(rename = "HostConfig")]
+    // host_config: HostConfig,
+    // #[serde(rename = "NetworkSettings")]
+    // network_settings: NetworkSettings,
+    // #[serde(rename = "Mounts")]
+    // mounts: Vec<Mount>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Image {
-    Containers: i64,
-    Created: u64,
-    Id: String,
-    Labels: Option<HashMap<String, String>>,
-    ParentId: String,
-    RepoDigests: Vec<String>,
-    RepoTags: Option<Vec<String>>,
-    SharedSize: i64,
-    Size: i64,
-    VirtualSize: i64,
+    #[serde(rename = "Containers")]
+    containers: i64,
+    #[serde(rename = "Created")]
+    created: u64,
+    #[serde(rename = "Id")]
+    id: String,
+    #[serde(rename = "Labels")]
+    labels: Option<HashMap<String, String>>,
+    #[serde(rename = "ParentId")]
+    parent_id: String,
+    #[serde(rename = "RepoDigests")]
+    repo_digests: Vec<String>,
+    #[serde(rename = "RepoTags")]
+    repo_tags: Option<Vec<String>>,
+    #[serde(rename = "SharedSize")]
+    shared_size: i64,
+    #[serde(rename = "Size")]
+    size: i64,
+    #[serde(rename = "VirtualSize")]
+    virtual_size: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DockerSnapshotRaw {
-    Containers: Vec<Container>,
-    // Volumes: Vec<Volume>,
-    // Networks: Vec<Network>,
-    Images: Vec<Image>,
-    // Info: Info,
-    // Version: Version,
+    #[serde(rename = "Containers")]
+    containers: Vec<Container>,
+    // #[serde(rename = "Volumes")]
+    // volumes: Vec<Volume>,
+    // #[serde(rename = "Networks")]
+    // networks: Vec<Network>,
+    #[serde(rename = "Images")]
+    images: Vec<Image>,
+    // #[serde(rename = "Info")]
+    // info: Info,
+    // #[serde(rename = "Version")]
+    // version: Version,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DockerSnapshot {
-    Time: u64,
-    DockerVersion: String,
-    Swarm: bool,
-    TotalCPU: u64,
-    TotalMemory: u64,
-    RunningContainerCount: u64,
-    StoppedContainerCount: u64,
-    HealthyContainerCount: u64,
-    UnhealthyContainerCount: u64,
-    VolumeCount: u64,
-    ImageCount: u64,
-    ServiceCount: u64,
-    StackCount: u64,
-    NodeCount: u64,
-    GpuUseAll: bool,
-    GpuUseList: Vec<u64>,
-    DockerSnapshotRaw: DockerSnapshotRaw,
+    #[serde(rename = "Time")]
+    time: u64,
+    #[serde(rename = "DockerVersion")]
+    docker_version: String,
+    #[serde(rename = "Swarm")]
+    swarm: bool,
+    #[serde(rename = "TotalCPU")]
+    total_cpu: u64,
+    #[serde(rename = "TotalMemory")]
+    total_memory: u64,
+    #[serde(rename = "RunningContainerCount")]
+    running_container_count: u64,
+    #[serde(rename = "StoppedContainerCount")]
+    stopped_container_count: u64,
+    #[serde(rename = "HealthyContainerCount")]
+    healthy_container_count: u64,
+    #[serde(rename = "UnhealthyContainerCount")]
+    unhealthy_container_count: u64,
+    #[serde(rename = "VolumeCount")]
+    volume_count: u64,
+    #[serde(rename = "ImageCount")]
+    image_count: u64,
+    #[serde(rename = "ServiceCount")]
+    service_count: u64,
+    #[serde(rename = "StackCount")]
+    stack_count: u64,
+    #[serde(rename = "NodeCount")]
+    node_count: u64,
+    #[serde(rename = "GpuUseAll")]
+    gpu_use_all: bool,
+    #[serde(rename = "GpuUseList")]
+    gpu_use_list: Vec<u64>,
+    #[serde(rename = "DockerSnapshotRaw")]
+    docker_snapshot_raw: DockerSnapshotRaw,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Endpoint {
-    Id: u64,
-    Name: String,
-    Type: u64,
-    URL: String,
-    GroupId: u64,
-    PublicURL: String,
-    // Gpus: Vec<u64>,
-    // TLSConfig: TLSConfig,
-    // AzureCredentials: AzureCredentials,
-    // TagIds: Vec<u64>,
-    Status: u64,
-    Snapshots: Vec<DockerSnapshot>,
+    #[serde(rename = "Id")]
+    id: u64,
+    #[serde(rename = "Name")]
+    name: String,
+    #[serde(rename = "Type")]
+    r#type: u64,
+    #[serde(rename = "URL")]
+    url: String,
+    #[serde(rename = "GroupId")]
+    group_id: u64,
+    #[serde(rename = "PublicURL")]
+    public_url: String,
+    // #[serde(rename = "Gpus")]
+    // gpus: Vec<u64>,
+    // #[serde(rename = "TLSConfig")]
+    // tls_config: TLSConfig,
+    // #[serde(rename = "AzureCredentials")]
+    // azure_credentials: AzureCredentials,
+    // #[serde(rename = "TagIds")]
+    // tag_ids: Vec<u64>,
+    #[serde(rename = "Status")]
+    status: u64,
+    #[serde(rename = "Snapshots")]
+    snapshots: Vec<DockerSnapshot>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EndpointBrief {
-    Id: u64,
-    Name: String,
-    Type: u64,
-    URL: String,
-    GroupId: u64,
-    PublicURL: String,
-    Status: u64,
+    #[serde(rename = "Id")]
+    id: u64,
+    #[serde(rename = "Name")]
+    name: String,
+    #[serde(rename = "Type")]
+    type_: u64,
+    #[serde(rename = "URL")]
+    url: String,
+    #[serde(rename = "GroupId")]
+    group_id: u64,
+    #[serde(rename = "PublicURL")]
+    public_url: String,
+    #[serde(rename = "Status")]
+    status: u64,
 }
 
 pub async fn get_endpoint(
