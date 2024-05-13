@@ -23,6 +23,7 @@ tokio-tungstenite = "0.21.0"
 url = "2.5.0"
 tokio = { version = "1.37.0", features = ["io-std"] }
 chrono = "0.4.38"
+reqwest = { version = "0.12.4", features = ["json"] }
 
 # metrics
 actix-web-opentelemetry = { version = "0.16.0", features = ["metrics", "metrics-prometheus"] }

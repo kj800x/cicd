@@ -1,5 +1,6 @@
 pub mod prelude {
     pub use crate::db::*;
+    pub use crate::portainer::*;
     pub use crate::resource::*;
     pub use crate::webhooks::*;
 
@@ -29,6 +30,7 @@ pub mod prelude {
 }
 
 mod db;
+mod portainer;
 mod resource;
 mod webhooks;
 
@@ -36,6 +38,12 @@ use futures_util::future;
 use prometheus::Registry;
 
 use crate::prelude::*;
+
+#[derive(Debug, Clone)]
+pub struct PortainerConfig {
+    base: String,
+    api_key: String,
+}
 
 async fn start_http(
     registry: Registry,
@@ -57,6 +65,10 @@ async fn start_http(
                     .build(),
             )
             .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(PortainerConfig {
+                base: std::env::var("PORTAINER_BASE").expect("PORTAINER_BASE must be set"),
+                api_key: std::env::var("PORTAINER_API_KEY").expect("PORTAINER_API_KEY must be set"),
+            }))
             .wrap(middleware::Logger::default())
             // .service(home_page_omnibus)
             // .service(stats_page_omnibus)
@@ -64,8 +76,8 @@ async fn start_http(
             // .service(event_class_create)
             // .service(event_class_update)
             // .service(event_class_delete)
-            // .service(event_class_events)
-            // .service(event_class_latest_event)
+            .service(portainer_endpoints)
+            .service(portainer_endpoint)
             // .service(record_event)
             // .service(delete_event)
             // .service(profile)
