@@ -11,6 +11,18 @@ pub enum BuildStatus {
     Failure,
 }
 
+impl From<String> for BuildStatus {
+    fn from(s: String) -> Self {
+        match s.as_str() {
+            "None" => BuildStatus::None,
+            "Pending" => BuildStatus::Pending,
+            "Success" => BuildStatus::Success,
+            "Failure" => BuildStatus::Failure,
+            _ => BuildStatus::None,
+        }
+    }
+}
+
 impl BuildStatus {
     pub fn of(status: &str, conclusion: &Option<&str>) -> Self {
         match status {
@@ -50,6 +62,12 @@ pub struct Commit {
     pub message: String,
     pub timestamp: i64,
     pub build_status: BuildStatus,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CommitWithRepo {
+    pub commit: Commit,
+    pub repo: Repo,
 }
 
 pub fn migrate(pool: &Pool<SqliteConnectionManager>) -> Result<(), rusqlite::Error> {
@@ -300,301 +318,154 @@ pub async fn set_commit_status(
     Ok(())
 }
 
-//
+pub async fn get_repo(
+    pool: &Pool<SqliteConnectionManager>,
+    owner_name: String,
+    repo_name: String,
+) -> Result<Option<Repo>, Error> {
+    let pool = pool.clone();
+    let conn = web::block(move || pool.get())
+        .await
+        .unwrap()
+        .map_err(error::ErrorInternalServerError)
+        .unwrap();
 
-// pub async fn get_events(
-//     pool: &Pool,
-//     class_id: i64,
-//     user_id: i64,
-// ) -> Result<Vec<EventResult>, Error> {
-//     let pool = pool.clone();
-//     let conn = web::block(move || pool.get())
-//         .await?
-//         .map_err(error::ErrorInternalServerError)?;
+    Ok(web::block(move || {
+        conn.prepare(
+            "SELECT id, name, owner_name, default_branch, private, language FROM git_repo WHERE owner_name = ?1 AND name = ?2 LIMIT 1",
+        )?
+        .query_row([owner_name, repo_name], |row| {
+            Ok(Repo {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                owner_name: row.get(2)?,
+                default_branch: row.get(3)?,
+                private: row.get(4)?,
+                language: row.get(5)?,
+            })
+        })
+        .optional()
+    })
+    .await
+    .unwrap()
+    .map_err(error::ErrorInternalServerError)
+    .unwrap())
+}
 
-//     web::block(move || {
-//         conn.prepare(
-//             "SELECT id, desc, variant, timestamp, event_class_id FROM event WHERE event_class_id = ?1 AND user_id = ?2 ORDER BY timestamp DESC",
-//         )?
-//         .query_map([class_id, user_id], |row| {
-//             Ok(EventResult {
-//                 id: row.get(0)?,
-//                 desc: row.get(1)?,
-//                 variant: row.get::<usize, String>(2)?.try_into().unwrap(),
-//                 timestamp: row.get(3)?,
-//                 class_id: row.get(4)?,
-//             })
-//         })
-//         .and_then(Iterator::collect)
-//     })
-//     .await?
-//     .map_err(error::ErrorInternalServerError)
-// }
+pub async fn get_branch(
+    pool: &Pool<SqliteConnectionManager>,
+    repo_id: i64,
+    branch_name: String,
+) -> Result<Option<Branch>, Error> {
+    let pool = pool.clone();
+    let conn = web::block(move || pool.get())
+        .await
+        .unwrap()
+        .map_err(error::ErrorInternalServerError)
+        .unwrap();
 
-// pub async fn get_class(
-//     pool: &Pool,
-//     class_id: i64,
-//     user_id: i64,
-// ) -> Result<Option<ClassResult>, Error> {
-//     let pool = pool.clone();
-//     let conn = web::block(move || pool.get())
-//         .await?
-//         .map_err(error::ErrorInternalServerError)?;
+    Ok(web::block(move || {
+        conn.prepare(
+            "SELECT id, name, head_commit_sha, repo_id FROM git_branch WHERE name = ?1 AND repo_id = ?2 LIMIT 1",
+        )?
+        .query_row(params![branch_name, repo_id], |row| {
+            Ok(Branch {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                head_commit_sha: row.get(2)?,
+                repo_id: row.get(3)?,
+            })
+        })
+        .optional()
+    })
+    .await
+    .unwrap()
+    .map_err(error::ErrorInternalServerError).unwrap())
+}
 
-//     web::block(move || {
-//         conn.prepare("SELECT id, name FROM event_class WHERE id = ?1 AND user_id = ?2")?
-//             .query_row([class_id, user_id], |row| {
-//                 Ok(ClassResult {
-//                     id: row.get(0)?,
-//                     name: row.get(1)?,
-//                 })
-//             })
-//             .optional()
-//     })
-//     .await?
-//     .map_err(error::ErrorInternalServerError)
-// }
+pub async fn get_commit(
+    pool: &Pool<SqliteConnectionManager>,
+    repo_id: i64,
+    commit_sha: String,
+) -> Result<Option<Commit>, Error> {
+    let pool = pool.clone();
+    let conn = web::block(move || pool.get())
+        .await
+        .unwrap()
+        .map_err(error::ErrorInternalServerError)
+        .unwrap();
 
-// pub async fn get_latest_event(
-//     pool: &Pool,
-//     class_id: i64,
-//     user_id: i64,
-// ) -> Result<Option<EventResult>, Error> {
-//     let pool = pool.clone();
-//     let conn = web::block(move || pool.get())
-//         .await?
-//         .map_err(error::ErrorInternalServerError)?;
+    Ok(web::block(move || {
+        conn.prepare(
+            "SELECT id, sha, message, timestamp, build_status, repo_id FROM git_commit WHERE sha = ?1 AND repo_id = ?2 LIMIT 1",
+        )?
+        .query_row(params![commit_sha, repo_id], |row| {
+            Ok(Commit {
+                id: row.get(0)?,
+                sha: row.get(1)?,
+                message: row.get(2)?,
+                timestamp: row.get(3)?,
+                build_status: row.get::<usize, String>(4)?.into(),
+            })
+        })
+        .optional()
+    })
+    .await
+    .unwrap()
+    .map_err(error::ErrorInternalServerError)
+    .unwrap())
+}
 
-//     web::block(move || {
-//         conn.prepare(
-//             "SELECT id, desc, timestamp, event_class_id FROM event WHERE event_class_id = ?1 AND user_id = ?2 AND variant = 'positive' ORDER BY timestamp DESC LIMIT 1",
-//         )?
-//         .query_row([class_id, user_id], |row| {
-//             Ok(EventResult {
-//                 id: row.get(0)?,
-//                 desc: row.get(1)?,
-//                 variant: EventVariant::Positive,
-//                 timestamp: row.get(2)?,
-//                 class_id: row.get(3)?,
-//             })
-//         })
-//         .optional()
-//     })
-//     .await?
-//     .map_err(error::ErrorInternalServerError)
-// }
+pub async fn get_commits_since(
+    pool: &Pool<SqliteConnectionManager>,
+    since: i64,
+) -> Result<Vec<CommitWithRepo>, Error> {
+    let pool = pool.clone();
+    let conn = web::block(move || pool.get())
+        .await
+        .unwrap()
+        .map_err(error::ErrorInternalServerError)
+        .unwrap();
 
-// pub async fn get_classes(pool: &Pool, user_id: i64) -> Result<Vec<ClassResult>, Error> {
-//     let pool = pool.clone();
-//     let conn = web::block(move || pool.get())
-//         .await?
-//         .map_err(error::ErrorInternalServerError)?;
+    web::block(move || {
+        {
+        let mut stmt = conn.prepare(
+            "SELECT id, sha, message, timestamp, build_status, repo_id FROM git_commit WHERE timestamp > ?1 ORDER BY timestamp DESC",
+        ).unwrap();
+        let mut rows = stmt.query(params![since]).unwrap();
+        let mut commits = Vec::new();
+        while let Some(row) = rows.next().unwrap() {
+            let repo_id = row.get::<usize, i64>(5).unwrap();
 
-//     web::block(move || {
-//         conn.prepare("SELECT id, name FROM event_class WHERE deleted_at IS NULL AND user_id = ?1")?
-//             .query_map([user_id], |row| {
-//                 Ok(ClassResult {
-//                     id: row.get(0)?,
-//                     name: row.get(1)?,
-//                 })
-//             })
-//             .and_then(Iterator::collect)
-//     })
-//     .await?
-//     .map_err(error::ErrorInternalServerError)
-// }
+            let repo = conn.prepare(
+                "SELECT id, name, owner_name, default_branch, private, language FROM git_repo WHERE id = ?1 LIMIT 1",
+            ).unwrap()
+            .query_row(params![repo_id], |row| {
+                Ok(Repo {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    owner_name: row.get(2)?,
+                    default_branch: row.get(3)?,
+                    private: row.get(4)?,
+                    language: row.get(5)?,
+                })
+            })
+            .optional().unwrap().unwrap();
 
-// #[derive(Debug, Serialize, Deserialize)]
-// pub struct CreateClass {
-//     name: String,
-// }
+            commits.push(CommitWithRepo {
+                repo,
+                commit: Commit {
+                    id: row.get(0).unwrap(),
+                    sha: row.get(1).unwrap(),
+                    message: row.get(2).unwrap(),
+                    timestamp: row.get(3).unwrap(),
+                    build_status: row.get::<usize, String>(4).unwrap().into(),
+                },
+        });
+        }
 
-// pub async fn insert_class(
-//     pool: &Pool,
-//     create_class: CreateClass,
-//     user_id: i64,
-// ) -> Result<ClassResult, Error> {
-//     let pool = pool.clone();
-//     let conn = web::block(move || pool.get())
-//         .await?
-//         .map_err(error::ErrorInternalServerError)?;
-//     let name1 = create_class.name.clone();
-
-//     let id = web::block(move || {
-//         conn.prepare("INSERT INTO event_class (name, user_id) VALUES (?1, ?2)")?
-//             .insert(params![name1, user_id])
-//     })
-//     .await?
-//     .map_err(error::ErrorInternalServerError)?;
-
-//     Ok(ClassResult {
-//         id,
-//         name: create_class.name,
-//     })
-// }
-
-// pub async fn update_class(
-//     pool: &Pool,
-//     id: i64,
-//     create_class: CreateClass,
-//     user_id: i64,
-// ) -> Result<ClassResult, Error> {
-//     let pool = pool.clone();
-//     let pool2 = pool.clone();
-//     let conn1 = web::block(move || pool.get())
-//         .await?
-//         .map_err(error::ErrorInternalServerError)?;
-//     let conn2 = web::block(move || pool2.get())
-//         .await?
-//         .map_err(error::ErrorInternalServerError)?;
-
-//     web::block(move || {
-//         conn1
-//             .prepare("UPDATE event_class SET name = ?1 WHERE id = ?2 AND user_id = ?3")?
-//             .execute(params![create_class.name, id, user_id])
-//     })
-//     .await?
-//     .map_err(error::ErrorInternalServerError)?;
-
-//     web::block(move || {
-//         conn2
-//             .prepare("SELECT id, name FROM event_class WHERE id = ?1 AND user_id = ?2")?
-//             .query_row([id, user_id], |row| {
-//                 Ok(ClassResult {
-//                     id: row.get(0)?,
-//                     name: row.get(1)?,
-//                 })
-//             })
-//     })
-//     .await?
-//     .map_err(error::ErrorInternalServerError)
-// }
-
-// pub async fn delete_class(pool: &Pool, id: i64, user_id: i64) -> Result<(), Error> {
-//     let pool = pool.clone();
-//     let conn = web::block(move || pool.get())
-//         .await?
-//         .map_err(error::ErrorInternalServerError)?;
-
-//     web::block(move || -> Result<(), rusqlite::Error> {
-//         conn.prepare("UPDATE event_class SET deleted_at = ?1 WHERE id = ?2 AND user_id = ?3")?
-//             .execute(params![
-//                 SystemTime::now()
-//                     .duration_since(UNIX_EPOCH)
-//                     .expect("Time went backwards")
-//                     .as_secs(),
-//                 id,
-//                 user_id
-//             ])?;
-
-//         Ok(())
-//     })
-//     .await?
-//     .map_err(error::ErrorInternalServerError)?;
-
-//     Ok(())
-// }
-
-// pub async fn db_delete_event(
-//     pool: &Pool,
-//     class_id: i64,
-//     id: i64,
-//     user_id: i64,
-// ) -> Result<(), Error> {
-//     let pool = pool.clone();
-//     let conn = web::block(move || pool.get())
-//         .await?
-//         .map_err(error::ErrorInternalServerError)?;
-
-//     web::block(move || -> Result<(), rusqlite::Error> {
-//         conn.prepare("DELETE FROM Event WHERE id = ?1 AND user_id = ?2 AND event_class_id = ?3")?
-//             .execute(params![id, user_id, class_id])?;
-
-//         Ok(())
-//     })
-//     .await?
-//     .map_err(error::ErrorInternalServerError)?;
-
-//     Ok(())
-// }
-
-// #[derive(Debug, Serialize, Deserialize)]
-// pub struct CreateEvent {
-//     desc: Option<String>,
-//     variant: EventVariant,
-//     timestamp: i64,
-// }
-
-// pub async fn insert_event(
-//     pool: &Pool,
-//     class_id: i64,
-//     create_event: CreateEvent,
-//     user_id: i64,
-// ) -> Result<EventResult, Error> {
-//     let pool = pool.clone();
-//     let conn = web::block(move || pool.get())
-//         .await?
-//         .map_err(error::ErrorInternalServerError)?;
-//     let desc1 = create_event.desc.clone();
-
-//     let id =
-//         web::block(move || {
-//             conn.prepare(
-//             "INSERT INTO event (desc, timestamp, variant, event_class_id, user_id) VALUES (?1, ?2, ?3, ?4, ?5)",
-//             )?
-//         .insert(params![create_event.desc, create_event.timestamp, create_event.variant.as_string(), class_id, user_id])
-//         })
-//         .await?
-//         .map_err(error::ErrorInternalServerError)?;
-
-//     Ok(EventResult {
-//         id,
-//         desc: desc1,
-//         variant: create_event.variant,
-//         timestamp: create_event.timestamp,
-//         class_id,
-//     })
-// }
-
-// pub async fn fetch_auth_entry(pool: &Pool, username: String) -> Result<Option<AuthRow>, Error> {
-//     let pool = pool.clone();
-//     let conn = web::block(move || pool.get())
-//         .await?
-//         .map_err(error::ErrorInternalServerError)?;
-
-//     web::block(move || {
-//         conn.prepare("SELECT id, username, name, hash FROM user WHERE username = ?1")?
-//             .query_row([username], |row| {
-//                 Ok(AuthRow {
-//                     id: row.get(0)?,
-//                     username: row.get(1)?,
-//                     name: row.get(2)?,
-//                     hash: row.get(3)?,
-//                 })
-//             })
-//             .optional()
-//     })
-//     .await?
-//     .map_err(error::ErrorInternalServerError)
-// }
-
-// pub async fn fetch_profile(pool: &Pool, user_id: i64) -> Result<Option<UserFacingAuthRow>, Error> {
-//     let pool = pool.clone();
-//     let conn = web::block(move || pool.get())
-//         .await?
-//         .map_err(error::ErrorInternalServerError)?;
-
-//     web::block(move || {
-//         conn.prepare("SELECT id, username, name FROM user WHERE id = ?1")?
-//             .query_row([user_id], |row| {
-//                 Ok(UserFacingAuthRow {
-//                     id: row.get(0)?,
-//                     username: row.get(1)?,
-//                     name: row.get(2)?,
-//                 })
-//             })
-//             .optional()
-//     })
-//     .await?
-//     .map_err(error::ErrorInternalServerError)
-// }
+        Ok(commits)
+        }
+    })
+    .await.unwrap()
+}

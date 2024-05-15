@@ -2,29 +2,31 @@
 // /api/endpoints
 // /api/endpoints/2
 
+use async_graphql::SimpleObject;
+
 use crate::{prelude::*, PortainerConfig};
 use std::collections::HashMap;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone, SimpleObject)]
 pub struct Container {
     #[serde(rename = "Id")]
-    id: String,
+    pub id: String,
     #[serde(rename = "Names")]
-    names: Vec<String>,
+    pub names: Vec<String>,
     #[serde(rename = "Image")]
-    image: String,
+    pub image: String,
     #[serde(rename = "ImageID")]
-    image_id: String,
+    pub image_id: String,
     #[serde(rename = "Command")]
     command: String,
     #[serde(rename = "Created")]
-    created: u64,
+    pub created: u64,
     // #[serde(rename = "Ports")]
     // ports: Vec<Port>,
     #[serde(rename = "Labels")]
-    labels: Option<HashMap<String, String>>,
+    pub labels: Option<HashMap<String, String>>,
     #[serde(rename = "State")]
-    state: String,
+    pub state: String,
     #[serde(rename = "Status")]
     status: String,
     // #[serde(rename = "HostConfig")]
@@ -42,9 +44,9 @@ pub struct Image {
     #[serde(rename = "Created")]
     created: u64,
     #[serde(rename = "Id")]
-    id: String,
+    pub id: String,
     #[serde(rename = "Labels")]
-    labels: Option<HashMap<String, String>>,
+    pub labels: Option<HashMap<String, String>>,
     #[serde(rename = "ParentId")]
     parent_id: String,
     #[serde(rename = "RepoDigests")]
@@ -62,13 +64,13 @@ pub struct Image {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DockerSnapshotRaw {
     #[serde(rename = "Containers")]
-    containers: Vec<Container>,
+    pub containers: Vec<Container>,
     // #[serde(rename = "Volumes")]
     // volumes: Vec<Volume>,
     // #[serde(rename = "Networks")]
     // networks: Vec<Network>,
     #[serde(rename = "Images")]
-    images: Vec<Image>,
+    pub images: Vec<Image>,
     // #[serde(rename = "Info")]
     // info: Info,
     // #[serde(rename = "Version")]
@@ -110,7 +112,7 @@ pub struct DockerSnapshot {
     #[serde(rename = "GpuUseList")]
     gpu_use_list: Vec<u64>,
     #[serde(rename = "DockerSnapshotRaw")]
-    docker_snapshot_raw: DockerSnapshotRaw,
+    pub docker_snapshot_raw: DockerSnapshotRaw,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -138,15 +140,15 @@ pub struct Endpoint {
     #[serde(rename = "Status")]
     status: u64,
     #[serde(rename = "Snapshots")]
-    snapshots: Vec<DockerSnapshot>,
+    pub snapshots: Vec<DockerSnapshot>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EndpointBrief {
     #[serde(rename = "Id")]
-    id: u64,
+    pub id: u64,
     #[serde(rename = "Name")]
-    name: String,
+    pub name: String,
     #[serde(rename = "Type")]
     type_: u64,
     #[serde(rename = "URL")]
@@ -154,19 +156,19 @@ pub struct EndpointBrief {
     #[serde(rename = "GroupId")]
     group_id: u64,
     #[serde(rename = "PublicURL")]
-    public_url: String,
+    pub public_url: String,
     #[serde(rename = "Status")]
     status: u64,
 }
 
 pub async fn get_endpoint(
     id: u64,
-    portainer_config: PortainerConfig,
+    portainer_config: &PortainerConfig,
 ) -> Result<Endpoint, reqwest::Error> {
     let client = reqwest::Client::new();
     let res = client
         .get(format!("{}api/endpoints/{}", portainer_config.base, id))
-        .header("X-API-Key", portainer_config.api_key)
+        .header("X-API-Key", &portainer_config.api_key)
         .send()
         .await?;
     let endpoint: Endpoint = res.json().await?;
@@ -174,12 +176,12 @@ pub async fn get_endpoint(
 }
 
 pub async fn get_endpoints(
-    portainer_config: PortainerConfig,
+    portainer_config: &PortainerConfig,
 ) -> Result<Vec<EndpointBrief>, reqwest::Error> {
     let client = reqwest::Client::new();
     let res = client
         .get(format!("{}api/endpoints", portainer_config.base))
-        .header("X-API-Key", portainer_config.api_key)
+        .header("X-API-Key", &portainer_config.api_key)
         .send()
         .await?;
     let endpoints: Vec<EndpointBrief> = res.json().await?;

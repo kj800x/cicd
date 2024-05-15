@@ -212,7 +212,7 @@ use crate::{prelude::*, PortainerConfig};
 
 #[get("/api/portainer/endpoints")]
 async fn portainer_endpoints(portainer_config: web::Data<PortainerConfig>) -> impl Responder {
-    let result = crate::portainer::get_endpoints((**portainer_config).clone())
+    let result = crate::portainer::get_endpoints(&**portainer_config)
         .await
         .unwrap();
 
@@ -224,7 +224,7 @@ async fn portainer_endpoint(
     id: web::Path<u64>,
     portainer_config: web::Data<PortainerConfig>,
 ) -> impl Responder {
-    let result = crate::portainer::get_endpoint(id.into_inner(), (**portainer_config).clone())
+    let result = crate::portainer::get_endpoint(id.into_inner(), &**portainer_config)
         .await
         .unwrap();
 

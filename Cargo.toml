@@ -24,6 +24,9 @@ url = "2.5.0"
 tokio = { version = "1.37.0", features = ["io-std"] }
 chrono = "0.4.38"
 reqwest = { version = "0.12.4", features = ["json"] }
+async-graphql = "7.0.5"
+async-graphql-actix-web = "7.0.5"
+regex = "1.10.4"
 
 # metrics
 actix-web-opentelemetry = { version = "0.16.0", features = ["metrics", "metrics-prometheus"] }

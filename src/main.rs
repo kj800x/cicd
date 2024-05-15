@@ -1,5 +1,6 @@
 pub mod prelude {
     pub use crate::db::*;
+    pub use crate::graphql::*;
     pub use crate::portainer::*;
     pub use crate::resource::*;
     pub use crate::webhooks::*;
@@ -22,6 +23,9 @@ pub mod prelude {
     pub use serde::{Deserialize, Serialize};
 
     pub use actix_web::Error;
+    pub use actix_web::{guard, Result};
+    pub use async_graphql::{http::GraphiQLSource, EmptyMutation, EmptySubscription, Schema};
+    pub use async_graphql_actix_web::GraphQL;
     pub use r2d2::PooledConnection;
     pub use rusqlite::Connection;
     pub use rusqlite::{params, OptionalExtension};
@@ -30,6 +34,7 @@ pub mod prelude {
 }
 
 mod db;
+mod graphql;
 mod portainer;
 mod resource;
 mod webhooks;
@@ -52,6 +57,16 @@ async fn start_http(
     log::info!("Starting HTTP server at http://localhost:8080/api");
 
     HttpServer::new(move || {
+        let pconf = PortainerConfig {
+            base: std::env::var("PORTAINER_BASE").expect("PORTAINER_BASE must be set"),
+            api_key: std::env::var("PORTAINER_API_KEY").expect("PORTAINER_API_KEY must be set"),
+        };
+
+        let schema = Schema::build(QueryRoot, EmptyMutation, EmptySubscription)
+            .data(pconf.clone())
+            .data(pool.clone())
+            .finish();
+
         App::new()
             .wrap(RequestTracing::new())
             .wrap(RequestMetrics::default())
@@ -65,10 +80,7 @@ async fn start_http(
                     .build(),
             )
             .app_data(web::Data::new(pool.clone()))
-            .app_data(web::Data::new(PortainerConfig {
-                base: std::env::var("PORTAINER_BASE").expect("PORTAINER_BASE must be set"),
-                api_key: std::env::var("PORTAINER_API_KEY").expect("PORTAINER_API_KEY must be set"),
-            }))
+            .app_data(web::Data::new(pconf))
             .wrap(middleware::Logger::default())
             // .service(home_page_omnibus)
             // .service(stats_page_omnibus)
@@ -85,6 +97,16 @@ async fn start_http(
             // .service(logout)
             // .service(register)
             .route("/api/hey", web::get().to(manual_hello))
+            .service(
+                web::resource("/api/graphql")
+                    .guard(guard::Post())
+                    .to(GraphQL::new(schema)),
+            )
+            .service(
+                web::resource("/api/graphql")
+                    .guard(guard::Get())
+                    .to(index_graphiql),
+            )
     })
     .bind(("127.0.0.1", 8080))?
     .run()
