@@ -120,6 +120,23 @@ impl DockerContainer {
         maybe_first_party.unwrap_or(false)
     }
 
+    async fn is_repo_tracked<'a>(&self, ctx: &Context<'a>) -> bool {
+        let maybe_repo_tracked: Option<bool> = (|| -> Option<bool> {
+            let pool = ctx
+                .data_unchecked::<Pool<SqliteConnectionManager>>()
+                .clone();
+            let conn = pool.get().unwrap();
+            let repo_coords = self.repo_coords()?;
+            Some(
+                get_repo(&conn, repo_coords.owner_name, repo_coords.repo_name)
+                    .unwrap()
+                    .is_some(),
+            )
+        })();
+
+        maybe_repo_tracked.unwrap_or(false)
+    }
+
     pub async fn latest_build<'a>(&self, ctx: &Context<'a>) -> Option<TrackedBuild> {
         let pool = ctx
             .data_unchecked::<Pool<SqliteConnectionManager>>()
