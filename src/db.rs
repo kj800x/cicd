@@ -1,6 +1,5 @@
-use rusqlite::ffi::Error;
-
 use crate::prelude::*;
+use rusqlite::ffi::Error;
 use serde_variant::to_variant_name;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -70,9 +69,7 @@ pub struct CommitWithRepo {
     pub repo: Repo,
 }
 
-pub fn migrate(
-    mut conn: &mut PooledConnection<SqliteConnectionManager>,
-) -> Result<(), rusqlite::Error> {
+pub fn migrate(mut conn: PooledConnection<SqliteConnectionManager>) -> Result<(), rusqlite::Error> {
     let migrations: Migrations = Migrations::new(vec![
         M::up(
             "CREATE TABLE git_repo (
@@ -122,23 +119,22 @@ struct ExistenceResult {
     id: u64,
 }
 
-pub async fn upsert_repo(
+pub fn upsert_repo(
     repo: &crate::webhooks::Repository,
     conn: &PooledConnection<SqliteConnectionManager>,
 ) -> Result<u64, Error> {
     let repo = repo.clone();
 
-    web::block(move || {
-        let existing = conn
-            .prepare("SELECT id FROM git_repo WHERE id = ?1")
-            .unwrap()
-            .query_row([repo.id], |row| Ok(ExistenceResult { id: row.get(0)? }))
-            .optional()
-            .unwrap();
+    let existing = conn
+        .prepare("SELECT id FROM git_repo WHERE id = ?1")
+        .unwrap()
+        .query_row([repo.id], |row| Ok(ExistenceResult { id: row.get(0)? }))
+        .optional()
+        .unwrap();
 
-        match existing {
-            Some(_) => {
-                conn.prepare(
+    match existing {
+        Some(_) => {
+            conn.prepare(
                     "UPDATE git_repo SET name = ?2, owner_name = ?3, default_branch = ?4, private = ?5, language = ?6 WHERE id = ?1",
                 ).unwrap()
                 .execute(params![
@@ -150,10 +146,10 @@ pub async fn upsert_repo(
                     repo.language,
                 ]).unwrap();
 
-                Ok(repo.id)
-            },
-            None => {
-                conn.prepare(
+            Ok(repo.id)
+        }
+        None => {
+            conn.prepare(
                     "INSERT INTO git_repo (id, name, owner_name, default_branch, private, language) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 ).unwrap()
                 .execute(params![
@@ -165,34 +161,30 @@ pub async fn upsert_repo(
                     repo.language,
                 ]).unwrap();
 
-                Ok(repo.id)
-            },
+            Ok(repo.id)
         }
-    })
-    .await.unwrap()
-    // .map_err(error::ErrorInternalServerError)
+    }
 }
 
-pub async fn upsert_commit(
+pub fn upsert_commit(
     commit: &crate::webhooks::GhCommit,
     repo_id: u64,
     conn: &PooledConnection<SqliteConnectionManager>,
 ) -> Result<u64, Error> {
     let commit = commit.clone();
 
-    web::block(move || {
-        let existing = conn
-            .prepare("SELECT id FROM git_commit WHERE sha = ?1 AND repo_id = ?2")
-            .unwrap()
-            .query_row(params![commit.id, repo_id], |row| {
-                Ok(ExistenceResult { id: row.get(0)? })
-            })
-            .optional()
-            .unwrap();
+    let existing = conn
+        .prepare("SELECT id FROM git_commit WHERE sha = ?1 AND repo_id = ?2")
+        .unwrap()
+        .query_row(params![commit.id, repo_id], |row| {
+            Ok(ExistenceResult { id: row.get(0)? })
+        })
+        .optional()
+        .unwrap();
 
-        match existing {
-            Some(ExistenceResult { id }) => {
-                conn.prepare(
+    match existing {
+        Some(ExistenceResult { id }) => {
+            conn.prepare(
                     "UPDATE git_commit SET message = ?2, timestamp = ?3 WHERE sha = ?1 AND repo_id = ?4",
                 ).unwrap().execute(params![
                     commit.id,
@@ -201,29 +193,29 @@ pub async fn upsert_commit(
                     repo_id,
                 ]).unwrap();
 
-                Ok(id)
-            }
-            None => {
-                conn.prepare("INSERT INTO git_commit (sha, message, timestamp, repo_id) VALUES (?1, ?2, ?3, ?4)")
-                    .unwrap()
-                    .execute(params![
-                        commit.id,
-                        commit.message,
-                        DateTime::parse_from_rfc3339(&commit.timestamp).unwrap().timestamp_millis(),
-                        repo_id,
-                    ])
-                    .unwrap();
-
-                Ok(conn.last_insert_rowid() as u64)
-            }
+            Ok(id)
         }
-    })
-    .await
-    .unwrap()
-    // .map_err(error::ErrorInternalServerError)
+        None => {
+            conn.prepare(
+                "INSERT INTO git_commit (sha, message, timestamp, repo_id) VALUES (?1, ?2, ?3, ?4)",
+            )
+            .unwrap()
+            .execute(params![
+                commit.id,
+                commit.message,
+                DateTime::parse_from_rfc3339(&commit.timestamp)
+                    .unwrap()
+                    .timestamp_millis(),
+                repo_id,
+            ])
+            .unwrap();
+
+            Ok(conn.last_insert_rowid() as u64)
+        }
+    }
 }
 
-pub async fn upsert_branch(
+pub fn upsert_branch(
     name: &str,
     sha: &str,
     repo_id: u64,
@@ -232,57 +224,40 @@ pub async fn upsert_branch(
     let name = name.to_string();
     let sha = sha.to_string();
 
-    web::block(move || {
-        let existing = conn
-            .prepare("SELECT id FROM git_branch WHERE name = ?1 AND repo_id = ?2")
+    let existing = conn
+        .prepare("SELECT id FROM git_branch WHERE name = ?1 AND repo_id = ?2")
+        .unwrap()
+        .query_row(params![name, repo_id], |row| {
+            Ok(ExistenceResult { id: row.get(0)? })
+        })
+        .optional()
+        .unwrap();
+
+    match existing {
+        Some(ExistenceResult { id }) => {
+            conn.prepare(
+                "UPDATE git_branch SET head_commit_sha = ?3 WHERE name = ?1 AND repo_id = ?2",
+            )
             .unwrap()
-            .query_row(params![name, repo_id], |row| {
-                Ok(ExistenceResult { id: row.get(0)? })
-            })
-            .optional()
+            .execute(params![name, repo_id, sha])
             .unwrap();
 
-        match existing {
-            Some(ExistenceResult { id }) => {
-                conn.prepare(
-                    "UPDATE git_branch SET head_commit_sha = ?3 WHERE name = ?1 AND repo_id = ?2",
-                )
-                .unwrap()
-                .execute(params![name, repo_id, sha])
-                .unwrap();
-
-                Ok(id)
-            }
-            None => {
-                conn.prepare(
-                    "INSERT INTO git_branch (name, repo_id, head_commit_sha) VALUES (?1, ?2, ?3)",
-                )
-                .unwrap()
-                .execute(params![name, repo_id, sha])
-                .unwrap();
-
-                Ok(conn.last_insert_rowid() as u64)
-            }
+            Ok(id)
         }
-    })
-    .await
-    .unwrap()
-    // .map_err(error::ErrorInternalServerError)
+        None => {
+            conn.prepare(
+                "INSERT INTO git_branch (name, repo_id, head_commit_sha) VALUES (?1, ?2, ?3)",
+            )
+            .unwrap()
+            .execute(params![name, repo_id, sha])
+            .unwrap();
+
+            Ok(conn.last_insert_rowid() as u64)
+        }
+    }
 }
 
-pub async fn acquire(
-    pool: &Pool<SqliteConnectionManager>,
-) -> PooledConnection<SqliteConnectionManager> {
-    let pool = pool.clone();
-    let conn = web::block(move || pool.get())
-        .await
-        .unwrap()
-        .map_err(error::ErrorInternalServerError)
-        .unwrap();
-    return conn;
-}
-
-pub async fn set_commit_status(
+pub fn set_commit_status(
     sha: &str,
     build_status: BuildStatus,
     repo_id: u64,
@@ -290,24 +265,19 @@ pub async fn set_commit_status(
 ) -> Result<(), Error> {
     let sha = sha.to_string();
 
-    web::block(move || {
-        conn.prepare("UPDATE git_commit SET build_status = ?1 WHERE sha = ?2 AND repo_id = ?3")
-            .unwrap()
-            .execute(params![
-                to_variant_name(&build_status).unwrap(),
-                sha,
-                repo_id
-            ])
-            .unwrap();
-    })
-    .await
-    .unwrap();
-    // .map_err(error::ErrorInternalServerError)
+    conn.prepare("UPDATE git_commit SET build_status = ?1 WHERE sha = ?2 AND repo_id = ?3")
+        .unwrap()
+        .execute(params![
+            to_variant_name(&build_status).unwrap(),
+            sha,
+            repo_id
+        ])
+        .unwrap();
 
     Ok(())
 }
 
-pub async fn get_repo(
+pub fn get_repo(
     conn: &PooledConnection<SqliteConnectionManager>,
     owner_name: String,
     repo_name: String,
@@ -330,7 +300,7 @@ pub async fn get_repo(
     .unwrap())
 }
 
-pub async fn get_branch(
+pub fn get_branch(
     conn: &PooledConnection<SqliteConnectionManager>,
     repo_id: i64,
     branch_name: String,
@@ -350,7 +320,7 @@ pub async fn get_branch(
     .optional().unwrap())
 }
 
-pub async fn get_commit(
+pub fn get_commit(
     conn: &PooledConnection<SqliteConnectionManager>,
     repo_id: i64,
     commit_sha: String,
@@ -370,7 +340,7 @@ pub async fn get_commit(
     .optional().unwrap())
 }
 
-pub async fn get_commits_since(
+pub fn get_commits_since(
     conn: &PooledConnection<SqliteConnectionManager>,
     since: i64,
 ) -> Result<Vec<CommitWithRepo>, Error> {
