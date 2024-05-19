@@ -1,9 +1,13 @@
-use std::collections::HashMap;
-
 use crate::{prelude::*, PortainerConfig};
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+};
+use tokio::runtime::Handle;
 
 use async_graphql::{Context, Object, Result, SimpleObject};
 use serde_variant::to_variant_name;
+use tokio::{sync::Mutex, task::spawn_blocking};
 
 #[derive(Clone, SimpleObject)]
 pub struct TrackedBuild {
@@ -47,6 +51,34 @@ pub struct DockerContainer {
     state: String,
 }
 
+struct RepoCoords {
+    owner_name: String,
+    repo_name: String,
+}
+
+impl DockerContainer {
+    fn repo_coords(&self) -> Option<RepoCoords> {
+        let repo = self
+            .image
+            .clone()
+            .labels?
+            .get("org.opencontainers.image.source")?
+            .clone();
+
+        let re =
+            regex::Regex::new(r"^https?://github.com/(?P<owner_name>[^/]+)/(?P<repo_name>[^/]+)$")
+                .unwrap();
+        let Some(caps) = re.captures(&repo) else {
+            return None;
+        };
+
+        Some(RepoCoords {
+            owner_name: caps["owner_name"].to_string(),
+            repo_name: caps["repo_name"].to_string(),
+        })
+    }
+}
+
 #[Object]
 impl DockerContainer {
     async fn id(&self) -> &str {
@@ -77,90 +109,73 @@ impl DockerContainer {
         &self.state
     }
 
-    pub async fn latest_build<'a>(&self, ctx: &Context<'a>) -> Option<TrackedBuild> {
-        let pool = ctx.data_unchecked::<Pool<SqliteConnectionManager>>();
+    async fn is_first_party(&self) -> bool {
+        let maybe_first_party: Option<bool> = (|| -> Option<bool> {
+            let repo_coords = self.repo_coords()?;
+            // TODO: This shouldn't be checked in the resolver, should be configured as a Data on startup
+            let first_party_owners = std::env::var("FIRST_PARTY_OWNERS").ok()?;
+            let first_party_owners: Vec<String> = first_party_owners
+                .split(',')
+                .map(|x| x.to_string())
+                .collect();
 
-        let repo = self
-            .image
-            .clone()
-            .labels?
-            .get("org.opencontainers.image.source")?
-            .clone();
+            Some(first_party_owners.contains(&repo_coords.owner_name))
+        })();
 
-        // Try to extract github user and repo using regex:
-        // https://github.com/miniflux/v2 becomes ("miniflux", "v2")
-        let re =
-            regex::Regex::new(r"^https?://github.com/(?P<owner_name>[^/]+)/(?P<repo_name>[^/]+)$")
-                .unwrap();
-        let Some(caps) = re.captures(&repo) else {
-            return None;
-        };
-        let repo = get_repo(
-            pool,
-            caps["owner_name"].to_string(),
-            caps["repo_name"].to_string(),
-        )
-        .await
-        .ok()??;
-        let branch = get_branch(pool, repo.id, repo.default_branch)
-            .await
-            .ok()??;
-        let commit = get_commit(pool, repo.id, branch.head_commit_sha)
-            .await
-            .ok()??;
-
-        Some(TrackedBuild {
-            id: commit.id,
-            sha: commit.sha,
-            message: commit.message,
-            timestamp: commit.timestamp,
-            build_status: Some(to_variant_name(&commit.build_status).unwrap().to_string()),
-        })
+        maybe_first_party.unwrap_or(false)
     }
 
-    pub async fn current_build<'a>(&self, ctx: &Context<'a>) -> Option<TrackedBuild> {
-        let pool = ctx.data_unchecked::<Pool<SqliteConnectionManager>>();
+    // pub async fn latest_build<'a>(&self, ctx: &Context<'a>) -> Option<TrackedBuild> {
+    //     let conn = Arc::new(Mutex::new(
+    //         acquire(ctx.data_unchecked::<Pool<SqliteConnectionManager>>()).await,
+    //     ));
+    //     let repo_coords = self.repo_coords()?;
+    //     let repo = get_repo(
+    //         &*conn.lock().await,
+    //         repo_coords.owner_name,
+    //         repo_coords.repo_name,
+    //     )
+    //     .await
+    //     .ok()??;
+    //     let branch = get_branch(&*conn.lock().await, repo.id, repo.default_branch)
+    //         .await
+    //         .ok()??;
+    //     let commit = get_commit(&*conn.lock().await, repo.id, branch.head_commit_sha)
+    //         .await
+    //         .ok()??;
 
-        let repo = self
-            .image
-            .clone()
-            .labels?
-            .get("org.opencontainers.image.source")?
-            .clone();
+    //     Some(TrackedBuild {
+    //         id: commit.id,
+    //         sha: commit.sha,
+    //         message: commit.message,
+    //         timestamp: commit.timestamp,
+    //         build_status: Some(to_variant_name(&commit.build_status).unwrap().to_string()),
+    //     })
+    // }
 
-        // Try to extract github user and repo using regex:
-        // https://github.com/miniflux/v2 becomes ("miniflux", "v2")
-        let re =
-            regex::Regex::new(r"^https?://github.com/(?P<owner_name>[^/]+)/(?P<repo_name>[^/]+)$")
-                .unwrap();
-        let Some(caps) = re.captures(&repo) else {
-            return None;
-        };
-        let repo = get_repo(
-            pool,
-            caps["owner_name"].to_string(),
-            caps["repo_name"].to_string(),
-        )
-        .await
-        .ok()??;
+    // pub async fn current_build<'a>(&self, ctx: &Context<'a>) -> Option<TrackedBuild> {
+    //     let pool = ctx.data_unchecked::<Pool<SqliteConnectionManager>>();
+    //     let conn = acquire(pool).await;
+    //     let repo_coords = self.repo_coords()?;
+    //     let repo = get_repo(&conn, repo_coords.owner_name, repo_coords.repo_name)
+    //         .await
+    //         .ok()??;
+    //     let sha = self
+    //         .image
+    //         .clone()
+    //         .labels?
+    //         .get("org.opencontainers.image.revision")?
+    //         .clone();
+    //     let commit = get_commit(&conn, repo.id, sha).await.ok()??;
 
-        let sha = self
-            .image
-            .clone()
-            .labels?
-            .get("org.opencontainers.image.revision")?
-            .clone();
-
-        let commit = get_commit(pool, repo.id, sha).await.ok()??;
-
-        Some(TrackedBuild {
-            id: commit.id,
-            sha: commit.sha,
-            message: commit.message,
-            timestamp: commit.timestamp,
-            build_status: Some(to_variant_name(&commit.build_status).unwrap().to_string()),
-        })
-    }
+    //     Some(TrackedBuild {
+    //         id: commit.id,
+    //         sha: commit.sha,
+    //         message: commit.message,
+    //         timestamp: commit.timestamp,
+    //         build_status: Some(to_variant_name(&commit.build_status).unwrap().to_string()),
+    //     })
+    // }
 }
 
 #[Object]
@@ -189,11 +204,8 @@ impl Machine {
                     .containers
                     .clone()
                     .into_iter()
-                    .map(|x| DockerContainer {
-                        id: x.id,
-                        name: x.names.get(0).unwrap().trim_start_matches("/").to_string(),
-                        image_descriptor: x.image,
-                        image: snapshot_raw
+                    .map(|x| {
+                        let image = snapshot_raw
                             .images
                             .iter()
                             .find(|y| y.id == x.image_id)
@@ -201,10 +213,17 @@ impl Machine {
                                 id: x.id.clone(),
                                 labels: x.labels.clone(),
                             })
-                            .unwrap(),
-                        created: x.created,
-                        labels: x.labels,
-                        state: x.state,
+                            .unwrap();
+
+                        DockerContainer {
+                            id: x.id,
+                            name: x.names.get(0).unwrap().trim_start_matches("/").to_string(),
+                            image_descriptor: x.image,
+                            image: image,
+                            created: x.created,
+                            labels: x.labels,
+                            state: x.state,
+                        }
                     })
                     .collect()
             })
@@ -237,23 +256,32 @@ impl QueryRoot {
     }
 
     async fn recent_builds<'a>(&self, ctx: &Context<'a>) -> Result<Vec<TrackedBuildAndRepo>> {
-        let pool = ctx.data_unchecked::<Pool<SqliteConnectionManager>>();
-        let since = Utc::now() - chrono::Duration::hours(1);
-
-        Ok(get_commits_since(pool, since.timestamp_millis())
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|x| TrackedBuildAndRepo {
-                id: x.commit.id,
-                sha: x.commit.sha,
-                message: x.commit.message,
-                timestamp: x.commit.timestamp,
-                build_status: Some(to_variant_name(&x.commit.build_status).unwrap().to_string()),
-                repo_name: x.repo.name,
-                repo_owner_name: x.repo.owner_name,
-            })
-            .collect())
+        let pool = ctx
+            .data_unchecked::<Pool<SqliteConnectionManager>>()
+            .clone();
+        Ok(spawn_blocking(move || {
+            let handle = Handle::current();
+            let conn = pool.get().unwrap();
+            let since = Utc::now() - chrono::Duration::hours(1);
+            let commits = handle.block_on(get_commits_since(&conn, since.timestamp_millis()));
+            commits
+                .unwrap()
+                .into_iter()
+                .map(|x| TrackedBuildAndRepo {
+                    id: x.commit.id,
+                    sha: x.commit.sha,
+                    message: x.commit.message,
+                    timestamp: x.commit.timestamp,
+                    build_status: Some(
+                        to_variant_name(&x.commit.build_status).unwrap().to_string(),
+                    ),
+                    repo_name: x.repo.name,
+                    repo_owner_name: x.repo.owner_name,
+                })
+                .collect()
+        })
+        .await
+        .unwrap())
     }
 
     // async fn containers<'a>(&self, ctx: &Context<'a>) -> Result<Vec<EndpointBrief>> {

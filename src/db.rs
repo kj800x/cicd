@@ -70,7 +70,9 @@ pub struct CommitWithRepo {
     pub repo: Repo,
 }
 
-pub fn migrate(pool: &Pool<SqliteConnectionManager>) -> Result<(), rusqlite::Error> {
+pub fn migrate(
+    mut conn: &mut PooledConnection<SqliteConnectionManager>,
+) -> Result<(), rusqlite::Error> {
     let migrations: Migrations = Migrations::new(vec![
         M::up(
             "CREATE TABLE git_repo (
@@ -110,7 +112,6 @@ pub fn migrate(pool: &Pool<SqliteConnectionManager>) -> Result<(), rusqlite::Err
         //M::up("ALTER TABLE friend ADD COLUMN email TEXT;"),
     ]);
 
-    let mut conn = pool.get().unwrap();
     conn.pragma_update_and_check(None, "journal_mode", &"WAL", |_| Ok(()))
         .unwrap();
     migrations.to_latest(&mut conn).unwrap();
@@ -123,15 +124,9 @@ struct ExistenceResult {
 
 pub async fn upsert_repo(
     repo: &crate::webhooks::Repository,
-    pool: &Pool<SqliteConnectionManager>,
+    conn: &PooledConnection<SqliteConnectionManager>,
 ) -> Result<u64, Error> {
-    let pool = pool.clone();
     let repo = repo.clone();
-    let conn = web::block(move || pool.get())
-        .await
-        .unwrap()
-        .map_err(error::ErrorInternalServerError)
-        .unwrap();
 
     web::block(move || {
         let existing = conn
@@ -181,15 +176,9 @@ pub async fn upsert_repo(
 pub async fn upsert_commit(
     commit: &crate::webhooks::GhCommit,
     repo_id: u64,
-    pool: &Pool<SqliteConnectionManager>,
+    conn: &PooledConnection<SqliteConnectionManager>,
 ) -> Result<u64, Error> {
-    let pool = pool.clone();
     let commit = commit.clone();
-    let conn = web::block(move || pool.get())
-        .await
-        .unwrap()
-        .map_err(error::ErrorInternalServerError)
-        .unwrap();
 
     web::block(move || {
         let existing = conn
@@ -238,16 +227,10 @@ pub async fn upsert_branch(
     name: &str,
     sha: &str,
     repo_id: u64,
-    pool: &Pool<SqliteConnectionManager>,
+    conn: &PooledConnection<SqliteConnectionManager>,
 ) -> Result<u64, Error> {
-    let pool = pool.clone();
     let name = name.to_string();
     let sha = sha.to_string();
-    let conn = web::block(move || pool.get())
-        .await
-        .unwrap()
-        .map_err(error::ErrorInternalServerError)
-        .unwrap();
 
     web::block(move || {
         let existing = conn
@@ -287,19 +270,25 @@ pub async fn upsert_branch(
     // .map_err(error::ErrorInternalServerError)
 }
 
-pub async fn set_commit_status(
-    sha: &str,
-    build_status: BuildStatus,
-    repo_id: u64,
+pub async fn acquire(
     pool: &Pool<SqliteConnectionManager>,
-) -> Result<(), Error> {
+) -> PooledConnection<SqliteConnectionManager> {
     let pool = pool.clone();
-    let sha = sha.to_string();
     let conn = web::block(move || pool.get())
         .await
         .unwrap()
         .map_err(error::ErrorInternalServerError)
         .unwrap();
+    return conn;
+}
+
+pub async fn set_commit_status(
+    sha: &str,
+    build_status: BuildStatus,
+    repo_id: u64,
+    conn: &PooledConnection<SqliteConnectionManager>,
+) -> Result<(), Error> {
+    let sha = sha.to_string();
 
     web::block(move || {
         conn.prepare("UPDATE git_commit SET build_status = ?1 WHERE sha = ?2 AND repo_id = ?3")
@@ -319,125 +308,82 @@ pub async fn set_commit_status(
 }
 
 pub async fn get_repo(
-    pool: &Pool<SqliteConnectionManager>,
+    conn: &PooledConnection<SqliteConnectionManager>,
     owner_name: String,
     repo_name: String,
 ) -> Result<Option<Repo>, Error> {
-    let pool = pool.clone();
-    let conn = web::block(move || pool.get())
-        .await
-        .unwrap()
-        .map_err(error::ErrorInternalServerError)
-        .unwrap();
-
-    Ok(web::block(move || {
-        conn.prepare(
-            "SELECT id, name, owner_name, default_branch, private, language FROM git_repo WHERE owner_name = ?1 AND name = ?2 LIMIT 1",
-        )?
-        .query_row([owner_name, repo_name], |row| {
-            Ok(Repo {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                owner_name: row.get(2)?,
-                default_branch: row.get(3)?,
-                private: row.get(4)?,
-                language: row.get(5)?,
-            })
-        })
-        .optional()
-    })
-    .await
+    Ok(conn.prepare(
+        "SELECT id, name, owner_name, default_branch, private, language FROM git_repo WHERE owner_name = ?1 AND name = ?2 LIMIT 1",
+    )
     .unwrap()
-    .map_err(error::ErrorInternalServerError)
+    .query_row([owner_name, repo_name], |row| {
+        Ok(Repo {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            owner_name: row.get(2)?,
+            default_branch: row.get(3)?,
+            private: row.get(4)?,
+            language: row.get(5)?,
+        })
+    })
+    .optional()
     .unwrap())
 }
 
 pub async fn get_branch(
-    pool: &Pool<SqliteConnectionManager>,
+    conn: &PooledConnection<SqliteConnectionManager>,
     repo_id: i64,
     branch_name: String,
 ) -> Result<Option<Branch>, Error> {
-    let pool = pool.clone();
-    let conn = web::block(move || pool.get())
-        .await
-        .unwrap()
-        .map_err(error::ErrorInternalServerError)
-        .unwrap();
-
-    Ok(web::block(move || {
-        conn.prepare(
-            "SELECT id, name, head_commit_sha, repo_id FROM git_branch WHERE name = ?1 AND repo_id = ?2 LIMIT 1",
-        )?
-        .query_row(params![branch_name, repo_id], |row| {
-            Ok(Branch {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                head_commit_sha: row.get(2)?,
-                repo_id: row.get(3)?,
-            })
-        })
-        .optional()
-    })
-    .await
+    Ok(conn.prepare(
+        "SELECT id, name, head_commit_sha, repo_id FROM git_branch WHERE name = ?1 AND repo_id = ?2 LIMIT 1",
+    )
     .unwrap()
-    .map_err(error::ErrorInternalServerError).unwrap())
+    .query_row(params![branch_name, repo_id], |row| {
+        Ok(Branch {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            head_commit_sha: row.get(2)?,
+            repo_id: row.get(3)?,
+        })
+    })
+    .optional().unwrap())
 }
 
 pub async fn get_commit(
-    pool: &Pool<SqliteConnectionManager>,
+    conn: &PooledConnection<SqliteConnectionManager>,
     repo_id: i64,
     commit_sha: String,
 ) -> Result<Option<Commit>, Error> {
-    let pool = pool.clone();
-    let conn = web::block(move || pool.get())
-        .await
-        .unwrap()
-        .map_err(error::ErrorInternalServerError)
-        .unwrap();
-
-    Ok(web::block(move || {
-        conn.prepare(
-            "SELECT id, sha, message, timestamp, build_status, repo_id FROM git_commit WHERE sha = ?1 AND repo_id = ?2 LIMIT 1",
-        )?
-        .query_row(params![commit_sha, repo_id], |row| {
-            Ok(Commit {
-                id: row.get(0)?,
-                sha: row.get(1)?,
-                message: row.get(2)?,
-                timestamp: row.get(3)?,
-                build_status: row.get::<usize, String>(4)?.into(),
-            })
+    Ok(conn.prepare(
+        "SELECT id, sha, message, timestamp, build_status, repo_id FROM git_commit WHERE sha = ?1 AND repo_id = ?2 LIMIT 1",
+    ).unwrap()
+    .query_row(params![commit_sha, repo_id], |row| {
+        Ok(Commit {
+            id: row.get(0)?,
+            sha: row.get(1)?,
+            message: row.get(2)?,
+            timestamp: row.get(3)?,
+            build_status: row.get::<usize, String>(4)?.into(),
         })
-        .optional()
     })
-    .await
-    .unwrap()
-    .map_err(error::ErrorInternalServerError)
-    .unwrap())
+    .optional().unwrap())
 }
 
 pub async fn get_commits_since(
-    pool: &Pool<SqliteConnectionManager>,
+    conn: &PooledConnection<SqliteConnectionManager>,
     since: i64,
 ) -> Result<Vec<CommitWithRepo>, Error> {
-    let pool = pool.clone();
-    let conn = web::block(move || pool.get())
-        .await
-        .unwrap()
-        .map_err(error::ErrorInternalServerError)
-        .unwrap();
-
-    web::block(move || {
-        {
-        let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(
             "SELECT id, sha, message, timestamp, build_status, repo_id FROM git_commit WHERE timestamp > ?1 ORDER BY timestamp DESC",
         ).unwrap();
-        let mut rows = stmt.query(params![since]).unwrap();
-        let mut commits = Vec::new();
-        while let Some(row) = rows.next().unwrap() {
-            let repo_id = row.get::<usize, i64>(5).unwrap();
+    let mut rows = stmt.query(params![since]).unwrap();
+    let mut commits = Vec::new();
 
-            let repo = conn.prepare(
+    while let Some(row) = rows.next().unwrap() {
+        let repo_id = row.get::<usize, i64>(5).unwrap();
+
+        let repo = conn.prepare(
                 "SELECT id, name, owner_name, default_branch, private, language FROM git_repo WHERE id = ?1 LIMIT 1",
             ).unwrap()
             .query_row(params![repo_id], |row| {
@@ -452,20 +398,17 @@ pub async fn get_commits_since(
             })
             .optional().unwrap().unwrap();
 
-            commits.push(CommitWithRepo {
-                repo,
-                commit: Commit {
-                    id: row.get(0).unwrap(),
-                    sha: row.get(1).unwrap(),
-                    message: row.get(2).unwrap(),
-                    timestamp: row.get(3).unwrap(),
-                    build_status: row.get::<usize, String>(4).unwrap().into(),
-                },
+        commits.push(CommitWithRepo {
+            repo,
+            commit: Commit {
+                id: row.get(0).unwrap(),
+                sha: row.get(1).unwrap(),
+                message: row.get(2).unwrap(),
+                timestamp: row.get(3).unwrap(),
+                build_status: row.get::<usize, String>(4).unwrap().into(),
+            },
         });
-        }
+    }
 
-        Ok(commits)
-        }
-    })
-    .await.unwrap()
+    Ok(commits)
 }
