@@ -1,6 +1,5 @@
-use std::collections::HashMap;
-
 use crate::{prelude::*, PortainerConfig};
+use std::collections::HashMap;
 
 use async_graphql::{Context, Object, Result, SimpleObject};
 use serde_variant::to_variant_name;
@@ -47,6 +46,34 @@ pub struct DockerContainer {
     state: String,
 }
 
+struct RepoCoords {
+    owner_name: String,
+    repo_name: String,
+}
+
+impl DockerContainer {
+    fn repo_coords(&self) -> Option<RepoCoords> {
+        let repo = self
+            .image
+            .clone()
+            .labels?
+            .get("org.opencontainers.image.source")?
+            .clone();
+
+        let re =
+            regex::Regex::new(r"^https?://github.com/(?P<owner_name>[^/]+)/(?P<repo_name>[^/]+)$")
+                .unwrap();
+        let Some(caps) = re.captures(&repo) else {
+            return None;
+        };
+
+        Some(RepoCoords {
+            owner_name: caps["owner_name"].to_string(),
+            repo_name: caps["repo_name"].to_string(),
+        })
+    }
+}
+
 #[Object]
 impl DockerContainer {
     async fn id(&self) -> &str {
@@ -77,37 +104,48 @@ impl DockerContainer {
         &self.state
     }
 
+    async fn is_first_party(&self) -> bool {
+        let maybe_first_party: Option<bool> = (|| -> Option<bool> {
+            let repo_coords = self.repo_coords()?;
+            // TODO: This shouldn't be checked in the resolver, should be configured as a Data on startup
+            let first_party_owners = std::env::var("FIRST_PARTY_OWNERS").ok()?;
+            let first_party_owners: Vec<String> = first_party_owners
+                .split(',')
+                .map(|x| x.to_string())
+                .collect();
+
+            Some(first_party_owners.contains(&repo_coords.owner_name))
+        })();
+
+        maybe_first_party.unwrap_or(false)
+    }
+
+    async fn is_repo_tracked<'a>(&self, ctx: &Context<'a>) -> bool {
+        let maybe_repo_tracked: Option<bool> = (|| -> Option<bool> {
+            let pool = ctx
+                .data_unchecked::<Pool<SqliteConnectionManager>>()
+                .clone();
+            let conn = pool.get().unwrap();
+            let repo_coords = self.repo_coords()?;
+            Some(
+                get_repo(&conn, repo_coords.owner_name, repo_coords.repo_name)
+                    .unwrap()
+                    .is_some(),
+            )
+        })();
+
+        maybe_repo_tracked.unwrap_or(false)
+    }
+
     pub async fn latest_build<'a>(&self, ctx: &Context<'a>) -> Option<TrackedBuild> {
-        let pool = ctx.data_unchecked::<Pool<SqliteConnectionManager>>();
-
-        let repo = self
-            .image
-            .clone()
-            .labels?
-            .get("org.opencontainers.image.source")?
+        let pool = ctx
+            .data_unchecked::<Pool<SqliteConnectionManager>>()
             .clone();
-
-        // Try to extract github user and repo using regex:
-        // https://github.com/miniflux/v2 becomes ("miniflux", "v2")
-        let re =
-            regex::Regex::new(r"^https?://github.com/(?P<owner_name>[^/]+)/(?P<repo_name>[^/]+)$")
-                .unwrap();
-        let Some(caps) = re.captures(&repo) else {
-            return None;
-        };
-        let repo = get_repo(
-            pool,
-            caps["owner_name"].to_string(),
-            caps["repo_name"].to_string(),
-        )
-        .await
-        .ok()??;
-        let branch = get_branch(pool, repo.id, repo.default_branch)
-            .await
-            .ok()??;
-        let commit = get_commit(pool, repo.id, branch.head_commit_sha)
-            .await
-            .ok()??;
+        let conn = pool.get().unwrap();
+        let repo_coords = self.repo_coords()?;
+        let repo = get_repo(&conn, repo_coords.owner_name, repo_coords.repo_name).ok()??;
+        let branch = get_branch(&conn, repo.id, repo.default_branch).ok()??;
+        let commit = get_commit(&conn, repo.id, branch.head_commit_sha).ok()??;
 
         Some(TrackedBuild {
             id: commit.id,
@@ -119,39 +157,19 @@ impl DockerContainer {
     }
 
     pub async fn current_build<'a>(&self, ctx: &Context<'a>) -> Option<TrackedBuild> {
-        let pool = ctx.data_unchecked::<Pool<SqliteConnectionManager>>();
-
-        let repo = self
-            .image
-            .clone()
-            .labels?
-            .get("org.opencontainers.image.source")?
+        let pool = ctx
+            .data_unchecked::<Pool<SqliteConnectionManager>>()
             .clone();
-
-        // Try to extract github user and repo using regex:
-        // https://github.com/miniflux/v2 becomes ("miniflux", "v2")
-        let re =
-            regex::Regex::new(r"^https?://github.com/(?P<owner_name>[^/]+)/(?P<repo_name>[^/]+)$")
-                .unwrap();
-        let Some(caps) = re.captures(&repo) else {
-            return None;
-        };
-        let repo = get_repo(
-            pool,
-            caps["owner_name"].to_string(),
-            caps["repo_name"].to_string(),
-        )
-        .await
-        .ok()??;
-
+        let conn = pool.get().unwrap();
+        let repo_coords = self.repo_coords()?;
+        let repo = get_repo(&conn, repo_coords.owner_name, repo_coords.repo_name).ok()??;
         let sha = self
             .image
             .clone()
             .labels?
             .get("org.opencontainers.image.revision")?
             .clone();
-
-        let commit = get_commit(pool, repo.id, sha).await.ok()??;
+        let commit = get_commit(&conn, repo.id, sha).ok()??;
 
         Some(TrackedBuild {
             id: commit.id,
@@ -189,11 +207,8 @@ impl Machine {
                     .containers
                     .clone()
                     .into_iter()
-                    .map(|x| DockerContainer {
-                        id: x.id,
-                        name: x.names.get(0).unwrap().trim_start_matches("/").to_string(),
-                        image_descriptor: x.image,
-                        image: snapshot_raw
+                    .map(|x| {
+                        let image = snapshot_raw
                             .images
                             .iter()
                             .find(|y| y.id == x.image_id)
@@ -201,10 +216,17 @@ impl Machine {
                                 id: x.id.clone(),
                                 labels: x.labels.clone(),
                             })
-                            .unwrap(),
-                        created: x.created,
-                        labels: x.labels,
-                        state: x.state,
+                            .unwrap();
+
+                        DockerContainer {
+                            id: x.id,
+                            name: x.names.get(0).unwrap().trim_start_matches("/").to_string(),
+                            image_descriptor: x.image,
+                            image: image,
+                            created: x.created,
+                            labels: x.labels,
+                            state: x.state,
+                        }
                     })
                     .collect()
             })
@@ -237,11 +259,16 @@ impl QueryRoot {
     }
 
     async fn recent_builds<'a>(&self, ctx: &Context<'a>) -> Result<Vec<TrackedBuildAndRepo>> {
-        let pool = ctx.data_unchecked::<Pool<SqliteConnectionManager>>();
-        let since = Utc::now() - chrono::Duration::hours(1);
+        let pool = ctx
+            .data_unchecked::<Pool<SqliteConnectionManager>>()
+            .clone();
 
-        Ok(get_commits_since(pool, since.timestamp_millis())
-            .await
+        let conn = pool.get().unwrap();
+
+        let since = Utc::now() - chrono::Duration::hours(1);
+        let commits = get_commits_since(&conn, since.timestamp_millis());
+
+        Ok(commits
             .unwrap()
             .into_iter()
             .map(|x| TrackedBuildAndRepo {
@@ -255,11 +282,6 @@ impl QueryRoot {
             })
             .collect())
     }
-
-    // async fn containers<'a>(&self, ctx: &Context<'a>) -> Result<Vec<EndpointBrief>> {
-    //     let pconfig = ctx.data_unchecked::<PortainerConfig>();
-    //     Ok(get_endpoints(pconfig).await.unwrap())
-    // }
 }
 
 pub async fn index_graphiql() -> impl Responder {

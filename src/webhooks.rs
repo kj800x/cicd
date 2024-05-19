@@ -89,29 +89,26 @@ fn extract_branch_name(r#ref: &str) -> Option<String> {
 }
 
 async fn process_event(event: WebhookEvent, pool: &Pool<SqliteConnectionManager>) {
+    let conn = pool.get().unwrap();
     match event.github_event.as_str() {
         "push" => {
             let payload: PushEvent = serde_json::from_value(event.payload).unwrap();
             println!("Received push event: {:?}", payload);
-            let repo_id = upsert_repo(&payload.repository, pool).await.unwrap();
-            upsert_commit(&payload.head_commit, repo_id, pool)
-                .await
-                .unwrap();
+            let repo_id = upsert_repo(&payload.repository, &conn).unwrap();
+            upsert_commit(&payload.head_commit, repo_id, &conn).unwrap();
             if let Some(branch_name) = extract_branch_name(&payload.r#ref) {
-                upsert_branch(&branch_name, &payload.head_commit.id, repo_id, pool)
-                    .await
-                    .unwrap();
+                upsert_branch(&branch_name, &payload.head_commit.id, repo_id, &conn).unwrap();
             }
         }
         "ping" => {
             let payload: PingEvent = serde_json::from_value(event.payload).unwrap();
             println!("Received ping event: {:?}", payload);
-            upsert_repo(&payload.repository, pool).await.unwrap();
+            upsert_repo(&payload.repository, &conn).unwrap();
         }
         "check_run" => {
             let payload: CheckRunEvent = serde_json::from_value(event.payload).unwrap();
             println!("Received check_run event: {:?}", payload);
-            let repo_id = upsert_repo(&payload.repository, pool).await.unwrap();
+            let repo_id = upsert_repo(&payload.repository, &conn).unwrap();
             set_commit_status(
                 &payload.check_run.check_suite.head_sha,
                 BuildStatus::of(
@@ -119,9 +116,8 @@ async fn process_event(event: WebhookEvent, pool: &Pool<SqliteConnectionManager>
                     &payload.check_run.check_suite.conclusion.as_deref(),
                 ),
                 repo_id,
-                pool,
+                &conn,
             )
-            .await
             .unwrap();
         }
         _ => {

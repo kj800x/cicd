@@ -131,8 +131,7 @@ async fn main() -> std::io::Result<()> {
         std::env::var("DATABASE_PATH").unwrap_or("db.db".to_string()),
     );
     let pool = Pool::new(manager).unwrap();
-
-    migrate(&pool).unwrap();
+    migrate(pool.get().unwrap()).unwrap();
 
     future::select(
         Box::pin(start_http(registry, pool.clone())),
