@@ -21,6 +21,7 @@ pub struct TrackedBuildAndRepo {
     message: String,
     timestamp: i64,
     build_status: Option<String>,
+    build_url: Option<String>,
     repo_name: String,
     repo_owner_name: String,
 }
@@ -280,6 +281,7 @@ impl QueryRoot {
                 message: x.commit.message,
                 timestamp: x.commit.timestamp,
                 build_status: Some(to_variant_name(&x.commit.build_status).unwrap().to_string()),
+                build_url: x.commit.build_url,
                 repo_name: x.repo.name,
                 repo_owner_name: x.repo.owner_name,
             })
