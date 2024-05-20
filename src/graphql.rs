@@ -11,6 +11,7 @@ pub struct TrackedBuild {
     message: String,
     timestamp: i64,
     build_status: Option<String>,
+    build_url: Option<String>,
 }
 
 #[derive(Clone, SimpleObject)]
@@ -153,6 +154,7 @@ impl DockerContainer {
             message: commit.message,
             timestamp: commit.timestamp,
             build_status: Some(to_variant_name(&commit.build_status).unwrap().to_string()),
+            build_url: commit.build_url,
         })
     }
 
@@ -177,6 +179,7 @@ impl DockerContainer {
             message: commit.message,
             timestamp: commit.timestamp,
             build_status: Some(to_variant_name(&commit.build_status).unwrap().to_string()),
+            build_url: commit.build_url,
         })
     }
 }

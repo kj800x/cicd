@@ -61,6 +61,7 @@ pub struct Commit {
     pub message: String,
     pub timestamp: i64,
     pub build_status: BuildStatus,
+    pub build_url: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -95,6 +96,7 @@ pub fn migrate(mut conn: PooledConnection<SqliteConnectionManager>) -> Result<()
                 message TEXT NOT NULL,
                 timestamp INTEGER NOT NULL,
                 build_status TEXT,
+                build_url TEXT,
                 repo_id INTEGER NOT NULL,
                 FOREIGN KEY(repo_id) REFERENCES repo(id)
             );
@@ -260,19 +262,23 @@ pub fn upsert_branch(
 pub fn set_commit_status(
     sha: &str,
     build_status: BuildStatus,
+    build_url: String,
     repo_id: u64,
     conn: &PooledConnection<SqliteConnectionManager>,
 ) -> Result<(), Error> {
     let sha = sha.to_string();
 
-    conn.prepare("UPDATE git_commit SET build_status = ?1 WHERE sha = ?2 AND repo_id = ?3")
-        .unwrap()
-        .execute(params![
-            to_variant_name(&build_status).unwrap(),
-            sha,
-            repo_id
-        ])
-        .unwrap();
+    conn.prepare(
+        "UPDATE git_commit SET build_status = ?1, build_url = ?2 WHERE sha = ?3 AND repo_id = ?4",
+    )
+    .unwrap()
+    .execute(params![
+        to_variant_name(&build_status).unwrap(),
+        build_url,
+        sha,
+        repo_id
+    ])
+    .unwrap();
 
     Ok(())
 }
@@ -326,7 +332,7 @@ pub fn get_commit(
     commit_sha: String,
 ) -> Result<Option<Commit>, Error> {
     Ok(conn.prepare(
-        "SELECT id, sha, message, timestamp, build_status, repo_id FROM git_commit WHERE sha = ?1 AND repo_id = ?2 LIMIT 1",
+        "SELECT id, sha, message, timestamp, build_status, build_url, repo_id FROM git_commit WHERE sha = ?1 AND repo_id = ?2 LIMIT 1",
     ).unwrap()
     .query_row(params![commit_sha, repo_id], |row| {
         Ok(Commit {
@@ -335,6 +341,7 @@ pub fn get_commit(
             message: row.get(2)?,
             timestamp: row.get(3)?,
             build_status: row.get::<usize, String>(4)?.into(),
+            build_url: row.get(5)?,
         })
     })
     .optional().unwrap())
@@ -345,7 +352,7 @@ pub fn get_commits_since(
     since: i64,
 ) -> Result<Vec<CommitWithRepo>, Error> {
     let mut stmt = conn.prepare(
-            "SELECT id, sha, message, timestamp, build_status, repo_id FROM git_commit WHERE timestamp > ?1 ORDER BY timestamp DESC",
+            "SELECT id, sha, message, timestamp, build_status, build_url, repo_id FROM git_commit WHERE timestamp > ?1 ORDER BY timestamp DESC",
         ).unwrap();
     let mut rows = stmt.query(params![since]).unwrap();
     let mut commits = Vec::new();
@@ -376,6 +383,7 @@ pub fn get_commits_since(
                 message: row.get(2).unwrap(),
                 timestamp: row.get(3).unwrap(),
                 build_status: row.get::<usize, String>(4).unwrap().into(),
+                build_url: row.get(5).unwrap(),
             },
         });
     }

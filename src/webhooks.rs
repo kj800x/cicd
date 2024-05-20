@@ -47,6 +47,7 @@ pub struct CheckSuite {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct CheckRun {
+    details_url: String,
     check_suite: CheckSuite,
 }
 
@@ -115,6 +116,13 @@ async fn process_event(event: WebhookEvent, pool: &Pool<SqliteConnectionManager>
                     &payload.check_run.check_suite.status,
                     &payload.check_run.check_suite.conclusion.as_deref(),
                 ),
+                // FIXME: Technically this isn't fully correct because a commit
+                // can have multiple check runs. If we wanted to do this right,
+                // we'd need to track each individual check run in the database.
+                // As another option, we could try to only initial details url
+                // and also maybe override it if any of them fail, since that's
+                // the one that we care about more.
+                payload.check_run.details_url,
                 repo_id,
                 &conn,
             )
