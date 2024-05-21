@@ -10,14 +10,17 @@ pub enum BuildStatus {
     Failure,
 }
 
-impl From<String> for BuildStatus {
-    fn from(s: String) -> Self {
-        match s.as_str() {
-            "None" => BuildStatus::None,
-            "Pending" => BuildStatus::Pending,
-            "Success" => BuildStatus::Success,
-            "Failure" => BuildStatus::Failure,
-            _ => BuildStatus::None,
+impl From<Option<String>> for BuildStatus {
+    fn from(s: Option<String>) -> Self {
+        match s {
+            Some(s) => match s.as_str() {
+                "None" => BuildStatus::None,
+                "Pending" => BuildStatus::Pending,
+                "Success" => BuildStatus::Success,
+                "Failure" => BuildStatus::Failure,
+                _ => BuildStatus::None,
+            },
+            None => BuildStatus::None,
         }
     }
 }
@@ -336,12 +339,12 @@ pub fn get_commit(
     ).unwrap()
     .query_row(params![commit_sha, repo_id], |row| {
         Ok(Commit {
-            id: row.get(0)?,
-            sha: row.get(1)?,
-            message: row.get(2)?,
-            timestamp: row.get(3)?,
-            build_status: row.get::<usize, String>(4)?.into(),
-            build_url: row.get(5)?,
+            id: row.get_unwrap(0),
+            sha: row.get_unwrap(1),
+            message: row.get_unwrap(2),
+            timestamp: row.get_unwrap(3),
+            build_status: row.get_unwrap::<usize, Option<String>>(4).into(),
+            build_url: row.get_unwrap::<usize, Option<String>>(5),
         })
     })
     .optional().unwrap())
@@ -358,7 +361,7 @@ pub fn get_commits_since(
     let mut commits = Vec::new();
 
     while let Some(row) = rows.next().unwrap() {
-        let repo_id = row.get::<usize, i64>(5).unwrap();
+        let repo_id = row.get::<usize, i64>(6).unwrap();
 
         let repo = conn.prepare(
                 "SELECT id, name, owner_name, default_branch, private, language FROM git_repo WHERE id = ?1 LIMIT 1",
@@ -378,12 +381,12 @@ pub fn get_commits_since(
         commits.push(CommitWithRepo {
             repo,
             commit: Commit {
-                id: row.get(0).unwrap(),
-                sha: row.get(1).unwrap(),
-                message: row.get(2).unwrap(),
-                timestamp: row.get(3).unwrap(),
-                build_status: row.get::<usize, String>(4).unwrap().into(),
-                build_url: row.get(5).unwrap(),
+                id: row.get_unwrap(0),
+                sha: row.get_unwrap(1),
+                message: row.get_unwrap(2),
+                timestamp: row.get_unwrap(3),
+                build_status: row.get_unwrap::<usize, Option<String>>(4).into(),
+                build_url: row.get_unwrap::<usize, Option<String>>(5),
             },
         });
     }
