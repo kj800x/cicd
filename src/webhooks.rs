@@ -74,9 +74,7 @@ struct PushEvent {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct WebhookEvent {
-    #[serde(rename = "githubEvent")]
-    github_event: String,
-    timestamp: u64,
+    event_type: String,
     payload: serde_json::Value,
 }
 
@@ -91,7 +89,7 @@ fn extract_branch_name(r#ref: &str) -> Option<String> {
 
 async fn process_event(event: WebhookEvent, pool: &Pool<SqliteConnectionManager>) {
     let conn = pool.get().unwrap();
-    match event.github_event.as_str() {
+    match event.event_type.as_str() {
         "push" => {
             let payload: PushEvent = serde_json::from_value(event.payload).unwrap();
             println!("Received push event: {:?}", payload);
@@ -129,7 +127,7 @@ async fn process_event(event: WebhookEvent, pool: &Pool<SqliteConnectionManager>
             .unwrap();
         }
         _ => {
-            println!("Received unknown event: {:?}", event.github_event);
+            println!("Received unknown event: {:?}", event.event_type);
         }
     }
 }
