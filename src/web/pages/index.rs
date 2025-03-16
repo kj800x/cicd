@@ -114,6 +114,7 @@ pub async fn index(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Respo
                         transition: transform 0.2s;
                         display: flex;
                         flex-direction: column;
+                        border: 2px solid var(--border-color);
                     }
                     .build-card:hover {
                         transform: translateY(-3px);
@@ -131,6 +132,44 @@ pub async fn index(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Respo
                         margin-right: 12px;
                         flex-shrink: 0;
                     }
+
+                    /* Status-specific styling */
+                    .card-status-success {
+                        border-color: var(--success-color);
+                        background-color: rgba(46, 204, 113, 0.05);
+                    }
+                    .card-status-success .build-header {
+                        background-color: rgba(46, 204, 113, 0.15);
+                        border-bottom-color: var(--success-color);
+                    }
+
+                    .card-status-failure {
+                        border-color: var(--failure-color);
+                        background-color: rgba(231, 76, 60, 0.05);
+                    }
+                    .card-status-failure .build-header {
+                        background-color: rgba(231, 76, 60, 0.15);
+                        border-bottom-color: var(--failure-color);
+                    }
+
+                    .card-status-pending {
+                        border-color: var(--pending-color);
+                        background-color: rgba(243, 156, 18, 0.05);
+                    }
+                    .card-status-pending .build-header {
+                        background-color: rgba(243, 156, 18, 0.15);
+                        border-bottom-color: var(--pending-color);
+                    }
+
+                    .card-status-none {
+                        border-color: var(--none-color);
+                        background-color: rgba(127, 140, 141, 0.05);
+                    }
+                    .card-status-none .build-header {
+                        background-color: rgba(127, 140, 141, 0.15);
+                        border-bottom-color: var(--none-color);
+                    }
+
                     .status-pending {
                         background-color: var(--pending-color);
                         position: relative;
@@ -247,7 +286,14 @@ pub async fn index(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Respo
                 } @else {
                     div class="build-grid" {
                         @for (commit, repo, branches, _) in &builds {
-                            div class="build-card" {
+                            // Determine status for styling
+                            @let status_class = match commit.build_status {
+                                BuildStatus::Success => "card-status-success",
+                                BuildStatus::Failure => "card-status-failure",
+                                BuildStatus::Pending => "card-status-pending",
+                                BuildStatus::None => "card-status-none",
+                            };
+                            div class=(format!("build-card {}", status_class)) {
                                 div class="build-header" {
                                     div class=(format!("status-indicator status-{}", match commit.build_status {
                                         BuildStatus::Success => "success",
