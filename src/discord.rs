@@ -293,37 +293,11 @@ impl DiscordNotifier {
     pub async fn validate_channel(&self) -> Result<(), String> {
         log::debug!("Validating Discord channel (ID: {})", self.channel_id);
 
+        // Only check if the channel exists without sending any test messages
         match self.channel_id.to_channel(&self.http).await {
             Ok(_) => {
-                // Try sending a test message with an embed and then delete it
-                let test_embed: CreateEmbed = CreateEmbed::new()
-                    .title("🔍 Bot Permissions Test")
-                    .description("This message will be deleted automatically.")
-                    .color(Colour::TEAL);
-
-                let test_message: CreateMessage = CreateMessage::new().add_embed(test_embed);
-
-                match self.channel_id.send_message(&self.http, test_message).await {
-                    Ok(message) => {
-                        log::debug!("Test message sent successfully, deleting it");
-                        if let Err(e) = message.delete(&self.http).await {
-                            log::warn!("Could not delete test message: {}", e);
-                        }
-                        Ok(())
-                    }
-                    Err(e) => {
-                        log::error!("Failed to send test message: {}", e);
-                        // Check the specific error type
-                        if e.to_string().contains("Missing Access") {
-                            log::error!("Bot does not have access to the channel - check channel permissions");
-                        } else if e.to_string().contains("Missing Permissions") {
-                            log::error!("Bot lacks required permissions - needs at minimum: Send Messages, Embed Links");
-                        } else if e.to_string().contains("Unknown Channel") {
-                            log::error!("Channel ID is invalid or the bot cannot see this channel");
-                        }
-                        Err(format!("Failed to send test message: {}", e))
-                    }
-                }
+                log::debug!("Discord channel verified successfully");
+                Ok(())
             }
             Err(e) => {
                 log::error!("Channel validation failed: {}", e);
