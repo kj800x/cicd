@@ -2,6 +2,7 @@ pub mod prelude {
     pub use crate::db::*;
     pub use crate::graphql::*;
     pub use crate::resource::*;
+    pub use crate::web::*;
     pub use crate::webhooks::*;
 
     pub use chrono::prelude::*;
@@ -10,7 +11,7 @@ pub mod prelude {
     pub use actix_web::{
         cookie::Key,
         delete, error, get, middleware, post, put,
-        web::{self, Json},
+        web::{self, get as web_get, resource, Data, Json},
         App, HttpResponse, HttpServer, Responder,
     };
     pub use actix_web_opentelemetry::{PrometheusMetricsHandler, RequestMetrics, RequestTracing};
@@ -30,11 +31,15 @@ pub mod prelude {
     pub use rusqlite::{params, OptionalExtension};
     pub use rusqlite_migration::{Migrations, M};
     pub use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Maud imports
+    pub use maud::{html, Markup, DOCTYPE};
 }
 
 mod db;
 mod graphql;
 mod resource;
+mod web;
 mod webhooks;
 
 use futures_util::future;
@@ -58,23 +63,24 @@ async fn start_http(
             .wrap(RequestMetrics::default())
             .route(
                 "/api/metrics",
-                web::get().to(PrometheusMetricsHandler::new(registry.clone())),
+                web_get().to(PrometheusMetricsHandler::new(registry.clone())),
             )
             .wrap(
                 SessionMiddleware::builder(CookieSessionStore::default(), Key::from(&[0; 64]))
                     .cookie_secure(false)
                     .build(),
             )
-            .app_data(web::Data::new(pool.clone()))
+            .app_data(Data::new(pool.clone()))
             .wrap(middleware::Logger::default())
-            .route("/api/hey", web::get().to(manual_hello))
+            .route("/api/hey", web_get().to(manual_hello))
+            .route("/", web_get().to(index))
             .service(
-                web::resource("/api/graphql")
+                resource("/api/graphql")
                     .guard(guard::Post())
                     .to(GraphQL::new(schema)),
             )
             .service(
-                web::resource("/api/graphql")
+                resource("/api/graphql")
                     .guard(guard::Get())
                     .to(index_graphiql),
             )
