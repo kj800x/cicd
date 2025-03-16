@@ -348,6 +348,8 @@ impl DiscordNotifier {
 pub async fn setup_discord() -> Option<DiscordNotifier> {
     log::info!("Setting up Discord notifier");
 
+    // Disable serenity logging
+
     // Check if Discord environment variables are present
     let has_token = env::var("DISCORD_BOT_TOKEN").is_ok();
     let has_channel = env::var("DISCORD_CHANNEL_ID").is_ok();

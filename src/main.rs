@@ -124,7 +124,7 @@ async fn main() -> std::io::Result<()> {
     env_logger::builder()
         .filter_level(log::LevelFilter::Warn) // Set default level to Warn for most modules
         .filter(Some("cicd::discord"), log::LevelFilter::Debug) // Enable debug logs for Discord module
-        .filter(Some("serenity"), log::LevelFilter::Info) // Enable info logs for Serenity crate
+        .filter(Some("serenity"), log::LevelFilter::Warn) // Serenity crate spams at info level
         .filter_module(
             "cicd",
             match std::env::var("RUST_LOG") {
