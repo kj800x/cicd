@@ -514,6 +514,7 @@ pub fn get_repo(
     .unwrap())
 }
 
+#[allow(dead_code)]
 pub fn get_branch(
     conn: &PooledConnection<SqliteConnectionManager>,
     repo_id: i64,

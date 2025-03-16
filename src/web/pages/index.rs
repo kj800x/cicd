@@ -41,6 +41,7 @@ pub async fn index(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Respo
 
     // Structure to hold our branch data
     #[derive(Debug)]
+    #[allow(dead_code)]
     struct BranchData {
         branch_id: i64,
         branch_name: String,
@@ -56,6 +57,7 @@ pub async fn index(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Respo
     }
 
     #[derive(Debug)]
+    #[allow(dead_code)]
     struct CommitData {
         id: i64,
         sha: String,

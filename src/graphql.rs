@@ -162,7 +162,7 @@ impl QueryRoot {
             )
             .unwrap()
             .query_row([&sha], |row| {
-                Ok(Repo {
+                Ok(DbRepo {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     owner_name: row.get(2)?,

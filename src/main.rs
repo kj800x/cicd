@@ -1,9 +1,24 @@
 pub mod prelude {
-    pub use crate::db::*;
-    pub use crate::graphql::*;
+    pub use crate::db::{
+        add_commit_parent, add_commit_to_branch, get_branch_by_name, get_branches_for_commit,
+        get_commit, get_commit_parents, get_commit_with_branches, get_commit_with_repo_branches,
+        get_commits_since, get_parent_commits, get_repo, migrate, set_commit_status, upsert_branch,
+        upsert_commit, upsert_repo, Branch as DbBranch, BuildStatus, Commit as DbCommit,
+        CommitParent, CommitWithBranches, CommitWithRepo, CommitWithRepoBranches, Repo as DbRepo,
+    };
+
+    pub use crate::graphql::{
+        index_graphiql, Branch as GraphQlBranch, Build, Commit as GraphQlCommit, QueryRoot,
+        Repository as GraphQlRepository,
+    };
+
     pub use crate::resource::*;
+
     pub use crate::web::*;
-    pub use crate::webhooks::*;
+
+    pub use crate::webhooks::{
+        start_websockets, GhCommit, RepoOwner, Repository as WebhookRepository,
+    };
 
     pub use chrono::prelude::*;
 
@@ -102,8 +117,17 @@ async fn main() -> std::io::Result<()> {
     let provider = MeterProvider::builder().with_reader(exporter).build();
     global::set_meter_provider(provider);
 
-    let websocket_url = std::env::var("WEBSOCKET_URL").expect("WEBSOCKET_URL must be set");
-    let client_secret = std::env::var("CLIENT_SECRET").expect("CLIENT_SECRET must be set");
+    // Get environment variables with defaults for development
+    let websocket_url = std::env::var("WEBSOCKET_URL").unwrap_or_else(|_| {
+        log::warn!("WEBSOCKET_URL not set, using default for development");
+        "wss://example.com/ws".to_string()
+    });
+
+    let client_secret = std::env::var("CLIENT_SECRET").unwrap_or_else(|_| {
+        log::warn!("CLIENT_SECRET not set, using default for development");
+        "development_secret".to_string()
+    });
+
     // connect to SQLite DB
     let manager = SqliteConnectionManager::file(
         std::env::var("DATABASE_PATH").unwrap_or("db.db".to_string()),
