@@ -38,6 +38,7 @@ The application now features an enhanced git model that tracks:
    - Ability to trace commit history in both directions (parents and children)
 
 3. **GraphQL API Enhancements**:
+   - Improved object model with proper type hierarchy
    - Query recent builds with branch information
    - Look up a specific commit by SHA with branch details
    - Retrieve parent commits to trace history
@@ -92,93 +93,160 @@ cargo run
 - `/api/graphql`: GraphQL API endpoint for querying data
 - `/api/metrics`: Prometheus metrics endpoint
 
-### GraphQL Queries
+### GraphQL Schema
 
-The API now supports the following queries:
+The API now features a more logical object hierarchy:
 
 ```graphql
-# Get recent builds with basic info
-query RecentBuilds {
-  recentBuilds {
-    id
-    sha
-    message
-    timestamp
-    buildStatus
-    buildUrl
-    parentShas
-    repoName
-    repoOwnerName
-  }
+# Repository information
+type Repository {
+  id: ID!
+  name: String!
+  owner: String!
+  defaultBranch: String!
+  isPrivate: Boolean!
+  language: String
 }
 
-# Get recent builds with branch information
-query RecentBuildsWithBranches {
-  recentBuildsWithBranches {
-    id
-    sha
-    message
-    timestamp
-    buildStatus
-    buildUrl
-    parentShas
-    repoName
-    repoOwnerName
-    branches {
-      id
+# Git commit information
+type Commit {
+  id: ID!
+  sha: String!
+  message: String!
+  timestamp: Int!
+  author: String!
+  parentShas: [String!]!
+}
+
+# Branch information
+type Branch {
+  id: ID!
+  name: String!
+  headCommitSha: String!
+}
+
+# Build information (CI/CD)
+type Build {
+  commit: Commit!
+  repository: Repository!
+  status: String!
+  url: String
+  branches: [Branch!]!
+}
+
+# Root query type
+type Query {
+  # Get builds from the last hour
+  recentBuilds: [Build!]!
+
+  # Find a specific build by commit SHA
+  build(sha: String!): Build
+
+  # Get parent builds of a specific commit
+  parentBuilds(sha: String!, maxDepth: Int): [Build!]!
+
+  # Get child builds of a specific commit
+  childBuilds(sha: String!): [Build!]!
+
+  # Get all repositories
+  repositories: [Repository!]!
+
+  # Get branches for a repository
+  branches(repoId: ID!): [Branch!]!
+}
+```
+
+### Example Queries
+
+```graphql
+# Get recent builds
+query RecentBuilds {
+  recentBuilds {
+    commit {
+      sha
+      message
+      timestamp
+      author
+      parentShas
+    }
+    repository {
       name
-      headCommitSha
+      owner
+    }
+    status
+    url
+    branches {
+      name
     }
   }
 }
 
-# Look up a specific commit by SHA
-query Commit {
-  commit(sha: "abc123") {
-    id
-    sha
-    message
-    timestamp
-    buildStatus
-    buildUrl
-    parentShas
-    repoName
-    repoOwnerName
-    branches {
-      id
+# Get a specific build
+query GetBuild {
+  build(sha: "abc123") {
+    commit {
+      sha
+      message
+    }
+    repository {
       name
-      headCommitSha
+      owner
+    }
+    status
+    branches {
+      name
     }
   }
 }
 
 # Trace commit history (parents)
-query ParentCommits {
-  parentCommits(sha: "abc123", maxDepth: 10) {
-    id
-    sha
-    message
-    timestamp
-    buildStatus
-    buildUrl
-    parentShas
-    repoName
-    repoOwnerName
+query ParentBuilds {
+  parentBuilds(sha: "abc123", maxDepth: 10) {
+    commit {
+      sha
+      message
+      parentShas
+    }
+    repository {
+      name
+    }
+    status
   }
 }
 
-# Find child commits
-query CommitChildren {
-  commitChildren(sha: "abc123") {
+# Find child builds
+query ChildBuilds {
+  childBuilds(sha: "abc123") {
+    commit {
+      sha
+      message
+    }
+    status
+    repository {
+      name
+      owner
+    }
+  }
+}
+
+# Get all repositories
+query Repositories {
+  repositories {
     id
-    sha
-    message
-    timestamp
-    buildStatus
-    buildUrl
-    parentShas
-    repoName
-    repoOwnerName
+    name
+    owner
+    defaultBranch
+    isPrivate
+    language
+  }
+}
+
+# Get branches for a repository
+query Branches {
+  branches(repoId: "123") {
+    id
+    name
+    headCommitSha
   }
 }
 ```

@@ -73,7 +73,7 @@ struct PushCommit {
     timestamp: String,
     author: CommitAuthor,
     committer: CommitAuthor,
-    parents: Vec<ParentCommit>,
+    parents: Option<Vec<ParentCommit>>, // Make parents optional
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -109,12 +109,16 @@ fn extract_branch_name(r#ref: &str) -> Option<String> {
 
 // Convert PushCommit to GhCommit, extracting all parents
 fn convert_to_gh_commit(push_commit: &PushCommit) -> GhCommit {
-    let parent_shas = if !push_commit.parents.is_empty() {
-        let mut shas = Vec::with_capacity(push_commit.parents.len());
-        for parent in &push_commit.parents {
-            shas.push(parent.sha.clone());
+    let parent_shas = if let Some(parents) = &push_commit.parents {
+        if !parents.is_empty() {
+            let mut shas = Vec::with_capacity(parents.len());
+            for parent in parents {
+                shas.push(parent.sha.clone());
+            }
+            Some(shas)
+        } else {
+            None
         }
-        Some(shas)
     } else {
         None
     };
@@ -133,65 +137,102 @@ async fn process_event(event: WebhookEvent, pool: &Pool<SqliteConnectionManager>
     let conn = pool.get().unwrap();
     match event.event_type.as_str() {
         "push" => {
-            let payload: PushEvent = serde_json::from_value(event.payload).unwrap();
-            println!("Received push event: {:?}", payload);
+            match serde_json::from_value::<PushEvent>(event.payload.clone()) {
+                Ok(payload) => {
+                    println!("Received push event: {:?}", payload);
 
-            // Upsert the repository
-            let repo_id = upsert_repo(&payload.repository, &conn).unwrap();
+                    match upsert_repo(&payload.repository, &conn) {
+                        Ok(repo_id) => {
+                            for commit in &payload.commits {
+                                let gh_commit = convert_to_gh_commit(commit);
 
-            // Process all commits in the push
-            for commit in &payload.commits {
-                // Convert to our commit type with parent information
-                let gh_commit = convert_to_gh_commit(commit);
+                                if let Err(e) = upsert_commit(&gh_commit, repo_id, &conn) {
+                                    println!("Error storing commit {}: {}", commit.id, e);
+                                }
+                            }
 
-                // Store the commit
-                upsert_commit(&gh_commit, repo_id, &conn).unwrap();
-            }
+                            let head_gh_commit = convert_to_gh_commit(&payload.head_commit);
+                            if let Err(e) = upsert_commit(&head_gh_commit, repo_id, &conn) {
+                                println!(
+                                    "Error storing head commit {}: {}",
+                                    payload.head_commit.id, e
+                                );
+                            }
 
-            // Process the head commit specifically
-            let head_gh_commit = convert_to_gh_commit(&payload.head_commit);
-            upsert_commit(&head_gh_commit, repo_id, &conn).unwrap();
-
-            // If this is a branch, update the branch information
-            if let Some(branch_name) = extract_branch_name(&payload.r#ref) {
-                let branch_id =
-                    upsert_branch(&branch_name, &payload.after, repo_id, &conn).unwrap();
-
-                // Add all commits in this push to the branch
-                for commit in &payload.commits {
-                    add_commit_to_branch(&commit.id, branch_id, repo_id, &conn).unwrap();
+                            if let Some(branch_name) = extract_branch_name(&payload.r#ref) {
+                                match upsert_branch(&branch_name, &payload.after, repo_id, &conn) {
+                                    Ok(branch_id) => {
+                                        for commit in &payload.commits {
+                                            if let Err(e) = add_commit_to_branch(
+                                                &commit.id, branch_id, repo_id, &conn,
+                                            ) {
+                                                println!("Error associating commit {} with branch {}: {}", commit.id, branch_name, e);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        println!("Error updating branch {}: {}", branch_name, e);
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            println!(
+                                "Error upserting repository {}: {}",
+                                payload.repository.name, e
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("Error parsing push event: {}", e);
+                    println!("Raw payload: {}", &event.payload);
                 }
             }
         }
-        "ping" => {
-            let payload: PingEvent = serde_json::from_value(event.payload).unwrap();
-            println!("Received ping event: {:?}", payload);
-            upsert_repo(&payload.repository, &conn).unwrap();
-        }
-        "check_run" => {
-            let payload: CheckRunEvent = serde_json::from_value(event.payload).unwrap();
-            println!("Received check_run event: {:?}", payload);
-            let repo_id = upsert_repo(&payload.repository, &conn).unwrap();
-            set_commit_status(
-                &payload.check_run.check_suite.head_sha,
-                BuildStatus::of(
-                    &payload.check_run.check_suite.status,
-                    &payload.check_run.check_suite.conclusion.as_deref(),
-                ),
-                // FIXME: Technically this isn't fully correct because a commit
-                // can have multiple check runs. If we wanted to do this right,
-                // we'd need to track each individual check run in the database.
-                // As another option, we could try to only initial details url
-                // and also maybe override it if any of them fail, since that's
-                // the one that we care about more.
-                payload.check_run.details_url,
-                repo_id,
-                &conn,
-            )
-            .unwrap();
-        }
+        "ping" => match serde_json::from_value::<PingEvent>(event.payload.clone()) {
+            Ok(payload) => {
+                println!("Received ping event: {:?}", payload);
+                if let Err(e) = upsert_repo(&payload.repository, &conn) {
+                    println!("Error upserting repository from ping event: {}", e);
+                }
+            }
+            Err(e) => {
+                println!("Error parsing ping event: {}", e);
+                println!("Raw payload: {}", &event.payload);
+            }
+        },
+        "check_run" => match serde_json::from_value::<CheckRunEvent>(event.payload.clone()) {
+            Ok(payload) => {
+                println!("Received check_run event: {:?}", payload);
+                match upsert_repo(&payload.repository, &conn) {
+                    Ok(repo_id) => {
+                        if let Err(e) = set_commit_status(
+                            &payload.check_run.check_suite.head_sha,
+                            BuildStatus::of(
+                                &payload.check_run.check_suite.status,
+                                &payload.check_run.check_suite.conclusion.as_deref(),
+                            ),
+                            payload.check_run.details_url,
+                            repo_id,
+                            &conn,
+                        ) {
+                            println!("Error setting commit status: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        println!("Error upserting repository from check_run event: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                println!("Error parsing check_run event: {}", e);
+                println!("Raw payload: {}", &event.payload);
+            }
+        },
         _ => {
-            println!("Received unknown event: {:?}", event.event_type);
+            println!("Received unknown event: {}", event.event_type);
+            println!("Raw payload: {}", &event.payload);
         }
     }
 }
@@ -201,24 +242,69 @@ pub async fn start_websockets(
     client_secret: String,
     pool: Pool<SqliteConnectionManager>,
 ) {
-    let mut request = websocket_url.into_client_request().unwrap();
-    request.headers_mut().insert(
-        "Authorization",
-        format!("Bearer {}", client_secret)
-            .parse::<HeaderValue>()
-            .unwrap(),
-    );
+    loop {
+        println!(
+            "Attempting to connect to webhook WebSocket at {}",
+            websocket_url
+        );
 
-    let (ws_stream, _) = connect_async(request).await.expect("Failed to connect");
+        let mut request = match websocket_url.clone().into_client_request() {
+            Ok(request) => request,
+            Err(e) => {
+                eprintln!("Failed to create WebSocket request: {}", e);
+                // Wait before retrying
+                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                continue;
+            }
+        };
 
-    println!("Connection to webhooks websocket established");
+        request.headers_mut().insert(
+            "Authorization",
+            match format!("Bearer {}", client_secret).parse::<HeaderValue>() {
+                Ok(header) => header,
+                Err(e) => {
+                    eprintln!("Failed to create Authorization header: {}", e);
+                    // Wait before retrying
+                    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                    continue;
+                }
+            },
+        );
 
-    let (_, read) = ws_stream.split();
+        let connect_result = connect_async(request).await;
 
-    read.for_each(|message| async {
-        let data = message.unwrap().into_data();
-        let event: WebhookEvent = serde_json::from_slice(&data).unwrap();
-        process_event(event, &pool).await;
-    })
-    .await
+        match connect_result {
+            Ok((ws_stream, _)) => {
+                println!("Connection to webhooks websocket established");
+
+                let (_, read) = ws_stream.split();
+
+                match read
+                    .for_each(|message| async {
+                        match message {
+                            Ok(msg) => {
+                                let data = msg.into_data();
+                                match serde_json::from_slice::<WebhookEvent>(&data) {
+                                    Ok(event) => process_event(event, &pool).await,
+                                    Err(e) => eprintln!("Error parsing webhook event: {}", e),
+                                }
+                            }
+                            Err(e) => eprintln!("Error reading from websocket: {}", e),
+                        }
+                    })
+                    .await
+                {
+                    // The for_each completes when the stream is closed
+                    _ => eprintln!("WebSocket connection closed, will attempt to reconnect..."),
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to connect to WebSocket: {}", e);
+            }
+        }
+
+        // Wait before retrying
+        eprintln!("Reconnecting in 10 seconds...");
+        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+    }
 }
