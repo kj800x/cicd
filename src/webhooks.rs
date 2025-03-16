@@ -133,7 +133,11 @@ fn convert_to_gh_commit(push_commit: &PushCommit) -> GhCommit {
     }
 }
 
-async fn process_event(event: WebhookEvent, pool: &Pool<SqliteConnectionManager>) {
+async fn process_event(
+    event: WebhookEvent,
+    pool: &Pool<SqliteConnectionManager>,
+    discord_notifier: &Option<DiscordNotifier>,
+) {
     let conn = pool.get().unwrap();
     match event.event_type.as_str() {
         "push" => {
@@ -167,6 +171,26 @@ async fn process_event(event: WebhookEvent, pool: &Pool<SqliteConnectionManager>
                                                 &commit.id, branch_id, repo_id, &conn,
                                             ) {
                                                 println!("Error associating commit {} with branch {}: {}", commit.id, branch_name, e);
+                                            }
+                                        }
+
+                                        // For the head commit, send a notification that build has started
+                                        if let Some(notifier) = discord_notifier {
+                                            // Get the full commit info from DB
+                                            if let Ok(Some(commit)) = get_commit(
+                                                &conn,
+                                                repo_id as i64,
+                                                payload.head_commit.id.clone(),
+                                            ) {
+                                                let _ = notifier
+                                                    .notify_build_started(
+                                                        &payload.repository.owner.login,
+                                                        &payload.repository.name,
+                                                        &payload.head_commit.id,
+                                                        &payload.head_commit.message,
+                                                        commit.build_url.as_deref(),
+                                                    )
+                                                    .await;
                                             }
                                         }
                                     }
@@ -207,17 +231,40 @@ async fn process_event(event: WebhookEvent, pool: &Pool<SqliteConnectionManager>
                 println!("Received check_run event: {:?}", payload);
                 match upsert_repo(&payload.repository, &conn) {
                     Ok(repo_id) => {
+                        let build_status = BuildStatus::of(
+                            &payload.check_run.check_suite.status,
+                            &payload.check_run.check_suite.conclusion.as_deref(),
+                        );
+
                         if let Err(e) = set_commit_status(
                             &payload.check_run.check_suite.head_sha,
-                            BuildStatus::of(
-                                &payload.check_run.check_suite.status,
-                                &payload.check_run.check_suite.conclusion.as_deref(),
-                            ),
-                            payload.check_run.details_url,
+                            build_status.clone(),
+                            payload.check_run.details_url.clone(),
                             repo_id,
                             &conn,
                         ) {
                             println!("Error setting commit status: {}", e);
+                        }
+
+                        // Get the commit to get its message
+                        if let Ok(Some(commit)) = get_commit(
+                            &conn,
+                            repo_id as i64,
+                            payload.check_run.check_suite.head_sha.clone(),
+                        ) {
+                            // Send a notification that build has completed
+                            if let Some(notifier) = discord_notifier {
+                                let _ = notifier
+                                    .notify_build_completed(
+                                        &payload.repository.owner.login,
+                                        &payload.repository.name,
+                                        &payload.check_run.check_suite.head_sha,
+                                        &commit.message,
+                                        &build_status,
+                                        Some(&payload.check_run.details_url),
+                                    )
+                                    .await;
+                            }
                         }
                     }
                     Err(e) => {
@@ -241,6 +288,7 @@ pub async fn start_websockets(
     websocket_url: String,
     client_secret: String,
     pool: Pool<SqliteConnectionManager>,
+    discord_notifier: Option<DiscordNotifier>,
 ) {
     loop {
         println!(
@@ -278,6 +326,8 @@ pub async fn start_websockets(
                 println!("Connection to webhooks websocket established");
 
                 let (_, read) = ws_stream.split();
+                let notifier_ref = &discord_notifier;
+                let pool_ref = &pool;
 
                 match read
                     .for_each(|message| async {
@@ -285,7 +335,7 @@ pub async fn start_websockets(
                             Ok(msg) => {
                                 let data = msg.into_data();
                                 match serde_json::from_slice::<WebhookEvent>(&data) {
-                                    Ok(event) => process_event(event, &pool).await,
+                                    Ok(event) => process_event(event, pool_ref, notifier_ref).await,
                                     Err(e) => eprintln!("Error parsing webhook event: {}", e),
                                 }
                             }

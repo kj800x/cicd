@@ -49,9 +49,12 @@ pub mod prelude {
 
     // Maud imports
     pub use maud::{html, Markup, DOCTYPE};
+
+    pub use crate::discord::{setup_discord, DiscordNotifier};
 }
 
 mod db;
+mod discord;
 mod graphql;
 mod resource;
 mod web;
@@ -60,11 +63,13 @@ mod webhooks;
 use futures_util::future;
 use prometheus::Registry;
 
+use crate::discord::setup_discord;
 use crate::prelude::*;
 
 async fn start_http(
     registry: Registry,
     pool: Pool<SqliteConnectionManager>,
+    discord_notifier: Option<DiscordNotifier>,
 ) -> Result<(), std::io::Error> {
     log::info!("Starting HTTP server at http://localhost:8080/api");
 
@@ -73,7 +78,7 @@ async fn start_http(
             .data(pool.clone())
             .finish();
 
-        App::new()
+        let mut app = App::new()
             .wrap(RequestTracing::new())
             .wrap(RequestMetrics::default())
             .route(
@@ -99,7 +104,14 @@ async fn start_http(
                 resource("/api/graphql")
                     .guard(guard::Get())
                     .to(index_graphiql),
-            )
+            );
+
+        // Add Discord notifier to app data if available
+        if let Some(notifier) = discord_notifier.clone() {
+            app = app.app_data(Data::new(notifier));
+        }
+
+        app
     })
     .bind(("0.0.0.0", 8080))?
     .run()
@@ -135,9 +147,17 @@ async fn main() -> std::io::Result<()> {
     let pool = Pool::new(manager).unwrap();
     migrate(pool.get().unwrap()).unwrap();
 
+    // Setup Discord notifier
+    let discord_notifier = setup_discord().await;
+
     future::select(
-        Box::pin(start_http(registry, pool.clone())),
-        Box::pin(start_websockets(websocket_url, client_secret, pool.clone())),
+        Box::pin(start_http(registry, pool.clone(), discord_notifier.clone())),
+        Box::pin(start_websockets(
+            websocket_url,
+            client_secret,
+            pool.clone(),
+            discord_notifier,
+        )),
     )
     .await;
 

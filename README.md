@@ -23,6 +23,7 @@ The application receives GitHub webhook events through a websocket proxy, as the
 - Track which commits belong to which branches
 - GraphQL API to query recent builds with branch information and commit history
 - Metrics endpoint for monitoring
+- Discord notifications for build events (started and completed)
 
 ## Enhanced Git Model
 
@@ -44,9 +45,13 @@ The application now features an enhanced git model that tracks:
    - Retrieve parent commits to trace history
    - Find child commits that descend from a specific commit
 
+4. **Build Notifications**:
+   - Discord notifications when builds start
+   - Updates to Discord messages when builds complete with success/failure status
+   - Rich message format with repository, commit, and build information
+
 ## Planned Improvements
 
-- Discord status notifications
 - Kubernetes integration to detect when pods are running outdated builds
 - Support for repositories owned by multiple users
 
@@ -57,6 +62,7 @@ The application is built using:
 - **SQLite** for storing repository, commit, and build data
 - **GraphQL** for API queries
 - **WebSockets** for receiving GitHub webhook events
+- **Discord API** for build notifications
 - **Prometheus** for metrics
 
 ## Setup and Configuration
@@ -68,6 +74,15 @@ The application requires the following environment variables:
 - `WEBSOCKET_URL`: URL for the websocket proxy that forwards GitHub webhooks
 - `CLIENT_SECRET`: Secret for authenticating with the websocket proxy
 - `DATABASE_PATH`: (Optional) Path to the SQLite database file (defaults to "db.db")
+
+#### Discord Notification Configuration
+
+To enable Discord notifications for build events, set the following variables:
+
+- `DISCORD_BOT_TOKEN`: Your Discord bot token for authentication
+- `DISCORD_CHANNEL_ID`: The ID of the channel where build notifications should be posted
+
+If these variables are not set, Discord notifications will be disabled.
 
 ### Running the Application
 
