@@ -195,8 +195,8 @@ impl DiscordNotifier {
         let (status_emoji, status_title, status_color) = match build_status {
             BuildStatus::Success => ("✅", "Build Succeeded", Colour::DARK_GREEN),
             BuildStatus::Failure => ("❌", "Build Failed", Colour::RED),
-            BuildStatus::Pending => ("🔄", "Build In Progress", Colour::BLUE),
-            BuildStatus::None => ("⚠️", "Build Status Unknown", Colour::GOLD),
+            BuildStatus::Pending => ("🔄", "Build In Progress", Colour::GOLD),
+            BuildStatus::None => ("⚠️", "Build Status Unknown", Colour::DARK_GREY),
         };
 
         // Create builder function to generate a consistent embed
@@ -207,8 +207,13 @@ impl DiscordNotifier {
                     status_emoji, status_title, repo_owner, repo_name
                 ))
                 .description(format!(
-                    "Build completed for commit `{}`",
-                    &commit_sha[0..7]
+                    "{}",
+                    match build_status {
+                        BuildStatus::Success | BuildStatus::Failure =>
+                            format!("Build completed for commit `{}`", &commit_sha[0..7]),
+                        BuildStatus::Pending | BuildStatus::None =>
+                            format!("Build update for commit `{}`", &commit_sha[0..7]),
+                    }
                 ))
                 .color(status_color)
                 .field("Repository", format!("{}/{}", repo_owner, repo_name), true)
