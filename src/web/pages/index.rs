@@ -336,6 +336,18 @@ pub async fn index(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Respo
                     .commit-row:hover {
                         background-color: rgba(0, 0, 0, 0.01);
                     }
+                    .commit-row.bg-success {
+                        background-color: rgba(46, 204, 113, 0.15);
+                    }
+                    .commit-row.bg-failure {
+                        background-color: rgba(231, 76, 60, 0.15);
+                    }
+                    .commit-row.bg-pending {
+                        background-color: rgba(243, 156, 18, 0.15);
+                    }
+                    .commit-row.bg-none {
+                        background-color: rgba(127, 140, 141, 0.15);
+                    }
                     .commit-status {
                         width: 16px;
                         height: 16px;
@@ -496,7 +508,12 @@ pub async fn index(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Respo
 
                                 div class="commit-list" {
                                     @for commit in &data.commits {
-                                        div class="commit-row" {
+                                        div class=(format!("commit-row bg-{}", match commit.build_status {
+                                            BuildStatus::Success => "success",
+                                            BuildStatus::Failure => "failure",
+                                            BuildStatus::Pending => "pending",
+                                            BuildStatus::None => "none",
+                                        })) {
                                             div class=(format!("commit-status status-{}", match commit.build_status {
                                                 BuildStatus::Success => "success",
                                                 BuildStatus::Failure => "failure",
