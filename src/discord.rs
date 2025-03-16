@@ -1,5 +1,6 @@
 use crate::prelude::*;
-use serenity::builder::{CreateMessage, EditMessage};
+use serenity::all::Colour;
+use serenity::builder::{CreateEmbed, CreateMessage, EditMessage};
 use serenity::http::Http;
 use serenity::model::id::{ChannelId, MessageId};
 use std::collections::HashMap;
@@ -10,6 +11,8 @@ use tokio::sync::Mutex;
 // Store Discord message IDs for in-progress builds to update later
 #[derive(Clone)]
 pub struct DiscordNotifier {
+    // We keep the token for documentation/debugging purposes only
+    #[allow(dead_code)]
     discord_token: String,
     channel_id: ChannelId,
     http: Arc<Http>,
@@ -103,20 +106,29 @@ impl DiscordNotifier {
             commit_sha
         );
 
-        let content = format!(
-            "🔄 **Build Started**\n\
-            **Repository:** {}/{}\n\
-            **Commit:** {} - {}\n\
-            {}",
-            repo_owner,
-            repo_name,
-            &commit_sha[0..7],
-            commit_message.lines().next().unwrap_or(commit_message),
-            build_url.map_or("".to_string(), |url| format!("**Build URL:** {}", url))
-        );
+        // Create an embed for the build started notification
+        let mut embed: CreateEmbed = CreateEmbed::new()
+            .title(format!("🔄 Build Started: {}/{}", repo_owner, repo_name))
+            .description(format!(
+                "A new build has started for commit `{}`",
+                &commit_sha[0..7]
+            ))
+            .color(Colour::BLUE) // Blue for "in progress"
+            .field("Repository", format!("{}/{}", repo_owner, repo_name), true)
+            .field("Commit", &commit_sha[0..7], true)
+            .field(
+                "Message",
+                commit_message.lines().next().unwrap_or(commit_message),
+                false,
+            );
 
-        log::debug!("Discord message content: {}", content);
-        let message = CreateMessage::new().content(content);
+        // Add build URL if available
+        if let Some(url) = build_url {
+            embed = embed.field("Build URL", format!("[View Logs]({})", url), false);
+        }
+
+        // Create the message with the embed
+        let message = CreateMessage::new().add_embed(embed);
 
         log::info!("Sending Discord message to channel ID: {}", self.channel_id);
         log::info!(
@@ -179,34 +191,42 @@ impl DiscordNotifier {
             build_status
         );
 
-        let status_emoji = match build_status {
-            BuildStatus::Success => "✅",
-            BuildStatus::Failure => "❌",
-            _ => "⚠️",
+        // Set status-specific values (emoji, title, color)
+        let (status_emoji, status_title, status_color) = match build_status {
+            BuildStatus::Success => ("✅", "Build Succeeded", Colour::DARK_GREEN),
+            BuildStatus::Failure => ("❌", "Build Failed", Colour::RED),
+            BuildStatus::Pending => ("🔄", "Build In Progress", Colour::BLUE),
+            BuildStatus::None => ("⚠️", "Build Status Unknown", Colour::GOLD),
         };
 
-        let status_text = match build_status {
-            BuildStatus::Success => "**Build Succeeded**",
-            BuildStatus::Failure => "**Build Failed**",
-            BuildStatus::Pending => "**Build In Progress**",
-            BuildStatus::None => "**Build Status Unknown**",
+        // Create builder function to generate a consistent embed
+        let create_embed = || -> CreateEmbed {
+            let mut embed = CreateEmbed::new()
+                .title(format!(
+                    "{} {}: {}/{}",
+                    status_emoji, status_title, repo_owner, repo_name
+                ))
+                .description(format!(
+                    "Build completed for commit `{}`",
+                    &commit_sha[0..7]
+                ))
+                .color(status_color)
+                .field("Repository", format!("{}/{}", repo_owner, repo_name), true)
+                .field("Commit", &commit_sha[0..7], true)
+                .field("Status", status_title, true)
+                .field(
+                    "Message",
+                    commit_message.lines().next().unwrap_or(commit_message),
+                    false,
+                );
+
+            // Add build URL if available
+            if let Some(url) = build_url {
+                embed = embed.field("Build URL", format!("[View Logs]({})", url), false);
+            }
+
+            embed
         };
-
-        let content = format!(
-            "{} {}\n\
-            **Repository:** {}/{}\n\
-            **Commit:** {} - {}\n\
-            {}",
-            status_emoji,
-            status_text,
-            repo_owner,
-            repo_name,
-            &commit_sha[0..7],
-            commit_message.lines().next().unwrap_or(commit_message),
-            build_url.map_or("".to_string(), |url| format!("**Build URL:** {}", url))
-        );
-
-        log::debug!("Discord message content: {}", content);
 
         // Find message ID from tracker
         let message_id = {
@@ -220,12 +240,10 @@ impl DiscordNotifier {
             id
         };
 
-        let content_clone = content.clone(); // Clone content for use in closures
-
         if let Some(message_id) = message_id {
             log::info!("Updating existing Discord message, ID: {}", message_id);
             // Update existing message
-            let edit_message = EditMessage::new().content(&content);
+            let edit_message = EditMessage::new().embed(create_embed());
 
             match self
                 .channel_id
@@ -243,7 +261,7 @@ impl DiscordNotifier {
                     if e.to_string().contains("Unknown Message") {
                         log::error!("Message not found - it may have been deleted");
                         // Try sending a new message instead
-                        self.send_new_discord_message(&content_clone).await
+                        self.send_new_discord_message(create_embed()).await
                     } else {
                         Err(format!("Failed to update Discord message: {}", e))
                     }
@@ -254,19 +272,19 @@ impl DiscordNotifier {
                 "No existing message found for commit {}, sending new message",
                 commit_sha
             );
-            self.send_new_discord_message(&content_clone).await
+            self.send_new_discord_message(create_embed()).await
         }
     }
 
-    // Helper method to send a new message
-    async fn send_new_discord_message(&self, content: &str) -> Result<(), String> {
+    // Helper method to send a new message with an embed
+    async fn send_new_discord_message(&self, embed: CreateEmbed) -> Result<(), String> {
         log::info!(
             "Sending new Discord message to channel ID: {}",
             self.channel_id
         );
-        log::info!("Message content: {}", content);
+        log::debug!("Discord embed content: {:?}", embed);
 
-        let message = CreateMessage::new().content(content);
+        let message: CreateMessage = CreateMessage::new().add_embed(embed);
 
         match self.channel_id.send_message(&self.http, message).await {
             Ok(message) => {
@@ -311,14 +329,17 @@ impl DiscordNotifier {
             Ok(channel) => {
                 log::info!("Discord channel validated: {:?}", channel);
 
-                // Try sending a test message and then delete it
-                let test_message = CreateMessage::new()
-                    .content("🔍 Bot permission test - this message will be deleted");
+                // Try sending a test message with an embed and then delete it
+                let test_embed: CreateEmbed = CreateEmbed::new()
+                    .title("🔍 Bot Permissions Test")
+                    .description("This message will be deleted automatically.")
+                    .color(Colour::TEAL);
+
+                let test_message: CreateMessage = CreateMessage::new().add_embed(test_embed);
 
                 log::debug!(
-                    "Sending test message to channel {} with content: {:?}",
-                    self.channel_id,
-                    test_message
+                    "Sending test message to channel {} with embed",
+                    self.channel_id
                 );
                 match self.channel_id.send_message(&self.http, test_message).await {
                     Ok(message) => {
