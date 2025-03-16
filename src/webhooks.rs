@@ -1,4 +1,5 @@
 use futures_util::StreamExt;
+use regex::Regex;
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{client::IntoClientRequest, http::HeaderValue},
@@ -35,6 +36,7 @@ pub struct GhCommit {
     pub timestamp: String, // "2024-05-12T15:35:17-04:00",
     pub author: CommitAuthor,
     pub committer: CommitAuthor,
+    pub parent_shas: Option<Vec<String>>, // Parent commit SHAs
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -65,11 +67,28 @@ struct PingEvent {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+struct PushCommit {
+    id: String, // sha
+    message: String,
+    timestamp: String,
+    author: CommitAuthor,
+    committer: CommitAuthor,
+    parents: Vec<ParentCommit>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ParentCommit {
+    sha: String,
+    url: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct PushEvent {
     r#ref: String, // like "refs/heads/branch-name"
     after: String,
     repository: Repository,
-    head_commit: GhCommit,
+    head_commit: PushCommit,
+    commits: Vec<PushCommit>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -80,10 +99,33 @@ struct WebhookEvent {
 
 // Pushes can be for reasons other than branches, such as tags
 fn extract_branch_name(r#ref: &str) -> Option<String> {
-    if r#ref.starts_with("refs/heads/") {
-        Some(r#ref["refs/heads/".len()..].to_string())
+    let branch_regex = Regex::new(r"^refs/heads/(.+)$").unwrap();
+    if let Some(captures) = branch_regex.captures(r#ref) {
+        captures.get(1).map(|m| m.as_str().to_string())
     } else {
         None
+    }
+}
+
+// Convert PushCommit to GhCommit, extracting all parents
+fn convert_to_gh_commit(push_commit: &PushCommit) -> GhCommit {
+    let parent_shas = if !push_commit.parents.is_empty() {
+        let mut shas = Vec::with_capacity(push_commit.parents.len());
+        for parent in &push_commit.parents {
+            shas.push(parent.sha.clone());
+        }
+        Some(shas)
+    } else {
+        None
+    };
+
+    GhCommit {
+        id: push_commit.id.clone(),
+        message: push_commit.message.clone(),
+        timestamp: push_commit.timestamp.clone(),
+        author: push_commit.author.clone(),
+        committer: push_commit.committer.clone(),
+        parent_shas,
     }
 }
 
@@ -93,10 +135,32 @@ async fn process_event(event: WebhookEvent, pool: &Pool<SqliteConnectionManager>
         "push" => {
             let payload: PushEvent = serde_json::from_value(event.payload).unwrap();
             println!("Received push event: {:?}", payload);
+
+            // Upsert the repository
             let repo_id = upsert_repo(&payload.repository, &conn).unwrap();
-            upsert_commit(&payload.head_commit, repo_id, &conn).unwrap();
+
+            // Process all commits in the push
+            for commit in &payload.commits {
+                // Convert to our commit type with parent information
+                let gh_commit = convert_to_gh_commit(commit);
+
+                // Store the commit
+                upsert_commit(&gh_commit, repo_id, &conn).unwrap();
+            }
+
+            // Process the head commit specifically
+            let head_gh_commit = convert_to_gh_commit(&payload.head_commit);
+            upsert_commit(&head_gh_commit, repo_id, &conn).unwrap();
+
+            // If this is a branch, update the branch information
             if let Some(branch_name) = extract_branch_name(&payload.r#ref) {
-                upsert_branch(&branch_name, &payload.head_commit.id, repo_id, &conn).unwrap();
+                let branch_id =
+                    upsert_branch(&branch_name, &payload.after, repo_id, &conn).unwrap();
+
+                // Add all commits in this push to the branch
+                for commit in &payload.commits {
+                    add_commit_to_branch(&commit.id, branch_id, repo_id, &conn).unwrap();
+                }
             }
         }
         "ping" => {

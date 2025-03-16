@@ -19,13 +19,32 @@ The application receives GitHub webhook events through a websocket proxy, as the
 - Monitor commits (SHA, message, timestamp)
 - Track build status (None, Pending, Success, Failure)
 - Store branch information and head commit references
-- GraphQL API to query recent builds
+- Track parent-child relationships between commits, including merge commits with multiple parents
+- Track which commits belong to which branches
+- GraphQL API to query recent builds with branch information and commit history
 - Metrics endpoint for monitoring
+
+## Enhanced Git Model
+
+The application now features an enhanced git model that tracks:
+
+1. **Branch Information**:
+   - Which commits belong to which branches (many-to-many relationship)
+   - Head commit SHAs for branches
+
+2. **Commit Relationships**:
+   - Parent-child relationships between commits
+   - Support for multiple parents (merge commits)
+   - Ability to trace commit history in both directions (parents and children)
+
+3. **GraphQL API Enhancements**:
+   - Query recent builds with branch information
+   - Look up a specific commit by SHA with branch details
+   - Retrieve parent commits to trace history
+   - Find child commits that descend from a specific commit
 
 ## Planned Improvements
 
-- Enhanced Git model with more detailed tracking information
-- Better branch tracking for builds and commits
 - Discord status notifications
 - Kubernetes integration to detect when pods are running outdated builds
 - Support for repositories owned by multiple users
@@ -73,10 +92,101 @@ cargo run
 - `/api/graphql`: GraphQL API endpoint for querying data
 - `/api/metrics`: Prometheus metrics endpoint
 
+### GraphQL Queries
+
+The API now supports the following queries:
+
+```graphql
+# Get recent builds with basic info
+query RecentBuilds {
+  recentBuilds {
+    id
+    sha
+    message
+    timestamp
+    buildStatus
+    buildUrl
+    parentShas
+    repoName
+    repoOwnerName
+  }
+}
+
+# Get recent builds with branch information
+query RecentBuildsWithBranches {
+  recentBuildsWithBranches {
+    id
+    sha
+    message
+    timestamp
+    buildStatus
+    buildUrl
+    parentShas
+    repoName
+    repoOwnerName
+    branches {
+      id
+      name
+      headCommitSha
+    }
+  }
+}
+
+# Look up a specific commit by SHA
+query Commit {
+  commit(sha: "abc123") {
+    id
+    sha
+    message
+    timestamp
+    buildStatus
+    buildUrl
+    parentShas
+    repoName
+    repoOwnerName
+    branches {
+      id
+      name
+      headCommitSha
+    }
+  }
+}
+
+# Trace commit history (parents)
+query ParentCommits {
+  parentCommits(sha: "abc123", maxDepth: 10) {
+    id
+    sha
+    message
+    timestamp
+    buildStatus
+    buildUrl
+    parentShas
+    repoName
+    repoOwnerName
+  }
+}
+
+# Find child commits
+query CommitChildren {
+  commitChildren(sha: "abc123") {
+    id
+    sha
+    message
+    timestamp
+    buildStatus
+    buildUrl
+    parentShas
+    repoName
+    repoOwnerName
+  }
+}
+```
+
 ## GitHub Webhook Integration
 
 The application receives GitHub webhook events through a websocket proxy service. The current events being processed are:
-- Push events - For tracking new commits
+- Push events - For tracking new commits and branch updates
 - Check run events - For tracking build status
 
 ## Database Schema
@@ -85,23 +195,21 @@ The application uses SQLite with the following tables:
 - `git_repo`: Stores repository information
 - `git_branch`: Tracks branches and their head commits
 - `git_commit`: Stores commit information and build status
+- `git_commit_branch`: Junction table tracking which commits belong to which branches
+- `git_commit_parent`: Junction table tracking parent-child relationships between commits
 
 ## Future Roadmap
 
-1. Enhanced Git Model:
-   - Improve branch tracking for builds
-   - Capture more metadata about commits and builds
-
-2. Discord Integration:
+1. Discord Integration:
    - Send notifications about build status changes
    - Configurable alerts for build failures
 
-3. Kubernetes Integration:
+2. Kubernetes Integration:
    - Track container deployments
    - Identify pods running outdated builds
    - Provide recommendations for updates
 
-4. Multi-user Support:
+3. Multi-user Support:
    - Track repositories across multiple GitHub users
    - Role-based access controls for the dashboard
 
