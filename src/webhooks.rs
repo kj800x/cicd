@@ -143,7 +143,12 @@ async fn process_event(
         "push" => {
             match serde_json::from_value::<PushEvent>(event.payload.clone()) {
                 Ok(payload) => {
-                    println!("Received push event: {:?}", payload);
+                    log::debug!(
+                        "Received push event for {}/{}, ref: {}",
+                        payload.repository.owner.login,
+                        payload.repository.name,
+                        payload.r#ref
+                    );
 
                     match upsert_repo(&payload.repository, &conn) {
                         Ok(repo_id) => {
@@ -151,15 +156,16 @@ async fn process_event(
                                 let gh_commit = convert_to_gh_commit(commit);
 
                                 if let Err(e) = upsert_commit(&gh_commit, repo_id, &conn) {
-                                    println!("Error storing commit {}: {}", commit.id, e);
+                                    log::error!("Error storing commit {}: {}", commit.id, e);
                                 }
                             }
 
                             let head_gh_commit = convert_to_gh_commit(&payload.head_commit);
                             if let Err(e) = upsert_commit(&head_gh_commit, repo_id, &conn) {
-                                println!(
+                                log::error!(
                                     "Error storing head commit {}: {}",
-                                    payload.head_commit.id, e
+                                    payload.head_commit.id,
+                                    e
                                 );
                             }
 
@@ -170,7 +176,7 @@ async fn process_event(
                                             if let Err(e) = add_commit_to_branch(
                                                 &commit.id, branch_id, repo_id, &conn,
                                             ) {
-                                                println!("Error associating commit {} with branch {}: {}", commit.id, branch_name, e);
+                                                log::error!("Error associating commit {} with branch {}: {}", commit.id, branch_name, e);
                                             }
                                         }
 
@@ -182,7 +188,7 @@ async fn process_event(
                                                 repo_id as i64,
                                                 payload.head_commit.id.clone(),
                                             ) {
-                                                let _ = notifier
+                                                match notifier
                                                     .notify_build_started(
                                                         &payload.repository.owner.login,
                                                         &payload.repository.name,
@@ -190,45 +196,78 @@ async fn process_event(
                                                         &payload.head_commit.message,
                                                         commit.build_url.as_deref(),
                                                     )
-                                                    .await;
+                                                    .await
+                                                {
+                                                    Ok(_) => log::info!(
+                                                        "Discord notification sent for build start"
+                                                    ),
+                                                    Err(e) => log::error!(
+                                                        "Failed to send Discord notification: {}",
+                                                        e
+                                                    ),
+                                                }
+                                            } else {
+                                                log::warn!("Could not find commit in DB to send Discord notification");
                                             }
                                         }
                                     }
                                     Err(e) => {
-                                        println!("Error updating branch {}: {}", branch_name, e);
+                                        log::error!("Error updating branch {}: {}", branch_name, e);
                                     }
                                 }
                             }
                         }
                         Err(e) => {
-                            println!(
+                            log::error!(
                                 "Error upserting repository {}: {}",
-                                payload.repository.name, e
+                                payload.repository.name,
+                                e
                             );
                         }
                     }
                 }
                 Err(e) => {
-                    println!("Error parsing push event: {}", e);
-                    println!("Raw payload: {}", &event.payload);
+                    log::error!("Error parsing push event: {}", e);
+                    log::debug!(
+                        "Raw push payload (first 200 chars): {}",
+                        truncate_payload(&event.payload.to_string(), 200)
+                    );
                 }
             }
         }
         "ping" => match serde_json::from_value::<PingEvent>(event.payload.clone()) {
             Ok(payload) => {
-                println!("Received ping event: {:?}", payload);
+                log::debug!(
+                    "Received ping event for repository: {}",
+                    payload.repository.name
+                );
                 if let Err(e) = upsert_repo(&payload.repository, &conn) {
-                    println!("Error upserting repository from ping event: {}", e);
+                    log::error!("Error upserting repository from ping event: {}", e);
                 }
             }
             Err(e) => {
-                println!("Error parsing ping event: {}", e);
-                println!("Raw payload: {}", &event.payload);
+                log::error!("Error parsing ping event: {}", e);
+                log::debug!(
+                    "Raw ping payload (first 200 chars): {}",
+                    truncate_payload(&event.payload.to_string(), 200)
+                );
             }
         },
         "check_run" => match serde_json::from_value::<CheckRunEvent>(event.payload.clone()) {
             Ok(payload) => {
-                println!("Received check_run event: {:?}", payload);
+                log::debug!(
+                    "Received check_run event for {}/{}, status: {}, conclusion: {}",
+                    payload.repository.owner.login,
+                    payload.repository.name,
+                    payload.check_run.check_suite.status,
+                    payload
+                        .check_run
+                        .check_suite
+                        .conclusion
+                        .as_deref()
+                        .unwrap_or("none")
+                );
+
                 match upsert_repo(&payload.repository, &conn) {
                     Ok(repo_id) => {
                         let build_status = BuildStatus::of(
@@ -243,7 +282,7 @@ async fn process_event(
                             repo_id,
                             &conn,
                         ) {
-                            println!("Error setting commit status: {}", e);
+                            log::error!("Error setting commit status: {}", e);
                         }
 
                         // Get the commit to get its message
@@ -254,7 +293,7 @@ async fn process_event(
                         ) {
                             // Send a notification that build has completed
                             if let Some(notifier) = discord_notifier {
-                                let _ = notifier
+                                match notifier
                                     .notify_build_completed(
                                         &payload.repository.owner.login,
                                         &payload.repository.name,
@@ -263,24 +302,47 @@ async fn process_event(
                                         &build_status,
                                         Some(&payload.check_run.details_url),
                                     )
-                                    .await;
+                                    .await
+                                {
+                                    Ok(_) => {
+                                        log::info!("Discord notification sent for build completion")
+                                    }
+                                    Err(e) => {
+                                        log::error!("Failed to send Discord notification: {}", e)
+                                    }
+                                }
                             }
                         }
                     }
                     Err(e) => {
-                        println!("Error upserting repository from check_run event: {}", e);
+                        log::error!("Error upserting repository from check_run event: {}", e);
                     }
                 }
             }
             Err(e) => {
-                println!("Error parsing check_run event: {}", e);
-                println!("Raw payload: {}", &event.payload);
+                log::error!("Error parsing check_run event: {}", e);
+                log::debug!(
+                    "Raw check_run payload (first 200 chars): {}",
+                    truncate_payload(&event.payload.to_string(), 200)
+                );
             }
         },
         _ => {
-            println!("Received unknown event: {}", event.event_type);
-            println!("Raw payload: {}", &event.payload);
+            log::debug!("Received unknown event: {}", event.event_type);
+            log::trace!(
+                "Raw payload (first 200 chars): {}",
+                truncate_payload(&event.payload.to_string(), 200)
+            );
         }
+    }
+}
+
+// Helper function to truncate long payloads
+fn truncate_payload(payload: &str, max_length: usize) -> String {
+    if payload.len() <= max_length {
+        payload.to_string()
+    } else {
+        format!("{}...[truncated]", &payload[0..max_length])
     }
 }
 
@@ -291,7 +353,7 @@ pub async fn start_websockets(
     discord_notifier: Option<DiscordNotifier>,
 ) {
     loop {
-        println!(
+        log::info!(
             "Attempting to connect to webhook WebSocket at {}",
             websocket_url
         );
@@ -299,7 +361,7 @@ pub async fn start_websockets(
         let mut request = match websocket_url.clone().into_client_request() {
             Ok(request) => request,
             Err(e) => {
-                eprintln!("Failed to create WebSocket request: {}", e);
+                log::error!("Failed to create WebSocket request: {}", e);
                 // Wait before retrying
                 tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
                 continue;
@@ -311,7 +373,7 @@ pub async fn start_websockets(
             match format!("Bearer {}", client_secret).parse::<HeaderValue>() {
                 Ok(header) => header,
                 Err(e) => {
-                    eprintln!("Failed to create Authorization header: {}", e);
+                    log::error!("Failed to create Authorization header: {}", e);
                     // Wait before retrying
                     tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
                     continue;
@@ -323,7 +385,7 @@ pub async fn start_websockets(
 
         match connect_result {
             Ok((ws_stream, _)) => {
-                println!("Connection to webhooks websocket established");
+                log::info!("Connection to webhooks websocket established");
 
                 let (_, read) = ws_stream.split();
                 let notifier_ref = &discord_notifier;
@@ -336,25 +398,25 @@ pub async fn start_websockets(
                                 let data = msg.into_data();
                                 match serde_json::from_slice::<WebhookEvent>(&data) {
                                     Ok(event) => process_event(event, pool_ref, notifier_ref).await,
-                                    Err(e) => eprintln!("Error parsing webhook event: {}", e),
+                                    Err(e) => log::error!("Error parsing webhook event: {}", e),
                                 }
                             }
-                            Err(e) => eprintln!("Error reading from websocket: {}", e),
+                            Err(e) => log::error!("Error reading from websocket: {}", e),
                         }
                     })
                     .await
                 {
                     // The for_each completes when the stream is closed
-                    _ => eprintln!("WebSocket connection closed, will attempt to reconnect..."),
+                    _ => log::error!("WebSocket connection closed, will attempt to reconnect..."),
                 }
             }
             Err(e) => {
-                eprintln!("Failed to connect to WebSocket: {}", e);
+                log::error!("Failed to connect to WebSocket: {}", e);
             }
         }
 
         // Wait before retrying
-        eprintln!("Reconnecting in 10 seconds...");
+        log::warn!("Reconnecting in 10 seconds...");
         tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
     }
 }

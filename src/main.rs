@@ -120,7 +120,32 @@ async fn start_http(
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
+    // Configure logger with custom filter to prioritize Discord logs
+    env_logger::builder()
+        .filter_level(log::LevelFilter::Warn) // Set default level to Warn for most modules
+        .filter(Some("cicd::discord"), log::LevelFilter::Debug) // Enable debug logs for Discord module
+        .filter(Some("serenity"), log::LevelFilter::Info) // Enable info logs for Serenity crate
+        .filter_module(
+            "cicd",
+            match std::env::var("RUST_LOG") {
+                Ok(level) => match level.as_str() {
+                    "trace" => log::LevelFilter::Trace,
+                    "debug" => log::LevelFilter::Debug,
+                    "info" => log::LevelFilter::Info,
+                    "warn" => log::LevelFilter::Warn,
+                    "error" => log::LevelFilter::Error,
+                    _ => log::LevelFilter::Warn,
+                },
+                Err(_) => log::LevelFilter::Warn,
+            },
+        )
+        .init();
+
+    log::info!("Starting CI/CD Build Status Dashboard");
+    log::info!(
+        "For focused Discord debugging, logs are filtered to highlight Discord-related events"
+    );
+
     let registry = prometheus::Registry::new();
     let exporter = opentelemetry_prometheus::exporter()
         .with_registry(registry.clone())
@@ -148,7 +173,13 @@ async fn main() -> std::io::Result<()> {
     migrate(pool.get().unwrap()).unwrap();
 
     // Setup Discord notifier
+    log::info!("Setting up Discord notifier...");
     let discord_notifier = setup_discord().await;
+
+    match &discord_notifier {
+        Some(_) => log::info!("Discord notifier initialized"),
+        None => log::warn!("Discord notifier NOT initialized - notifications will be disabled"),
+    }
 
     future::select(
         Box::pin(start_http(registry, pool.clone(), discord_notifier.clone())),
