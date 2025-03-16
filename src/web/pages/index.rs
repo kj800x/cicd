@@ -59,6 +59,7 @@ pub async fn index(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Respo
             head {
                 meta charset="UTF-8";
                 meta name="viewport" content="width=device-width, initial-scale=1.0";
+                meta http-equiv="refresh" content="3";
                 title { "CI/CD Build Status Dashboard" }
                 style {
                     r#"
