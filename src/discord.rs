@@ -25,14 +25,7 @@ impl DiscordNotifier {
         // Read environment variables for Discord configuration
         let token = match env::var("DISCORD_BOT_TOKEN") {
             Ok(token) => {
-                log::info!("DISCORD_BOT_TOKEN found");
-                // Print a masked version of the token to confirm it's not empty or malformed
-                let masked_token = if token.len() > 10 {
-                    format!("{}...{}", &token[0..5], &token[token.len() - 5..])
-                } else {
-                    "[too short - check token]".to_string()
-                };
-                log::info!("Token format check (masked): {}", masked_token);
+                log::debug!("DISCORD_BOT_TOKEN found");
                 token
             }
             Err(e) => {
@@ -43,7 +36,7 @@ impl DiscordNotifier {
 
         let channel_id_str = match env::var("DISCORD_CHANNEL_ID") {
             Ok(id) => {
-                log::info!("DISCORD_CHANNEL_ID found: {}", id);
+                log::debug!("DISCORD_CHANNEL_ID found: {}", id);
                 id
             }
             Err(e) => {
@@ -53,17 +46,14 @@ impl DiscordNotifier {
         };
 
         let channel_id = match channel_id_str.parse::<u64>() {
-            Ok(id) => {
-                log::info!("Parsed channel ID: {}", id);
-                ChannelId::new(id)
-            }
+            Ok(id) => ChannelId::new(id),
             Err(e) => {
                 log::error!("DISCORD_CHANNEL_ID is not a valid ID: {}", e);
                 return None;
             }
         };
 
-        log::info!("Initializing Discord HTTP client");
+        log::debug!("Initializing Discord HTTP client");
         let http = Http::new(&token);
 
         // Validate the token by making a test API call
@@ -72,8 +62,7 @@ impl DiscordNotifier {
         tokio::spawn(async move {
             match http_clone.get_current_application_info().await {
                 Ok(info) => {
-                    log::info!("Discord bot validated, application name: {}", info.name);
-                    log::info!("Discord bot ID: {}", info.id);
+                    log::info!("Discord bot validated: {} (ID: {})", info.name, info.id);
                 }
                 Err(e) => {
                     log::error!("Discord bot validation failed: {}", e);
@@ -99,7 +88,7 @@ impl DiscordNotifier {
         commit_message: &str,
         build_url: Option<&str>,
     ) -> Result<(), String> {
-        log::info!(
+        log::debug!(
             "Preparing Discord notification for build start: {}/{} commit {}",
             repo_owner,
             repo_name,
@@ -130,18 +119,15 @@ impl DiscordNotifier {
         // Create the message with the embed
         let message = CreateMessage::new().add_embed(embed);
 
-        log::info!("Sending Discord message to channel ID: {}", self.channel_id);
-        log::info!(
-            "Current time before sending: {:?}",
-            std::time::SystemTime::now()
-        );
+        log::debug!("Sending Discord message to channel ID: {}", self.channel_id);
 
         match self.channel_id.send_message(&self.http, message).await {
             Ok(message) => {
-                log::info!("Successfully sent Discord message, ID: {}", message.id);
                 log::info!(
-                    "Time after successful send: {:?}",
-                    std::time::SystemTime::now()
+                    "Discord build notification sent for {}/{} ({})",
+                    repo_owner,
+                    repo_name,
+                    &commit_sha[0..7]
                 );
 
                 // Store message ID for later updates
@@ -151,22 +137,17 @@ impl DiscordNotifier {
             }
             Err(e) => {
                 log::error!("Failed to send Discord message: {}", e);
-                log::error!("Time after failed send: {:?}", std::time::SystemTime::now());
 
                 // Check if it's a permission issue
                 if e.to_string().contains("Missing Permissions") {
                     log::error!("Bot lacks permissions to post in the channel");
                     log::error!("Required permissions: Send Messages, Embed Links");
-                    log::error!("Bot URL for permissions: https://discord.com/oauth2/authorize?client_id=YOUR_CLIENT_ID&scope=bot&permissions=2048");
                 } else if e.to_string().contains("Unknown Channel") {
                     log::error!("Channel not found - check if the channel ID is correct and the bot is in the server");
                 } else if e.to_string().contains("Unauthorized") {
                     log::error!("Unauthorized - check if the bot token is correct");
                 } else if e.to_string().contains("ratelimited") {
                     log::error!("Hit Discord rate limit - consider sending fewer messages");
-                } else {
-                    log::error!("Unexpected Discord API error: {}", e);
-                    log::error!("Full error details: {:?}", e);
                 }
                 Err(format!("Failed to send Discord message: {}", e))
             }
@@ -183,7 +164,7 @@ impl DiscordNotifier {
         build_status: &BuildStatus,
         build_url: Option<&str>,
     ) -> Result<(), String> {
-        log::info!(
+        log::debug!(
             "Preparing Discord notification for build completion: {}/{} commit {} with status {:?}",
             repo_owner,
             repo_name,
@@ -236,17 +217,11 @@ impl DiscordNotifier {
         // Find message ID from tracker
         let message_id = {
             let tracker = self.message_tracker.lock().await;
-            log::info!("Current message tracker state: {:?}", tracker);
-            log::info!("Looking for commit SHA: {}", commit_sha);
-            let id = tracker.get(commit_sha).cloned();
-            if id.is_none() {
-                log::warn!("No message ID found for commit SHA: {}", commit_sha);
-            }
-            id
+            tracker.get(commit_sha).cloned()
         };
 
         if let Some(message_id) = message_id {
-            log::info!("Updating existing Discord message, ID: {}", message_id);
+            log::debug!("Updating existing Discord message, ID: {}", message_id);
             // Update existing message
             let edit_message = EditMessage::new().embed(create_embed());
 
@@ -256,15 +231,20 @@ impl DiscordNotifier {
                 .await
             {
                 Ok(_) => {
-                    log::info!("Successfully updated Discord message");
+                    log::info!(
+                        "Discord build status updated: {} for {}/{} ({})",
+                        status_title,
+                        repo_owner,
+                        repo_name,
+                        &commit_sha[0..7]
+                    );
                     Ok(())
                 }
                 Err(e) => {
                     log::error!("Failed to update Discord message: {}", e);
-                    log::error!("Full error details: {:?}", e);
 
                     if e.to_string().contains("Unknown Message") {
-                        log::error!("Message not found - it may have been deleted");
+                        log::warn!("Message not found - it may have been deleted");
                         // Try sending a new message instead
                         self.send_new_discord_message(create_embed()).await
                     } else {
@@ -273,7 +253,7 @@ impl DiscordNotifier {
                 }
             }
         } else {
-            log::info!(
+            log::debug!(
                 "No existing message found for commit {}, sending new message",
                 commit_sha
             );
@@ -283,22 +263,20 @@ impl DiscordNotifier {
 
     // Helper method to send a new message with an embed
     async fn send_new_discord_message(&self, embed: CreateEmbed) -> Result<(), String> {
-        log::info!(
+        log::debug!(
             "Sending new Discord message to channel ID: {}",
             self.channel_id
         );
-        log::debug!("Discord embed content: {:?}", embed);
 
         let message: CreateMessage = CreateMessage::new().add_embed(embed);
 
         match self.channel_id.send_message(&self.http, message).await {
-            Ok(message) => {
-                log::info!("Successfully sent new Discord message, ID: {}", message.id);
+            Ok(_) => {
+                log::info!("New Discord notification sent");
                 Ok(())
             }
             Err(e) => {
                 log::error!("Failed to send new Discord message: {}", e);
-                log::error!("Full error details: {:?}", e);
 
                 if e.to_string().contains("Missing Permissions") {
                     log::error!("Bot lacks permissions to post in the channel");
@@ -313,27 +291,10 @@ impl DiscordNotifier {
 
     // Helper to verify channel exists and bot has permission to post
     pub async fn validate_channel(&self) -> Result<(), String> {
-        log::info!("Validating Discord channel (ID: {})", self.channel_id);
-
-        // Add detailed information about HTTP client state
-        log::debug!("HTTP client type: {:?}", std::any::type_name::<Http>());
-
-        // Test if the HTTP client is correctly initialized by making a simple API call
-        match self.http.get_current_user().await {
-            Ok(user) => log::info!(
-                "HTTP client connection test successful - connected as user: {}",
-                user.name
-            ),
-            Err(e) => log::error!(
-                "HTTP client test failed - could not get current user: {}",
-                e
-            ),
-        }
+        log::debug!("Validating Discord channel (ID: {})", self.channel_id);
 
         match self.channel_id.to_channel(&self.http).await {
-            Ok(channel) => {
-                log::info!("Discord channel validated: {:?}", channel);
-
+            Ok(_) => {
                 // Try sending a test message with an embed and then delete it
                 let test_embed: CreateEmbed = CreateEmbed::new()
                     .title("🔍 Bot Permissions Test")
@@ -342,16 +303,9 @@ impl DiscordNotifier {
 
                 let test_message: CreateMessage = CreateMessage::new().add_embed(test_embed);
 
-                log::debug!(
-                    "Sending test message to channel {} with embed",
-                    self.channel_id
-                );
                 match self.channel_id.send_message(&self.http, test_message).await {
                     Ok(message) => {
-                        log::info!(
-                            "Successfully sent test message (ID: {}), will delete it now",
-                            message.id
-                        );
+                        log::debug!("Test message sent successfully, deleting it");
                         if let Err(e) = message.delete(&self.http).await {
                             log::warn!("Could not delete test message: {}", e);
                         }
@@ -394,25 +348,9 @@ impl DiscordNotifier {
 pub async fn setup_discord() -> Option<DiscordNotifier> {
     log::info!("Setting up Discord notifier");
 
-    // Log all environment variables (without values) to see if they're being passed correctly
-    log::info!(
-        "Environment variables present: {}",
-        env::vars().map(|(k, _)| k).collect::<Vec<_>>().join(", ")
-    );
-
     // Check if Discord environment variables are present
     let has_token = env::var("DISCORD_BOT_TOKEN").is_ok();
     let has_channel = env::var("DISCORD_CHANNEL_ID").is_ok();
-
-    log::info!("Discord environment variables status:");
-    log::info!(
-        "  DISCORD_BOT_TOKEN: {}",
-        if has_token { "Present" } else { "MISSING" }
-    );
-    log::info!(
-        "  DISCORD_CHANNEL_ID: {}",
-        if has_channel { "Present" } else { "MISSING" }
-    );
 
     if !has_token || !has_channel {
         log::error!(
@@ -429,49 +367,11 @@ pub async fn setup_discord() -> Option<DiscordNotifier> {
             // Validate channel existence and permissions
             match notifier.validate_channel().await {
                 Ok(_) => {
-                    log::info!("Discord notifier initialized and validated successfully");
+                    log::info!("Discord notifier initialized successfully");
                     Some(notifier)
                 }
                 Err(e) => {
                     log::error!("Discord channel validation failed: {}", e);
-                    // Try to get more detailed information about the channel
-                    log::warn!("Attempting to retrieve more information about the channel...");
-
-                    // Spawn a task to get additional channel information
-                    let http = notifier.http.clone();
-                    let channel_id = notifier.channel_id;
-                    tokio::spawn(async move {
-                        match channel_id.to_channel(&http).await {
-                            Ok(channel) => log::info!("Channel info: {:?}", channel),
-                            Err(e) => log::error!("Could not get channel info: {}", e),
-                        }
-
-                        // Check if the bot is in the server containing this channel
-                        match http.get_guilds(None, None).await {
-                            Ok(guilds) => {
-                                if guilds.is_empty() {
-                                    log::error!("Bot is not a member of any servers - it needs to be invited");
-                                } else {
-                                    log::info!(
-                                        "Bot is in {} servers: {:?}",
-                                        guilds.len(),
-                                        guilds.iter().map(|g| g.name.clone()).collect::<Vec<_>>()
-                                    );
-                                }
-                            }
-                            Err(e) => log::error!("Could not get guilds: {}", e),
-                        }
-
-                        // Try to get current application info as a final test
-                        match http.get_current_application_info().await {
-                            Ok(info) => {
-                                log::info!("Bot application info: {} (ID: {})", info.name, info.id)
-                            }
-                            Err(e) => log::error!("Could not get application info: {}", e),
-                        }
-                    });
-
-                    // We still return the notifier but with a warning
                     log::warn!("Discord notifications may not work correctly");
                     Some(notifier)
                 }
