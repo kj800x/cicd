@@ -362,7 +362,15 @@ impl DiscordNotifier {
             .color(color)
             .field("Repository", format!("{}/{}", owner, repo_name), true)
             .field("Branch", branch_name, true)
-            .field("Commit", &commit_sha[0..7], true);
+            .field(
+                "Commit",
+                if commit_sha.len() >= 7 {
+                    &commit_sha[0..7]
+                } else {
+                    commit_sha
+                },
+                true,
+            );
 
         // Send the message
         let msg = self

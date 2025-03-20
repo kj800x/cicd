@@ -122,7 +122,9 @@ async fn start_http(
         if let Some(client) = &kube_client {
             app = app
                 .app_data(Data::new(client.clone()))
-                .service(deploy_config);
+                .service(deploy_config)
+                .service(undeploy_config)
+                .service(deploy_specific_config);
         }
 
         app = app

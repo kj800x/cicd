@@ -1,11 +1,14 @@
-use futures_util::StreamExt;
+use crate::kubernetes;
+use crate::prelude::*;
+use futures_util::{SinkExt, StreamExt};
+use kube::Client as KubeClient;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
 use tokio_tungstenite::{
     connect_async,
-    tungstenite::{client::IntoClientRequest, http::HeaderValue},
+    tungstenite::{client::IntoClientRequest, http::HeaderValue, protocol::Message},
 };
-
-use crate::prelude::*;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RepoOwner {
@@ -137,8 +140,16 @@ async fn process_event(
     event: WebhookEvent,
     pool: &Pool<SqliteConnectionManager>,
     discord_notifier: &Option<DiscordNotifier>,
+    kube_client: &Option<KubeClient>,
 ) {
-    let conn = pool.get().unwrap();
+    let conn = match pool.get() {
+        Ok(conn) => conn,
+        Err(e) => {
+            log::error!("Error getting connection from pool: {}", e);
+            return;
+        }
+    };
+
     match event.event_type.as_str() {
         "push" => {
             match serde_json::from_value::<PushEvent>(event.payload.clone()) {
@@ -253,21 +264,9 @@ async fn process_event(
                 );
             }
         },
-        "check_run" => match serde_json::from_value::<CheckRunEvent>(event.payload.clone()) {
-            Ok(payload) => {
-                log::debug!(
-                    "Received check_run event for {}/{}, status: {}, conclusion: {}",
-                    payload.repository.owner.login,
-                    payload.repository.name,
-                    payload.check_run.check_suite.status,
-                    payload
-                        .check_run
-                        .check_suite
-                        .conclusion
-                        .as_deref()
-                        .unwrap_or("none")
-                );
-
+        "check_run" => {
+            // Handle check run events (builds)
+            if let Ok(payload) = serde_json::from_value::<CheckRunEvent>(event.payload) {
                 match upsert_repo(&payload.repository, &conn) {
                     Ok(repo_id) => {
                         let build_status = BuildStatus::of(
@@ -312,6 +311,52 @@ async fn process_event(
                                     }
                                 }
                             }
+
+                            // If build was successful, update Kubernetes DeployConfigs
+                            if matches!(build_status, BuildStatus::Success) {
+                                if let Some(kube_client) = kube_client {
+                                    // Get branches for this commit
+                                    if let Ok(branches) =
+                                        get_branches_for_commit(&commit.sha, &conn)
+                                    {
+                                        for branch in branches {
+                                            // For each branch, update DeployConfigs
+                                            match kubernetes::handle_build_completed(
+                                                kube_client,
+                                                &payload.repository.owner.login,
+                                                &payload.repository.name,
+                                                &branch.name,
+                                                &commit.sha,
+                                            )
+                                            .await
+                                            {
+                                                Ok(_) => {
+                                                    log::info!(
+                                                        "Updated DeployConfigs for {}/{} branch {} with SHA {}",
+                                                        payload.repository.owner.login,
+                                                        payload.repository.name,
+                                                        branch.name,
+                                                        commit.sha
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    log::error!(
+                                                        "Failed to update DeployConfigs: {:?}",
+                                                        e
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        log::warn!(
+                                            "Could not find branches for commit {}",
+                                            commit.sha
+                                        );
+                                    }
+                                } else {
+                                    log::warn!("Kubernetes client not available, skipping DeployConfig updates");
+                                }
+                            }
                         }
                     }
                     Err(e) => {
@@ -319,14 +364,7 @@ async fn process_event(
                     }
                 }
             }
-            Err(e) => {
-                log::error!("Error parsing check_run event: {}", e);
-                log::debug!(
-                    "Raw check_run payload (first 200 chars): {}",
-                    truncate_payload(&event.payload.to_string(), 200)
-                );
-            }
-        },
+        }
         _ => {
             log::debug!("Received unknown event: {}", event.event_type);
             log::trace!(
@@ -352,6 +390,22 @@ pub async fn start_websockets(
     pool: Pool<SqliteConnectionManager>,
     discord_notifier: Option<DiscordNotifier>,
 ) {
+    // Initialize Kubernetes client for DeployConfig updates
+    let kube_client = match KubeClient::try_default().await {
+        Ok(client) => {
+            log::info!("Successfully initialized Kubernetes client for webhook handler");
+            Some(client)
+        }
+        Err(e) => {
+            log::warn!(
+                "Failed to initialize Kubernetes client for webhook handler: {}",
+                e
+            );
+            log::warn!("Auto-updates for DeployConfigs will be unavailable");
+            None
+        }
+    };
+
     loop {
         log::info!(
             "Attempting to connect to webhook WebSocket at {}",
@@ -390,6 +444,7 @@ pub async fn start_websockets(
                 let (_, read) = ws_stream.split();
                 let notifier_ref = &discord_notifier;
                 let pool_ref = &pool;
+                let kube_client_ref = &kube_client;
 
                 match read
                     .for_each(|message| async {
@@ -397,7 +452,15 @@ pub async fn start_websockets(
                             Ok(msg) => {
                                 let data = msg.into_data();
                                 match serde_json::from_slice::<WebhookEvent>(&data) {
-                                    Ok(event) => process_event(event, pool_ref, notifier_ref).await,
+                                    Ok(event) => {
+                                        process_event(
+                                            event,
+                                            pool_ref,
+                                            notifier_ref,
+                                            kube_client_ref,
+                                        )
+                                        .await
+                                    }
                                     Err(e) => log::error!("Error parsing webhook event: {}", e),
                                 }
                             }

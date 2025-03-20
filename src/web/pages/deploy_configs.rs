@@ -4,6 +4,8 @@ use kube::{
     client::Client,
     config, ResourceExt,
 };
+use regex::Regex;
+use std::collections::HashMap;
 
 /// Handler for the deploy configs page
 pub async fn deploy_configs(
@@ -86,6 +88,7 @@ pub async fn deploy_configs(
                         --text-color: #333333;
                         --accent-color: #3498db;
                         --border-color: #e0e0e0;
+                        --danger-color: #e74c3c;
                     }
                     body {
                         font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -213,6 +216,72 @@ pub async fn deploy_configs(
                     .deploy-button.disabled {
                         background-color: #ccc;
                         cursor: not-allowed;
+                    }
+                    .actions-container {
+                        display: flex;
+                        flex-direction: column;
+                        gap: 16px;
+                    }
+                    .action-form {
+                        display: flex;
+                        align-items: center;
+                        gap: 16px;
+                    }
+                    .action-button {
+                        padding: 10px 16px;
+                        background-color: var(--accent-color);
+                        color: white;
+                        border: none;
+                        border-radius: 4px;
+                        font-size: 0.9rem;
+                        cursor: pointer;
+                        transition: background-color 0.2s;
+                        min-width: 180px;
+                    }
+                    .action-button.primary {
+                        background-color: var(--success-color);
+                    }
+                    .action-button.primary:hover {
+                        background-color: #27ae60;
+                    }
+                    .action-button.danger {
+                        background-color: var(--danger-color);
+                    }
+                    .action-button.danger:hover {
+                        background-color: #c0392b;
+                    }
+                    .action-button:hover {
+                        background-color: #2980b9;
+                    }
+                    .action-button:disabled {
+                        background-color: #ccc;
+                        cursor: not-allowed;
+                    }
+                    .action-description {
+                        color: #666;
+                        font-size: 0.9rem;
+                    }
+                    .input-group {
+                        display: flex;
+                        gap: 8px;
+                    }
+                    .sha-input {
+                        padding: 10px;
+                        border: 1px solid var(--border-color);
+                        border-radius: 4px;
+                        font-family: monospace;
+                        min-width: 300px;
+                    }
+                    .info-message {
+                        padding: 12px 16px;
+                        border-radius: 4px;
+                        margin-bottom: 16px;
+                        font-size: 0.9rem;
+                    }
+                    .info-message.warning {
+                        background-color: rgba(243, 156, 18, 0.2);
+                        border-left: 4px solid var(--pending-color);
+                        color: #7d5a00;
                     }
                     "#
                 }
@@ -386,7 +455,82 @@ pub async fn deploy_configs(
                                 }
 
                                 h4 { "Actions" }
-                                p { "Actions functionality will be added in a future update." }
+                                div class="actions-container" {
+                                    @if selected_config.spec.spec.autodeploy {
+                                        // If autodeploy is enabled, show message that manual actions are disabled
+                                        div class="info-message warning" {
+                                            "Automatic deployment is enabled for this configuration. Manual deployment actions are disabled."
+                                        }
+                                    } @else {
+                                        // 1. Deploy Latest - only show if there's a latest SHA and it's different from wanted SHA
+                                        @let can_deploy_latest = if let Some(status) = &selected_config.status {
+                                            if let Some(latest_sha) = &status.latest_sha {
+                                                if let Some(wanted_sha) = &status.wanted_sha {
+                                                    latest_sha != wanted_sha // Only if different
+                                                } else {
+                                                    true // No wanted SHA, can deploy
+                                                }
+                                            } else {
+                                                false // No latest SHA
+                                            }
+                                        } else {
+                                            false // No status
+                                        };
+
+                                        @if can_deploy_latest {
+                                            form action=(format!("/api/deploy/{}/{}",
+                                                selected_config.namespace().unwrap_or_default(),
+                                                selected_config.name_any()))
+                                                method="post" class="action-form" {
+                                                button type="submit" class="action-button primary" {
+                                                    "Deploy Latest Version"
+                                                }
+                                                span class="action-description" {
+                                                    "Update deployment to use the latest successful build."
+                                                }
+                                            }
+                                        }
+
+                                        // 2. Undeploy - only show if there's a current deployment (wanted SHA is set)
+                                        @let can_undeploy = if let Some(status) = &selected_config.status {
+                                            status.wanted_sha.is_some()
+                                        } else {
+                                            false
+                                        };
+
+                                        @if can_undeploy {
+                                            form action=(format!("/api/undeploy/{}/{}",
+                                                selected_config.namespace().unwrap_or_default(),
+                                                selected_config.name_any()))
+                                                method="post" class="action-form" {
+                                                button type="submit" class="action-button danger" {
+                                                    "Undeploy"
+                                                }
+                                                span class="action-description" {
+                                                    "Remove the deployment from the cluster."
+                                                }
+                                            }
+                                        }
+
+                                        // 3. Deploy Specific Version - always show for manual deployments
+                                        form action=(format!("/api/deploy-specific/{}/{}",
+                                            selected_config.namespace().unwrap_or_default(),
+                                            selected_config.name_any()))
+                                            method="post" class="action-form" {
+                                            div class="input-group" {
+                                                input type="text" name="sha" placeholder="Enter commit SHA" required
+                                                    class="sha-input" pattern="[0-9a-fA-F]{5,40}"
+                                                    title="Enter a valid git SHA (at least 5 hex characters)";
+                                                button type="submit" class="action-button" {
+                                                    "Deploy Specific Version"
+                                                }
+                                            }
+                                            span class="action-description" {
+                                                "Deploy a specific version by entering its commit SHA."
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -450,6 +594,169 @@ pub async fn deploy_config(
             let status = serde_json::json!({
                 "status": {
                     "wantedSha": latest_sha
+                }
+            });
+
+            // Apply the status update
+            let patch = Patch::Merge(&status);
+            let params = PatchParams::default();
+
+            match deploy_configs_api
+                .patch_status(&name, &params, &patch)
+                .await
+            {
+                Ok(_) => {
+                    // Redirect back to the DeployConfig page with the selected config
+                    HttpResponse::SeeOther()
+                        .header(
+                            "Location",
+                            format!("/deploy-configs?selected={}/{}", namespace, name),
+                        )
+                        .finish()
+                }
+                Err(e) => {
+                    log::error!("Failed to update DeployConfig status: {}", e);
+                    HttpResponse::InternalServerError()
+                        .content_type("text/html; charset=utf-8")
+                        .body(format!("Failed to update DeployConfig status: {}", e))
+                }
+            }
+        }
+        Err(e) => {
+            log::error!("Failed to get DeployConfig {}/{}: {}", namespace, name, e);
+            HttpResponse::NotFound()
+                .content_type("text/html; charset=utf-8")
+                .body(format!("DeployConfig {}/{} not found.", namespace, name))
+        }
+    }
+}
+
+/// Handler for undeploying (setting wantedSha to null)
+#[post("/api/undeploy/{namespace}/{name}")]
+pub async fn undeploy_config(
+    path: web::Path<(String, String)>,
+    client: Option<web::Data<Client>>,
+) -> impl Responder {
+    let (namespace, name) = path.into_inner();
+
+    // Check if Kubernetes client is available
+    let client = match client {
+        Some(client) => client,
+        None => {
+            return HttpResponse::ServiceUnavailable()
+                .content_type("text/html; charset=utf-8")
+                .body("Kubernetes client is not available. Undeploy functionality is disabled.");
+        }
+    };
+
+    // Get the DeployConfig
+    let deploy_configs_api: Api<DeployConfig> =
+        Api::namespaced(client.get_ref().clone(), &namespace);
+
+    match deploy_configs_api.get(&name).await {
+        Ok(config) => {
+            // Check if it has autodeploy enabled
+            if config.spec.spec.autodeploy {
+                return HttpResponse::BadRequest()
+                    .content_type("text/html; charset=utf-8")
+                    .body("Cannot manually undeploy when autodeploy is enabled.");
+            }
+
+            // Set wantedSha to null
+            let status = serde_json::json!({
+                "status": {
+                    "wantedSha": null
+                }
+            });
+
+            // Apply the status update
+            let patch = Patch::Merge(&status);
+            let params = PatchParams::default();
+
+            match deploy_configs_api
+                .patch_status(&name, &params, &patch)
+                .await
+            {
+                Ok(_) => {
+                    // Redirect back to the DeployConfig page with the selected config
+                    HttpResponse::SeeOther()
+                        .header(
+                            "Location",
+                            format!("/deploy-configs?selected={}/{}", namespace, name),
+                        )
+                        .finish()
+                }
+                Err(e) => {
+                    log::error!("Failed to update DeployConfig status: {}", e);
+                    HttpResponse::InternalServerError()
+                        .content_type("text/html; charset=utf-8")
+                        .body(format!("Failed to update DeployConfig status: {}", e))
+                }
+            }
+        }
+        Err(e) => {
+            log::error!("Failed to get DeployConfig {}/{}: {}", namespace, name, e);
+            HttpResponse::NotFound()
+                .content_type("text/html; charset=utf-8")
+                .body(format!("DeployConfig {}/{} not found.", namespace, name))
+        }
+    }
+}
+
+/// Handler for deploying a specific SHA
+#[post("/api/deploy-specific/{namespace}/{name}")]
+pub async fn deploy_specific_config(
+    path: web::Path<(String, String)>,
+    form: web::Form<HashMap<String, String>>,
+    client: Option<web::Data<Client>>,
+) -> impl Responder {
+    let (namespace, name) = path.into_inner();
+
+    // Get the SHA from the form
+    let sha = match form.get("sha") {
+        Some(sha) => sha,
+        None => {
+            return HttpResponse::BadRequest()
+                .content_type("text/html; charset=utf-8")
+                .body("No SHA provided.");
+        }
+    };
+
+    // Validate SHA format (simple validation, at least 5 hex characters)
+    let sha_regex = Regex::new(r"^[0-9a-fA-F]{5,40}$").unwrap();
+    if !sha_regex.is_match(sha) {
+        return HttpResponse::BadRequest()
+            .content_type("text/html; charset=utf-8")
+            .body("Invalid SHA format. SHA must be 5-40 hex characters.");
+    }
+
+    // Check if Kubernetes client is available
+    let client = match client {
+        Some(client) => client,
+        None => {
+            return HttpResponse::ServiceUnavailable()
+                .content_type("text/html; charset=utf-8")
+                .body("Kubernetes client is not available. Deploy functionality is disabled.");
+        }
+    };
+
+    // Get the DeployConfig
+    let deploy_configs_api: Api<DeployConfig> =
+        Api::namespaced(client.get_ref().clone(), &namespace);
+
+    match deploy_configs_api.get(&name).await {
+        Ok(config) => {
+            // Check if it has autodeploy enabled
+            if config.spec.spec.autodeploy {
+                return HttpResponse::BadRequest()
+                    .content_type("text/html; charset=utf-8")
+                    .body("Cannot manually deploy when autodeploy is enabled.");
+            }
+
+            // Update the wanted SHA to the specified value
+            let status = serde_json::json!({
+                "status": {
+                    "wantedSha": sha
                 }
             });
 
