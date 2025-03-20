@@ -78,6 +78,22 @@ async fn start_http(
 ) -> Result<(), std::io::Error> {
     log::info!("Starting HTTP server at http://localhost:8080/api");
 
+    // Initialize Kubernetes client for the web handlers
+    let kube_client = match kube::Client::try_default().await {
+        Ok(client) => {
+            log::info!("Successfully initialized Kubernetes client for web handlers");
+            Some(client)
+        }
+        Err(e) => {
+            log::warn!(
+                "Failed to initialize Kubernetes client for web handlers: {}",
+                e
+            );
+            log::warn!("DeployConfig deploy functionality will be unavailable");
+            None
+        }
+    };
+
     HttpServer::new(move || {
         let schema = Schema::build(QueryRoot, EmptyMutation, EmptySubscription)
             .data(pool.clone())
@@ -100,7 +116,16 @@ async fn start_http(
             .route("/api/hey", web_get().to(manual_hello))
             .route("/", web_get().to(index))
             .route("/all-recent-builds", web_get().to(all_recent_builds))
-            .route("/deploy-configs", web_get().to(deploy_configs))
+            .route("/deploy-configs", web_get().to(deploy_configs));
+
+        // Add Kubernetes client data if available
+        if let Some(client) = &kube_client {
+            app = app
+                .app_data(Data::new(client.clone()))
+                .service(deploy_config);
+        }
+
+        app = app
             .service(
                 resource("/api/graphql")
                     .guard(guard::Post())

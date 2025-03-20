@@ -1,5 +1,9 @@
 use crate::prelude::*;
-use kube::{api::Api, client::Client, config, ResourceExt};
+use kube::{
+    api::{Api, Patch, PatchParams},
+    client::Client,
+    config, ResourceExt,
+};
 
 /// Handler for the deploy configs page
 pub async fn deploy_configs(
@@ -193,6 +197,23 @@ pub async fn deploy_configs(
                         margin-bottom: 20px;
                         padding-bottom: 20px;
                     }
+                    .deploy-button {
+                        padding: 10px 16px;
+                        background-color: var(--accent-color);
+                        color: white;
+                        border: none;
+                        border-radius: 4px;
+                        font-size: 0.9rem;
+                        cursor: pointer;
+                        transition: background-color 0.2s;
+                    }
+                    .deploy-button:hover {
+                        background-color: #2980b9;
+                    }
+                    .deploy-button.disabled {
+                        background-color: #ccc;
+                        cursor: not-allowed;
+                    }
                     "#
                 }
                 script {
@@ -325,6 +346,43 @@ pub async fn deploy_configs(
                                             }
                                         }
                                     }
+
+                                    // Add the deploy button if autodeploy is disabled
+                                    @if !selected_config.spec.spec.autodeploy {
+                                        div class="detail-row" style="margin-top: 20px;" {
+                                            // Check if we have a latest SHA and it's different from wanted SHA
+                                            @let can_deploy = if let Some(status) = &selected_config.status {
+                                                if let Some(latest_sha) = &status.latest_sha {
+                                                    if let Some(wanted_sha) = &status.wanted_sha {
+                                                        latest_sha != wanted_sha
+                                                    } else {
+                                                        true // No wanted SHA, so we can deploy
+                                                    }
+                                                } else {
+                                                    false // No latest SHA, can't deploy
+                                                }
+                                            } else {
+                                                false // No status, can't deploy
+                                            };
+
+                                            @if can_deploy {
+                                                // Enable button if we can deploy
+                                                form action=(format!("/api/deploy/{}/{}",
+                                                    selected_config.namespace().unwrap_or_default(),
+                                                    selected_config.name_any()))
+                                                    method="post" {
+                                                    button type="submit" class="deploy-button" {
+                                                        "Deploy Latest"
+                                                    }
+                                                }
+                                            } @else {
+                                                // Disable button if we can't deploy
+                                                button type="button" class="deploy-button disabled" disabled {
+                                                    "No Update Available"
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
 
                                 h4 { "Actions" }
@@ -340,4 +398,91 @@ pub async fn deploy_configs(
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
         .body(markup.into_string())
+}
+
+/// Handler for updating the wanted SHA of a DeployConfig
+#[post("/api/deploy/{namespace}/{name}")]
+pub async fn deploy_config(
+    path: web::Path<(String, String)>,
+    client: Option<web::Data<Client>>,
+) -> impl Responder {
+    let (namespace, name) = path.into_inner();
+
+    // Check if Kubernetes client is available
+    let client = match client {
+        Some(client) => client,
+        None => {
+            return HttpResponse::ServiceUnavailable()
+                .content_type("text/html; charset=utf-8")
+                .body("Kubernetes client is not available. Deploy functionality is disabled.");
+        }
+    };
+
+    // Get the DeployConfig
+    let deploy_configs_api: Api<DeployConfig> =
+        Api::namespaced(client.get_ref().clone(), &namespace);
+
+    match deploy_configs_api.get(&name).await {
+        Ok(config) => {
+            // Check if it has autodeploy enabled (shouldn't happen due to UI, but just to be sure)
+            if config.spec.spec.autodeploy {
+                return HttpResponse::BadRequest()
+                    .content_type("text/html; charset=utf-8")
+                    .body("Cannot manually deploy when autodeploy is enabled.");
+            }
+
+            // Get the latest SHA
+            let latest_sha = if let Some(status) = &config.status {
+                if let Some(sha) = &status.latest_sha {
+                    sha.clone()
+                } else {
+                    return HttpResponse::BadRequest()
+                        .content_type("text/html; charset=utf-8")
+                        .body("No latest SHA available for deployment.");
+                }
+            } else {
+                return HttpResponse::BadRequest()
+                    .content_type("text/html; charset=utf-8")
+                    .body("No status available for the DeployConfig.");
+            };
+
+            // Update the wanted SHA
+            let status = serde_json::json!({
+                "status": {
+                    "wantedSha": latest_sha
+                }
+            });
+
+            // Apply the status update
+            let patch = Patch::Merge(&status);
+            let params = PatchParams::default();
+
+            match deploy_configs_api
+                .patch_status(&name, &params, &patch)
+                .await
+            {
+                Ok(_) => {
+                    // Redirect back to the DeployConfig page with the selected config
+                    HttpResponse::SeeOther()
+                        .header(
+                            "Location",
+                            format!("/deploy-configs?selected={}/{}", namespace, name),
+                        )
+                        .finish()
+                }
+                Err(e) => {
+                    log::error!("Failed to update DeployConfig status: {}", e);
+                    HttpResponse::InternalServerError()
+                        .content_type("text/html; charset=utf-8")
+                        .body(format!("Failed to update DeployConfig status: {}", e))
+                }
+            }
+        }
+        Err(e) => {
+            log::error!("Failed to get DeployConfig {}/{}: {}", namespace, name, e);
+            HttpResponse::NotFound()
+                .content_type("text/html; charset=utf-8")
+                .body(format!("DeployConfig {}/{} not found.", namespace, name))
+        }
+    }
 }
