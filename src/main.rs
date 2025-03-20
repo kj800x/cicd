@@ -20,6 +20,10 @@ pub mod prelude {
         start_websockets, GhCommit, RepoOwner, Repository as WebhookRepository,
     };
 
+    pub use crate::kubernetes::{
+        controller::start_controller, DeployConfig, DeployConfigStatus, Repository as K8sRepository,
+    };
+
     pub use chrono::prelude::*;
 
     pub use actix_session::{storage::CookieSessionStore, Session, SessionMiddleware};
@@ -56,6 +60,7 @@ pub mod prelude {
 mod db;
 mod discord;
 mod graphql;
+mod kubernetes;
 mod resource;
 mod web;
 mod webhooks;
@@ -118,6 +123,21 @@ async fn start_http(
     .await
 }
 
+async fn start_kubernetes_controller(
+    pool: Pool<SqliteConnectionManager>,
+    discord_notifier: Option<DiscordNotifier>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    log::info!("Starting Kubernetes controller");
+
+    // Initialize Kubernetes client
+    let client = kube::Client::try_default().await?;
+
+    // Start the controller
+    start_controller(client, pool, discord_notifier).await?;
+
+    Ok(())
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     // Configure logger with custom filter to prioritize Discord logs
@@ -125,6 +145,7 @@ async fn main() -> std::io::Result<()> {
         .filter_level(log::LevelFilter::Warn) // Set default level to Warn for most modules
         .filter(Some("cicd::discord"), log::LevelFilter::Debug) // Enable debug logs for Discord module
         .filter(Some("serenity"), log::LevelFilter::Warn) // Serenity crate spams at info level
+        .filter(Some("cicd::kubernetes"), log::LevelFilter::Debug) // Enable debug logs for Kubernetes module
         .filter_module(
             "cicd",
             match std::env::var("RUST_LOG") {
@@ -181,16 +202,53 @@ async fn main() -> std::io::Result<()> {
         None => log::warn!("Discord notifier NOT initialized - notifications will be disabled"),
     }
 
-    future::select(
-        Box::pin(start_http(registry, pool.clone(), discord_notifier.clone())),
-        Box::pin(start_websockets(
+    // Determine if we should run the Kubernetes controller
+    let run_k8s_controller = std::env::var("ENABLE_K8S_CONTROLLER")
+        .map(|v| v.to_lowercase() == "true")
+        .unwrap_or(false);
+
+    if run_k8s_controller {
+        log::info!("Kubernetes controller enabled - will start controller");
+        // Start all three services: HTTP server, websockets, and K8s controller
+        let http_server = start_http(registry, pool.clone(), discord_notifier.clone());
+        let websocket_server = start_websockets(
             websocket_url,
             client_secret,
             pool.clone(),
-            discord_notifier,
-        )),
-    )
-    .await;
+            discord_notifier.clone(),
+        );
+        let k8s_controller = start_kubernetes_controller(pool.clone(), discord_notifier);
+
+        // Run all services concurrently
+        tokio::select! {
+            result = http_server => {
+                if let Err(e) = result {
+                    log::error!("HTTP server error: {:?}", e);
+                }
+            }
+            _ = websocket_server => {
+                log::error!("WebSocket server stopped");
+            }
+            result = k8s_controller => {
+                if let Err(e) = result {
+                    log::error!("Kubernetes controller error: {:?}", e);
+                }
+            }
+        }
+    } else {
+        log::info!("Kubernetes controller disabled - will not start controller");
+        // Just start HTTP and websocket services
+        future::select(
+            Box::pin(start_http(registry, pool.clone(), discord_notifier.clone())),
+            Box::pin(start_websockets(
+                websocket_url,
+                client_secret,
+                pool.clone(),
+                discord_notifier,
+            )),
+        )
+        .await;
+    }
 
     Ok(())
 }

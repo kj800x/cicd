@@ -316,6 +316,75 @@ impl DiscordNotifier {
             }
         }
     }
+
+    /// Send a notification when a Kubernetes deployment is created or updated
+    pub async fn notify_k8s_deployment(
+        &self,
+        owner: &str,
+        repo_name: &str,
+        branch_name: &str,
+        commit_sha: &str,
+        deployment_name: &str,
+        namespace: &str,
+        action: &str, // "created" or "updated"
+    ) -> Result<(), String> {
+        log::debug!(
+            "Preparing Discord notification for K8s deployment: {}/{} -> {}",
+            owner,
+            repo_name,
+            deployment_name
+        );
+
+        // Choose color based on action
+        let color = if action == "created" {
+            Colour::BLITZ_BLUE
+        } else {
+            Colour::DARK_GREEN
+        };
+
+        // Choose emoji based on action
+        let emoji = if action == "created" {
+            "🚀"
+        } else {
+            "♻️"
+        };
+
+        // Create an embed for the deployment notification
+        let embed = CreateEmbed::new()
+            .title(format!(
+                "{} Deployment {}: {}",
+                emoji, action, deployment_name
+            ))
+            .description(format!(
+                "Kubernetes deployment has been {} in namespace `{}`",
+                action, namespace
+            ))
+            .color(color)
+            .field("Repository", format!("{}/{}", owner, repo_name), true)
+            .field("Branch", branch_name, true)
+            .field("Commit", &commit_sha[0..7], true);
+
+        // Send the message
+        let msg = self
+            .channel_id
+            .send_message(&self.http, CreateMessage::new().embed(embed))
+            .await;
+
+        match msg {
+            Ok(_) => {
+                log::info!(
+                    "Discord notification sent for deployment {} in namespace {}",
+                    deployment_name,
+                    namespace
+                );
+                Ok(())
+            }
+            Err(e) => {
+                log::error!("Failed to send Discord notification: {:?}", e);
+                Err(format!("Discord error: {:?}", e))
+            }
+        }
+    }
 }
 
 // Add the Discord notifier to the application data
