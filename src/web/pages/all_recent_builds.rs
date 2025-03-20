@@ -300,6 +300,7 @@ pub async fn all_recent_builds(pool: web::Data<Pool<SqliteConnectionManager>>) -
                 div class="nav-links" {
                     a href="/" { "Recent Branches" }
                     a href="/all-recent-builds" class="active" { "All Recent Builds" }
+                    a href="/deploy-configs" { "Deploy Configs" }
                 }
 
                 @if builds.is_empty() {

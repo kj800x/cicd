@@ -17,13 +17,17 @@ pub struct Repository {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct DeployConfigStatus {
     /// The currently deployed Git commit SHA
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "currentSha"
+    )]
     pub current_sha: Option<String>,
     /// The latest Git commit SHA for the configured branch
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "latestSha")]
     pub latest_sha: Option<String>,
     /// The Git commit SHA that should be deployed
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "wantedSha")]
     pub wanted_sha: Option<String>,
 }
 

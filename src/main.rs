@@ -100,6 +100,7 @@ async fn start_http(
             .route("/api/hey", web_get().to(manual_hello))
             .route("/", web_get().to(index))
             .route("/all-recent-builds", web_get().to(all_recent_builds))
+            .route("/deploy-configs", web_get().to(deploy_configs))
             .service(
                 resource("/api/graphql")
                     .guard(guard::Post())

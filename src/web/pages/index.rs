@@ -475,6 +475,7 @@ pub async fn index(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Respo
                 div class="nav-links" {
                     a href="/" class="active" { "Recent Branches" }
                     a href="/all-recent-builds" { "All Recent Builds" }
+                    a href="/deploy-configs" { "Deploy Configs" }
                 }
 
                 @if branch_data_list.is_empty() {
