@@ -408,6 +408,21 @@ pub async fn deploy_configs(
                                     }
 
                                     div class="detail-row" {
+                                        div class="detail-label" { "Current Branch:" }
+                                        div class="detail-value" {
+                                            @if let Some(status) = &selected_config.status {
+                                                @if let Some(current_branch) = &status.current_branch {
+                                                    (current_branch)
+                                                } @else {
+                                                    "Not set"
+                                                }
+                                            } @else {
+                                                "Not set"
+                                            }
+                                        }
+                                    }
+
+                                    div class="detail-row" {
                                         div class="detail-label" { "Auto-deploy:" }
                                         div class="detail-value" {
                                             @if selected_config.spec.spec.autodeploy {
