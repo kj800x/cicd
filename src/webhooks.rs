@@ -100,6 +100,13 @@ struct WebhookEvent {
     payload: serde_json::Value,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct CheckSuiteEvent {
+    action: String,
+    check_suite: CheckSuite,
+    repository: Repository,
+}
+
 // Pushes can be for reasons other than branches, such as tags
 fn extract_branch_name(r#ref: &str) -> Option<String> {
     let branch_regex = Regex::new(r"^refs/heads/(.+)$").unwrap();
@@ -265,19 +272,66 @@ async fn process_event(
             }
         },
         "check_run" => {
-            // Handle check run events (builds)
+            // Handle check run events (build starts)
             if let Ok(payload) = serde_json::from_value::<CheckRunEvent>(event.payload) {
                 match upsert_repo(&payload.repository, &conn) {
                     Ok(repo_id) => {
+                        // Get the commit to get its message
+                        if let Ok(Some(commit)) = get_commit(
+                            &conn,
+                            repo_id as i64,
+                            payload.check_run.check_suite.head_sha.clone(),
+                        ) {
+                            // Send a notification that build has started
+                            if let Some(notifier) = discord_notifier {
+                                match notifier
+                                    .notify_build_started(
+                                        &payload.repository.owner.login,
+                                        &payload.repository.name,
+                                        &payload.check_run.check_suite.head_sha,
+                                        &commit.message,
+                                        Some(&payload.check_run.details_url),
+                                    )
+                                    .await
+                                {
+                                    Ok(_) => {
+                                        log::info!("Discord notification sent for build start")
+                                    }
+                                    Err(e) => {
+                                        log::error!("Failed to send Discord notification: {}", e)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("Error upserting repository from check_run event: {}", e);
+                    }
+                }
+            }
+        }
+        "check_suite" => {
+            // Handle check suite events (build completions)
+            if let Ok(payload) = serde_json::from_value::<CheckSuiteEvent>(event.payload) {
+                match upsert_repo(&payload.repository, &conn) {
+                    Ok(repo_id) => {
                         let build_status = BuildStatus::of(
-                            &payload.check_run.check_suite.status,
-                            &payload.check_run.check_suite.conclusion.as_deref(),
+                            &payload.check_suite.status,
+                            &payload.check_suite.conclusion.as_deref(),
+                        );
+
+                        // Construct the check suite URL
+                        let details_url = format!(
+                            "https://github.com/{}/{}/commit/{}/checks",
+                            payload.repository.owner.login,
+                            payload.repository.name,
+                            payload.check_suite.head_sha
                         );
 
                         if let Err(e) = set_commit_status(
-                            &payload.check_run.check_suite.head_sha,
+                            &payload.check_suite.head_sha,
                             build_status.clone(),
-                            payload.check_run.details_url.clone(),
+                            details_url.clone(),
                             repo_id,
                             &conn,
                         ) {
@@ -285,21 +339,19 @@ async fn process_event(
                         }
 
                         // Get the commit to get its message
-                        if let Ok(Some(commit)) = get_commit(
-                            &conn,
-                            repo_id as i64,
-                            payload.check_run.check_suite.head_sha.clone(),
-                        ) {
+                        if let Ok(Some(commit)) =
+                            get_commit(&conn, repo_id as i64, payload.check_suite.head_sha.clone())
+                        {
                             // Send a notification that build has completed
                             if let Some(notifier) = discord_notifier {
                                 match notifier
                                     .notify_build_completed(
                                         &payload.repository.owner.login,
                                         &payload.repository.name,
-                                        &payload.check_run.check_suite.head_sha,
+                                        &payload.check_suite.head_sha,
                                         &commit.message,
                                         &build_status,
-                                        Some(&payload.check_run.details_url),
+                                        Some(&details_url),
                                     )
                                     .await
                                 {
@@ -360,7 +412,7 @@ async fn process_event(
                         }
                     }
                     Err(e) => {
-                        log::error!("Error upserting repository from check_run event: {}", e);
+                        log::error!("Error upserting repository from check_suite event: {}", e);
                     }
                 }
             }

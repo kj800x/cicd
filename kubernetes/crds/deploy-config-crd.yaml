@@ -20,13 +20,13 @@ spec:
                   required:
                     - owner
                     - repo
-                    - branch
+                    - defaultBranch
                   properties:
                     owner:
                       type: string
                     repo:
                       type: string
-                    branch:
+                    defaultBranch:
                       type: string
                 autodeploy:
                   type: boolean
@@ -47,12 +47,17 @@ spec:
                   type: string
                 latestSha:
                   type: string
+                currentBranch:
+                  type: string
       additionalPrinterColumns:
         - name: Repo
           jsonPath: .spec.repo.repo
           type: string
-        - name: Branch
-          jsonPath: .spec.repo.branch
+        - name: Default Branch
+          jsonPath: .spec.repo.defaultBranch
+          type: string
+        - name: Current Branch
+          jsonPath: .status.currentBranch
           type: string
         - name: Current SHA
           jsonPath: .status.currentSha

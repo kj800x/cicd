@@ -8,7 +8,7 @@ spec:
   repo:
     owner: kj800x
     repo: test-repo
-    branch: master
+    defaultBranch: master
   spec:
     replicas: 1
     revisionHistoryLimit: 1

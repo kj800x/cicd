@@ -1,3 +1,4 @@
+use crate::db::Commit;
 use crate::prelude::*;
 use kube::{
     api::{Api, Patch, PatchParams},
@@ -6,6 +7,56 @@ use kube::{
 };
 use regex::Regex;
 use std::collections::HashMap;
+
+/// Get the latest successful build for a branch
+fn get_latest_successful_build(
+    owner: String,
+    repo: String,
+    branch: String,
+    conn: &PooledConnection<SqliteConnectionManager>,
+) -> Result<Option<Commit>, rusqlite::Error> {
+    // Get the repository ID
+    let repo_id = match get_repo(conn, owner.clone(), repo.clone())? {
+        Some(repo) => repo.id,
+        None => return Ok(None),
+    };
+
+    // Get the branch ID
+    let branch_id = match get_branch_by_name(&branch, repo_id as u64, conn)? {
+        Some(branch) => branch.id,
+        None => return Ok(None),
+    };
+
+    // Get the latest successful build for this branch
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT c.id, c.sha, c.message, c.timestamp, c.build_status, c.build_url
+        FROM git_commit c
+        JOIN git_commit_branch cb ON c.sha = cb.commit_sha
+        WHERE cb.branch_id = ?1
+        AND c.build_status = 'Success'
+        ORDER BY c.timestamp DESC
+        LIMIT 1
+        "#,
+    )?;
+
+    let commit = stmt.query_row([branch_id], |row| {
+        Ok(Commit {
+            id: row.get(0)?,
+            sha: row.get(1)?,
+            message: row.get(2)?,
+            timestamp: row.get(3)?,
+            build_status: row.get::<_, Option<String>>(4)?.into(),
+            build_url: row.get(5)?,
+        })
+    });
+
+    match commit {
+        Ok(commit) => Ok(Some(commit)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
 
 /// Handler for the deploy configs page
 pub async fn deploy_configs(
@@ -352,8 +403,8 @@ pub async fn deploy_configs(
                                     }
 
                                     div class="detail-row" {
-                                        div class="detail-label" { "Branch:" }
-                                        div class="detail-value" { (selected_config.spec.spec.repo.branch) }
+                                        div class="detail-label" { "Default Branch:" }
+                                        div class="detail-value" { (selected_config.spec.spec.repo.defaultBranch) }
                                     }
 
                                     div class="detail-row" {
@@ -527,6 +578,23 @@ pub async fn deploy_configs(
                                             }
                                             span class="action-description" {
                                                 "Deploy a specific version by entering its commit SHA."
+                                            }
+                                        }
+
+                                        // Add branch change form
+                                        form action=(format!("/api/override-branch/{}/{}",
+                                            selected_config.namespace().unwrap_or_default(),
+                                            selected_config.name_any()))
+                                            method="post" class="action-form" {
+                                            div class="input-group" {
+                                                input type="text" name="branch" placeholder="Enter branch name" required
+                                                    class="sha-input";
+                                                button type="submit" class="action-button" {
+                                                    "Change Branch"
+                                                }
+                                            }
+                                            span class="action-description" {
+                                                "Change the current branch and deploy the latest successful build from that branch."
                                             }
                                         }
                                     }
@@ -769,6 +837,157 @@ pub async fn deploy_specific_config(
                 .await
             {
                 Ok(_) => {
+                    // Redirect back to the DeployConfig page with the selected config
+                    HttpResponse::SeeOther()
+                        .header(
+                            "Location",
+                            format!("/deploy-configs?selected={}/{}", namespace, name),
+                        )
+                        .finish()
+                }
+                Err(e) => {
+                    log::error!("Failed to update DeployConfig status: {}", e);
+                    HttpResponse::InternalServerError()
+                        .content_type("text/html; charset=utf-8")
+                        .body(format!("Failed to update DeployConfig status: {}", e))
+                }
+            }
+        }
+        Err(e) => {
+            log::error!("Failed to get DeployConfig {}/{}: {}", namespace, name, e);
+            HttpResponse::NotFound()
+                .content_type("text/html; charset=utf-8")
+                .body(format!("DeployConfig {}/{} not found.", namespace, name))
+        }
+    }
+}
+
+/// Handler for overriding the branch of a DeployConfig
+#[post("/api/override-branch/{namespace}/{name}")]
+pub async fn override_branch(
+    path: web::Path<(String, String)>,
+    form: web::Form<HashMap<String, String>>,
+    client: Option<web::Data<Client>>,
+    pool: web::Data<Pool<SqliteConnectionManager>>,
+) -> impl Responder {
+    let (namespace, name) = path.into_inner();
+    log::debug!(
+        "Received branch override request for {}/{}",
+        namespace,
+        name
+    );
+
+    // Get the branch from the form
+    let branch = match form.get("branch") {
+        Some(branch) => {
+            log::debug!("Branch override value: {}", branch);
+            branch.clone()
+        }
+        None => {
+            log::error!("No branch provided in form");
+            return HttpResponse::BadRequest()
+                .content_type("text/html; charset=utf-8")
+                .body("No branch provided.");
+        }
+    };
+
+    // Check if Kubernetes client is available
+    let client = match client {
+        Some(client) => {
+            log::debug!("Kubernetes client is available");
+            client
+        }
+        None => {
+            log::error!("Kubernetes client is not available");
+            return HttpResponse::ServiceUnavailable()
+                .content_type("text/html; charset=utf-8")
+                .body("Kubernetes client is not available");
+        }
+    };
+
+    // Get the DeployConfig
+    let deploy_configs_api: Api<DeployConfig> =
+        Api::namespaced(client.get_ref().clone(), &namespace);
+
+    match deploy_configs_api.get(&name).await {
+        Ok(config) => {
+            log::debug!("Found DeployConfig {}/{}", namespace, name);
+            log::debug!(
+                "Current branch: {:?}",
+                config
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.current_branch.clone())
+            );
+
+            // Get the latest successful build for the new branch
+            let conn = match pool.get() {
+                Ok(conn) => conn,
+                Err(e) => {
+                    log::error!("Failed to get database connection: {}", e);
+                    return HttpResponse::InternalServerError()
+                        .content_type("text/html; charset=utf-8")
+                        .body("Failed to get database connection");
+                }
+            };
+
+            // Get the latest successful build for the new branch
+            let latest_sha = match get_latest_successful_build(
+                config.spec.spec.repo.owner.clone(),
+                config.spec.spec.repo.repo.clone(),
+                branch.clone(),
+                &conn,
+            ) {
+                Ok(Some(commit)) => {
+                    log::debug!(
+                        "Found latest successful build for branch {}: {}",
+                        branch,
+                        commit.sha
+                    );
+                    Some(commit.sha)
+                }
+                Ok(None) => {
+                    log::debug!("No successful builds found for branch {}", branch);
+                    return HttpResponse::BadRequest()
+                        .content_type("text/html; charset=utf-8")
+                        .body(format!("No successful builds found for branch {}", branch));
+                }
+                Err(e) => {
+                    log::error!("Error getting latest successful build: {}", e);
+                    return HttpResponse::InternalServerError()
+                        .content_type("text/html; charset=utf-8")
+                        .body(format!("Error getting latest successful build: {}", e));
+                }
+            };
+
+            // Update the status with the new branch and SHA
+            let status_patch = serde_json::json!({
+                "status": {
+                    "currentBranch": branch,
+                    "latestSha": latest_sha,
+                    "wantedSha": latest_sha
+                }
+            });
+
+            log::debug!(
+                "Status patch payload: {}",
+                serde_json::to_string_pretty(&status_patch).unwrap()
+            );
+
+            let patch = Patch::Merge(&status_patch);
+            let params = PatchParams::default();
+
+            match deploy_configs_api
+                .patch_status(&name, &params, &patch)
+                .await
+            {
+                Ok(updated_config) => {
+                    log::debug!(
+                        "Successfully updated DeployConfig status {}/{}",
+                        namespace,
+                        name
+                    );
+                    log::debug!("Updated DeployConfig status: {:?}", updated_config.status);
                     // Redirect back to the DeployConfig page with the selected config
                     HttpResponse::SeeOther()
                         .header(

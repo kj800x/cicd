@@ -124,7 +124,8 @@ async fn start_http(
                 .app_data(Data::new(client.clone()))
                 .service(deploy_config)
                 .service(undeploy_config)
-                .service(deploy_specific_config);
+                .service(deploy_specific_config)
+                .service(override_branch);
         }
 
         app = app
@@ -174,6 +175,7 @@ async fn main() -> std::io::Result<()> {
         .filter(Some("cicd::discord"), log::LevelFilter::Debug) // Enable debug logs for Discord module
         .filter(Some("serenity"), log::LevelFilter::Warn) // Serenity crate spams at info level
         .filter(Some("cicd::kubernetes"), log::LevelFilter::Debug) // Enable debug logs for Kubernetes module
+        .filter(Some("cicd::web"), log::LevelFilter::Debug) // Enable debug logs for web module
         .filter_module(
             "cicd",
             match std::env::var("RUST_LOG") {

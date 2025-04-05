@@ -9,8 +9,8 @@ pub struct Repository {
     pub owner: String,
     /// Repository name
     pub repo: String,
-    /// Git branch to track
-    pub branch: String,
+    /// Default Git branch to track
+    pub defaultBranch: String,
 }
 
 /// DeployConfig status information
@@ -29,6 +29,13 @@ pub struct DeployConfigStatus {
     /// The Git commit SHA that should be deployed
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "wantedSha")]
     pub wanted_sha: Option<String>,
+    /// The currently active branch
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "currentBranch"
+    )]
+    pub current_branch: Option<String>,
 }
 
 /// DeployConfig spec fields represent the desired state for a deployment
@@ -54,7 +61,7 @@ pub struct DeployConfigSpecFields {
     schema = "disabled",
     status = "DeployConfigStatus",
     printcolumn = r#"{"name":"Repo", "jsonPath":".spec.repo.repo", "type":"string"}"#,
-    printcolumn = r#"{"name":"Branch", "jsonPath":".spec.repo.branch", "type":"string"}"#,
+    printcolumn = r#"{"name":"Branch", "jsonPath":".spec.repo.defaultBranch", "type":"string"}"#,
     printcolumn = r#"{"name":"Current SHA", "jsonPath":".status.currentSha", "type":"string"}"#,
     printcolumn = r#"{"name":"Latest SHA", "jsonPath":".status.latestSha", "type":"string"}"#,
     printcolumn = r#"{"name":"Wanted SHA", "jsonPath":".status.wantedSha", "type":"string"}"#,

@@ -175,7 +175,13 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
                                         .notify_k8s_deployment(
                                             &dc.spec.spec.repo.owner,
                                             &dc.spec.spec.repo.repo,
-                                            &dc.spec.spec.repo.branch,
+                                            dc.status
+                                                .as_ref()
+                                                .and_then(|s| s.current_branch.clone())
+                                                .unwrap_or_else(|| {
+                                                    dc.spec.spec.repo.defaultBranch.clone()
+                                                })
+                                                .as_str(),
                                             wanted_sha,
                                             &name,
                                             &ns,
@@ -209,7 +215,13 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
                                     .notify_k8s_deployment(
                                         &dc.spec.spec.repo.owner,
                                         &dc.spec.spec.repo.repo,
-                                        &dc.spec.spec.repo.branch,
+                                        dc.status
+                                            .as_ref()
+                                            .and_then(|s| s.current_branch.clone())
+                                            .unwrap_or_else(|| {
+                                                dc.spec.spec.repo.defaultBranch.clone()
+                                            })
+                                            .as_str(),
                                         wanted_sha,
                                         &name,
                                         &ns,
@@ -249,7 +261,13 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
                                             .notify_k8s_deployment(
                                                 &dc.spec.spec.repo.owner,
                                                 &dc.spec.spec.repo.repo,
-                                                &dc.spec.spec.repo.branch,
+                                                dc.status
+                                                    .as_ref()
+                                                    .and_then(|s| s.current_branch.clone())
+                                                    .unwrap_or_else(|| {
+                                                        dc.spec.spec.repo.defaultBranch.clone()
+                                                    })
+                                                    .as_str(),
                                                 "none",
                                                 &name,
                                                 &ns,
@@ -492,7 +510,12 @@ pub async fn handle_build_completed(
     let matching_configs = deploy_configs.iter().filter(|dc| {
         dc.spec.spec.repo.owner == owner
             && dc.spec.spec.repo.repo == repo
-            && dc.spec.spec.repo.branch == branch
+            && dc
+                .status
+                .as_ref()
+                .and_then(|s| s.current_branch.clone())
+                .unwrap_or_else(|| dc.spec.spec.repo.defaultBranch.clone())
+                == branch
     });
 
     for config in matching_configs {
