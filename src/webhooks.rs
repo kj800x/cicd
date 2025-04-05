@@ -372,6 +372,11 @@ async fn process_event(
                                         get_branches_for_commit(&commit.sha, &conn)
                                     {
                                         for branch in branches {
+                                            if commit.sha != branch.head_commit_sha {
+                                                log::info!("Commit {} is not the latest on branch {}, not updating DeployConfigs", commit.sha, branch.name);
+                                                continue;
+                                            }
+
                                             // For each branch, update DeployConfigs
                                             match kubernetes::handle_build_completed(
                                                 kube_client,
