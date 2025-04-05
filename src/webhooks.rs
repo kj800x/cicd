@@ -156,6 +156,7 @@ async fn process_event(
         }
     };
 
+    log::trace!("Received event: {}", event.event_type);
     match event.event_type.as_str() {
         "push" => {
             match serde_json::from_value::<PushEvent>(event.payload.clone()) {
