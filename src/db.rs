@@ -719,48 +719,6 @@ pub fn get_branch_by_name(
     .optional()
 }
 
-pub fn get_latest_successful_commit_for_branch(
-    repo_owner: &str,
-    repo_name: &str,
-    branch_name: &str,
-    conn: &PooledConnection<SqliteConnectionManager>,
-) -> Result<Option<Commit>, Error> {
-    let repo = get_repo(conn, repo_owner.to_string(), repo_name.to_string())?;
-
-    let Some(repo) = repo else {
-        return Ok(None);
-    };
-
-    let repo_id = repo.id as u64;
-
-    let mut stmt = conn
-        .prepare(
-            "SELECT c.id, c.sha, c.message, c.timestamp, c.build_status, c.build_url
-         FROM git_commit c
-         JOIN git_branch b ON c.repo_id = b.repo_id
-         WHERE b.name = ?1 AND c.repo_id = ?2 AND c.build_status = 'Success'
-         ORDER BY c.timestamp DESC
-         LIMIT 1",
-        )
-        .unwrap();
-
-    let commit = stmt
-        .query_row(params![branch_name, repo_id], |row| {
-            Ok(Commit {
-                id: row.get(0)?,
-                sha: row.get(1)?,
-                message: row.get(2)?,
-                timestamp: row.get(3)?,
-                build_status: row.get::<_, Option<String>>(4)?.into(),
-                build_url: row.get(5)?,
-            })
-        })
-        .optional()
-        .unwrap();
-
-    Ok(commit)
-}
-
 pub fn get_branches_for_commit(
     commit_sha: &str,
     conn: &PooledConnection<SqliteConnectionManager>,

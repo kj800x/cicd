@@ -8,7 +8,7 @@ use kube::{
 use std::{sync::Arc, time::Duration};
 
 use super::DeployConfig;
-use crate::{db::get_latest_successful_commit_for_branch, prelude::*};
+use crate::prelude::*;
 
 trait WithVersion {
     fn with_version(&self, version: &str) -> Self;
