@@ -281,6 +281,17 @@ async fn process_event(
                             repo_id as i64,
                             payload.check_run.check_suite.head_sha.clone(),
                         ) {
+                            // Set the commit status to Pending
+                            if let Err(e) = set_commit_status(
+                                &payload.check_run.check_suite.head_sha,
+                                BuildStatus::Pending,
+                                payload.check_run.details_url.clone(),
+                                repo_id,
+                                &conn,
+                            ) {
+                                log::error!("Error setting commit status to Pending: {}", e);
+                            }
+
                             // Send a notification that build has started
                             if let Some(notifier) = discord_notifier {
                                 match notifier
