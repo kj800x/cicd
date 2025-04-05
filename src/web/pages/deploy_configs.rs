@@ -2,8 +2,7 @@ use crate::db::Commit;
 use crate::prelude::*;
 use kube::{
     api::{Api, Patch, PatchParams},
-    client::Client,
-    config, ResourceExt,
+    client::Client, ResourceExt,
 };
 use regex::Regex;
 use std::collections::HashMap;

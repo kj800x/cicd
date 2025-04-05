@@ -1,13 +1,12 @@
 use crate::kubernetes;
 use crate::prelude::*;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use kube::Client as KubeClient;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, Instant};
 use tokio_tungstenite::{
     connect_async,
-    tungstenite::{client::IntoClientRequest, http::HeaderValue, protocol::Message},
+    tungstenite::{client::IntoClientRequest, http::HeaderValue},
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
