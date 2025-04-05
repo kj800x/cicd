@@ -292,30 +292,46 @@ async fn process_event(
                                     build_status
                                 );
 
-                                // Send notification for workflow completion
-                                if payload.action == "completed" {
-                                    if let Some(notifier) = discord_notifier {
-                                        match notifier
-                                            .notify_build_completed(
-                                                &payload.repository.owner.login,
-                                                &payload.repository.name,
-                                                &payload.workflow_run.head_sha,
-                                                &commit.message,
-                                                &build_status,
-                                                Some(&payload.workflow_run.html_url),
-                                            )
-                                            .await
-                                        {
-                                            Ok(_) => {
-                                                log::debug!("Discord notification sent for build completion")
-                                            }
-                                            Err(e) => {
-                                                log::error!(
+                                // Send notifications based on workflow state
+                                if let Some(notifier) = discord_notifier {
+                                    match payload.action.as_str() {
+                                        "requested" => {
+                                            match notifier
+                                                .notify_build_started(
+                                                    &payload.repository.owner.login,
+                                                    &payload.repository.name,
+                                                    &payload.workflow_run.head_sha,
+                                                    &commit.message,
+                                                    Some(&payload.workflow_run.html_url),
+                                                )
+                                                .await
+                                            {
+                                                Ok(_) => log::debug!(
+                                                    "Discord notification sent for build start"
+                                                ),
+                                                Err(e) => log::error!(
                                                     "Failed to send Discord notification: {}",
                                                     e
-                                                )
+                                                ),
                                             }
                                         }
+                                        "completed" => {
+                                            match notifier
+                                                .notify_build_completed(
+                                                    &payload.repository.owner.login,
+                                                    &payload.repository.name,
+                                                    &payload.workflow_run.head_sha,
+                                                    &commit.message,
+                                                    &build_status,
+                                                    Some(&payload.workflow_run.html_url),
+                                                )
+                                                .await
+                                            {
+                                                Ok(_) => log::debug!("Discord notification sent for build completion"),
+                                                Err(e) => log::error!("Failed to send Discord notification: {}", e),
+                                            }
+                                        }
+                                        _ => {}
                                     }
                                 }
                             }
@@ -390,84 +406,62 @@ async fn process_event(
                                 &payload.check_suite.head_sha[0..7],
                                 build_status
                             );
-                        }
 
-                        // Get the commit to get its message
-                        if let Ok(Some(commit)) =
-                            get_commit(&conn, repo_id as i64, payload.check_suite.head_sha.clone())
-                        {
-                            // Send a notification that build has completed
-                            if let Some(notifier) = discord_notifier {
-                                match notifier
-                                    .notify_build_completed(
-                                        &payload.repository.owner.login,
-                                        &payload.repository.name,
-                                        &payload.check_suite.head_sha,
-                                        &commit.message,
-                                        &build_status,
-                                        Some(&details_url),
-                                    )
-                                    .await
-                                {
-                                    Ok(_) => {
-                                        log::debug!(
-                                            "Discord notification sent for build completion"
-                                        )
-                                    }
-                                    Err(e) => {
-                                        log::error!("Failed to send Discord notification: {}", e)
-                                    }
-                                }
-                            }
-
-                            // If build was successful, update Kubernetes DeployConfigs
-                            if matches!(build_status, BuildStatus::Success) {
-                                if let Some(kube_client) = kube_client {
-                                    // Get branches for this commit
-                                    if let Ok(branches) =
-                                        get_branches_for_commit(&commit.sha, &conn)
-                                    {
-                                        for branch in branches {
-                                            if commit.sha != branch.head_commit_sha {
-                                                log::debug!("Commit {} is not the latest on branch {}, not updating DeployConfigs", commit.sha, branch.name);
-                                                continue;
-                                            }
-
-                                            // For each branch, update DeployConfigs
-                                            match kubernetes::handle_build_completed(
-                                                kube_client,
-                                                &payload.repository.owner.login,
-                                                &payload.repository.name,
-                                                &branch.name,
-                                                &commit.sha,
-                                            )
-                                            .await
-                                            {
-                                                Ok(_) => {
-                                                    log::info!(
-                                                        "Updated DeployConfigs for {}/{} branch {} with SHA {}",
-                                                        payload.repository.owner.login,
-                                                        payload.repository.name,
-                                                        branch.name,
-                                                        &commit.sha[0..7]
-                                                    );
+                            // Get the commit to get its message
+                            if let Ok(Some(commit)) = get_commit(
+                                &conn,
+                                repo_id as i64,
+                                payload.check_suite.head_sha.clone(),
+                            ) {
+                                // If build was successful, update Kubernetes DeployConfigs
+                                if matches!(build_status, BuildStatus::Success) {
+                                    if let Some(kube_client) = kube_client {
+                                        // Get branches for this commit
+                                        if let Ok(branches) =
+                                            get_branches_for_commit(&commit.sha, &conn)
+                                        {
+                                            for branch in branches {
+                                                if commit.sha != branch.head_commit_sha {
+                                                    log::debug!("Commit {} is not the latest on branch {}, not updating DeployConfigs", commit.sha, branch.name);
+                                                    continue;
                                                 }
-                                                Err(e) => {
-                                                    log::error!(
-                                                        "Failed to update DeployConfigs: {:?}",
-                                                        e
-                                                    );
+
+                                                // For each branch, update DeployConfigs
+                                                match kubernetes::handle_build_completed(
+                                                    kube_client,
+                                                    &payload.repository.owner.login,
+                                                    &payload.repository.name,
+                                                    &branch.name,
+                                                    &commit.sha,
+                                                )
+                                                .await
+                                                {
+                                                    Ok(_) => {
+                                                        log::info!(
+                                                            "Updated DeployConfigs for {}/{} branch {} with SHA {}",
+                                                            payload.repository.owner.login,
+                                                            payload.repository.name,
+                                                            branch.name,
+                                                            &commit.sha[0..7]
+                                                        );
+                                                    }
+                                                    Err(e) => {
+                                                        log::error!(
+                                                            "Failed to update DeployConfigs: {:?}",
+                                                            e
+                                                        );
+                                                    }
                                                 }
                                             }
+                                        } else {
+                                            log::warn!(
+                                                "Could not find branches for commit {}",
+                                                commit.sha
+                                            );
                                         }
                                     } else {
-                                        log::warn!(
-                                            "Could not find branches for commit {}",
-                                            commit.sha
-                                        );
+                                        log::warn!("Kubernetes client not available, skipping DeployConfig updates");
                                     }
-                                } else {
-                                    log::warn!("Kubernetes client not available, skipping DeployConfig updates");
                                 }
                             }
                         }
