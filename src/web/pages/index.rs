@@ -97,97 +97,87 @@ pub async fn index(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Respo
 
     let mut branch_data_list = Vec::new();
 
-    for branch_result in branch_rows {
-        if let Ok((
-            branch_id,
-            branch_name,
-            head_commit_sha,
-            repo_id,
-            repo_name,
-            repo_owner,
-            default_branch,
-            is_private,
-            language,
-        )) = branch_result
-        {
-            // Determine if this is the default branch
-            let is_default = branch_name == default_branch;
+    for (
+        branch_id,
+        branch_name,
+        head_commit_sha,
+        repo_id,
+        repo_name,
+        repo_owner,
+        default_branch,
+        is_private,
+        language,
+    ) in branch_rows.flatten()
+    {
+        // Determine if this is the default branch
+        let is_default = branch_name == default_branch;
 
-            // Get last 10 commits for this branch
-            let commits_query = r#"
-                SELECT c.id, c.sha, c.message, c.timestamp, c.build_status, c.build_url
-                FROM git_commit c
-                JOIN git_commit_branch cb ON c.sha = cb.commit_sha
-                WHERE cb.branch_id = ?1
-                ORDER BY c.timestamp DESC
-                LIMIT 10
-            "#;
+        // Get last 10 commits for this branch
+        let commits_query = r#"
+            SELECT c.id, c.sha, c.message, c.timestamp, c.build_status, c.build_url
+            FROM git_commit c
+            JOIN git_commit_branch cb ON c.sha = cb.commit_sha
+            WHERE cb.branch_id = ?1
+            ORDER BY c.timestamp DESC
+            LIMIT 10
+        "#;
 
-            let mut commits_stmt = conn.prepare(commits_query).unwrap();
-            let commit_rows = commits_stmt
-                .query_map([branch_id], |row| {
-                    let build_status_str: Option<String> = row.get(4)?;
-                    let status: BuildStatus = build_status_str.into();
+        let mut commits_stmt = conn.prepare(commits_query).unwrap();
+        let commit_rows = commits_stmt
+            .query_map([branch_id], |row| {
+                let build_status_str: Option<String> = row.get(4)?;
+                let status: BuildStatus = build_status_str.into();
 
-                    let commit_id = row.get::<_, i64>(0)?;
-                    let commit_sha = row.get::<_, String>(1)?;
-                    let commit_message = row.get::<_, String>(2)?;
-                    let commit_timestamp = row.get::<_, i64>(3)?;
-                    let build_url = row.get::<_, Option<String>>(5)?;
+                let commit_id = row.get::<_, i64>(0)?;
+                let commit_sha = row.get::<_, String>(1)?;
+                let commit_message = row.get::<_, String>(2)?;
+                let commit_timestamp = row.get::<_, i64>(3)?;
+                let build_url = row.get::<_, Option<String>>(5)?;
 
-                    Ok((
-                        commit_id,
-                        commit_sha,
-                        commit_message,
-                        commit_timestamp,
-                        status,
-                        build_url,
-                    ))
-                })
-                .unwrap();
-
-            let mut commits = Vec::new();
-            for commit_result in commit_rows {
-                if let Ok((
+                Ok((
                     commit_id,
                     commit_sha,
                     commit_message,
                     commit_timestamp,
-                    build_status,
+                    status,
                     build_url,
-                )) = commit_result
-                {
-                    // Get parent SHAs for this commit
-                    let parent_shas = get_commit_parents(&commit_sha, &conn).unwrap_or_default();
+                ))
+            })
+            .unwrap();
 
-                    commits.push(CommitData {
-                        id: commit_id,
-                        sha: commit_sha,
-                        message: commit_message,
-                        timestamp: commit_timestamp,
-                        build_status,
-                        build_url,
-                        parent_shas,
-                    });
-                }
-            }
+        let mut commits = Vec::new();
+        for (commit_id, commit_sha, commit_message, commit_timestamp, build_status, build_url) in
+            commit_rows.flatten()
+        {
+            // Get parent SHAs for this commit
+            let parent_shas = get_commit_parents(&commit_sha, &conn).unwrap_or_default();
 
-            // Only include branches that have commits
-            if !commits.is_empty() {
-                branch_data_list.push(BranchData {
-                    branch_id,
-                    branch_name,
-                    head_commit_sha,
-                    repo_id,
-                    repo_name,
-                    repo_owner,
-                    default_branch,
-                    is_private,
-                    language,
-                    is_default,
-                    commits,
-                });
-            }
+            commits.push(CommitData {
+                id: commit_id,
+                sha: commit_sha,
+                message: commit_message,
+                timestamp: commit_timestamp,
+                build_status,
+                build_url,
+                parent_shas,
+            });
+        }
+
+        // Only include branches that have commits
+        if !commits.is_empty() {
+            branch_data_list.push(BranchData {
+                branch_id,
+                branch_name,
+                head_commit_sha,
+                repo_id,
+                repo_name,
+                repo_owner,
+                default_branch,
+                is_private,
+                language,
+                is_default,
+                commits,
+            });
         }
     }
 

@@ -171,7 +171,7 @@ pub fn migrate(mut conn: PooledConnection<SqliteConnectionManager>) -> Result<()
         //M::up("ALTER TABLE friend ADD COLUMN email TEXT;"),
     ]);
 
-    conn.pragma_update_and_check(None, "journal_mode", &"WAL", |_| Ok(()))
+    conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))
         .unwrap();
     migrations.to_latest(&mut conn).unwrap();
     Ok(())
@@ -333,7 +333,7 @@ pub fn get_commit_parents(
         .unwrap();
 
     let parents_iter = stmt
-        .query_map([commit_sha], |row| Ok(row.get::<_, String>(0)?))
+        .query_map([commit_sha], |row| row.get::<_, String>(0))
         .unwrap();
 
     let mut parents = Vec::new();

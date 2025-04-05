@@ -38,14 +38,10 @@ impl WithVersion for Deployment {
         self.spec.as_ref().and_then(|spec| {
             spec.template.spec.as_ref().and_then(|template| {
                 template.containers.first().and_then(|container| {
-                    container
-                        .image
-                        .as_ref()
-                        .map(|image| {
-                            let parts = image.split(":commit-").collect::<Vec<&str>>();
-                            parts.get(1).copied()
-                        })
-                        .flatten()
+                    container.image.as_ref().and_then(|image| {
+                        let parts = image.split(":commit-").collect::<Vec<&str>>();
+                        parts.get(1).copied()
+                    })
                 })
             })
         })
@@ -56,8 +52,6 @@ impl WithVersion for Deployment {
 pub struct ControllerContext {
     /// Kubernetes client
     client: Client,
-    /// Database pool
-    pool: Pool<SqliteConnectionManager>,
     /// Discord notifier (if enabled)
     discord_notifier: Option<DiscordNotifier>,
 }
@@ -67,11 +61,11 @@ pub struct ControllerContext {
 pub enum Error {
     /// Kube API error
     #[error("Kubernetes API error: {0}")]
-    KubeError(#[from] kube::Error),
+    Kube(#[from] kube::Error),
 
     /// Database error
     #[error("Database error: {0}")]
-    DbError(#[from] rusqlite::Error),
+    Db(#[from] rusqlite::Error),
 
     /// Other errors
     #[error("Other error: {0}")]
@@ -179,7 +173,7 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
                                                 .as_ref()
                                                 .and_then(|s| s.current_branch.clone())
                                                 .unwrap_or_else(|| {
-                                                    dc.spec.spec.repo.defaultBranch.clone()
+                                                    dc.spec.spec.repo.default_branch.clone()
                                                 })
                                                 .as_str(),
                                             wanted_sha,
@@ -219,7 +213,7 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
                                             .as_ref()
                                             .and_then(|s| s.current_branch.clone())
                                             .unwrap_or_else(|| {
-                                                dc.spec.spec.repo.defaultBranch.clone()
+                                                dc.spec.spec.repo.default_branch.clone()
                                             })
                                             .as_str(),
                                         wanted_sha,
@@ -232,7 +226,7 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
                         }
                         Err(e) => {
                             log::error!("Error checking deployment: {:?}", e);
-                            return Err(Error::KubeError(e));
+                            return Err(Error::Kube(e));
                         }
                     }
                 }
@@ -265,7 +259,7 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
                                                     .as_ref()
                                                     .and_then(|s| s.current_branch.clone())
                                                     .unwrap_or_else(|| {
-                                                        dc.spec.spec.repo.defaultBranch.clone()
+                                                        dc.spec.spec.repo.default_branch.clone()
                                                     })
                                                     .as_str(),
                                                 "none",
@@ -278,7 +272,7 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
                                 }
                                 Err(e) => {
                                     log::error!("Error deleting deployment: {:?}", e);
-                                    return Err(Error::KubeError(e));
+                                    return Err(Error::Kube(e));
                                 }
                             }
                         }
@@ -288,7 +282,7 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
                         }
                         Err(e) => {
                             log::error!("Error checking deployment: {:?}", e);
-                            return Err(Error::KubeError(e));
+                            return Err(Error::Kube(e));
                         }
                     }
                 }
@@ -451,13 +445,11 @@ async fn update_deploy_config_status_current_none(
 /// Start the Kubernetes controller
 pub async fn start_controller(
     client: Client,
-    pool: Pool<SqliteConnectionManager>,
+    _pool: Pool<SqliteConnectionManager>,
     discord_notifier: Option<DiscordNotifier>,
 ) -> Result<(), Error> {
-    // Create the controller context
     let context = Arc::new(ControllerContext {
         client: client.clone(),
-        pool,
         discord_notifier,
     });
 
@@ -503,7 +495,7 @@ pub async fn handle_build_completed(
         Ok(list) => list.items,
         Err(e) => {
             log::error!("Failed to list DeployConfigs: {}", e);
-            return Err(Error::KubeError(e));
+            return Err(Error::Kube(e));
         }
     };
 
@@ -514,7 +506,7 @@ pub async fn handle_build_completed(
                 .status
                 .as_ref()
                 .and_then(|s| s.current_branch.clone())
-                .unwrap_or_else(|| dc.spec.spec.repo.defaultBranch.clone())
+                .unwrap_or_else(|| dc.spec.spec.repo.default_branch.clone())
                 == branch
     });
 

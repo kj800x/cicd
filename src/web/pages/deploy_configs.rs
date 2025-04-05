@@ -2,7 +2,8 @@ use crate::db::Commit;
 use crate::prelude::*;
 use kube::{
     api::{Api, Patch, PatchParams},
-    client::Client, ResourceExt,
+    client::Client,
+    ResourceExt,
 };
 use regex::Regex;
 use std::collections::HashMap;
@@ -59,7 +60,7 @@ fn get_latest_successful_build(
 
 /// Handler for the deploy configs page
 pub async fn deploy_configs(
-    pool: web::Data<Pool<SqliteConnectionManager>>,
+    _pool: web::Data<Pool<SqliteConnectionManager>>,
     query: web::Query<std::collections::HashMap<String, String>>,
 ) -> impl Responder {
     // Initialize Kubernetes client
@@ -403,7 +404,7 @@ pub async fn deploy_configs(
 
                                     div class="detail-row" {
                                         div class="detail-label" { "Default Branch:" }
-                                        div class="detail-value" { (selected_config.spec.spec.repo.defaultBranch) }
+                                        div class="detail-value" { (selected_config.spec.spec.repo.default_branch) }
                                     }
 
                                     div class="detail-row" {
@@ -690,10 +691,10 @@ pub async fn deploy_config(
                 Ok(_) => {
                     // Redirect back to the DeployConfig page with the selected config
                     HttpResponse::SeeOther()
-                        .header(
+                        .append_header((
                             "Location",
                             format!("/deploy-configs?selected={}/{}", namespace, name),
-                        )
+                        ))
                         .finish()
                 }
                 Err(e) => {
@@ -762,10 +763,10 @@ pub async fn undeploy_config(
                 Ok(_) => {
                     // Redirect back to the DeployConfig page with the selected config
                     HttpResponse::SeeOther()
-                        .header(
+                        .append_header((
                             "Location",
                             format!("/deploy-configs?selected={}/{}", namespace, name),
-                        )
+                        ))
                         .finish()
                 }
                 Err(e) => {
@@ -853,10 +854,10 @@ pub async fn deploy_specific_config(
                 Ok(_) => {
                     // Redirect back to the DeployConfig page with the selected config
                     HttpResponse::SeeOther()
-                        .header(
+                        .append_header((
                             "Location",
                             format!("/deploy-configs?selected={}/{}", namespace, name),
-                        )
+                        ))
                         .finish()
                 }
                 Err(e) => {
@@ -1004,10 +1005,10 @@ pub async fn override_branch(
                     log::debug!("Updated DeployConfig status: {:?}", updated_config.status);
                     // Redirect back to the DeployConfig page with the selected config
                     HttpResponse::SeeOther()
-                        .header(
+                        .append_header((
                             "Location",
                             format!("/deploy-configs?selected={}/{}", namespace, name),
-                        )
+                        ))
                         .finish()
                 }
                 Err(e) => {

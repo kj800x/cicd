@@ -187,15 +187,17 @@ impl DiscordNotifier {
                     "{} {}: {}/{}",
                     status_emoji, status_title, repo_owner, repo_name
                 ))
-                .description(format!(
-                    "{}",
+                .description(
                     match build_status {
-                        BuildStatus::Success | BuildStatus::Failure =>
-                            format!("Build completed for commit `{}`", &commit_sha[0..7]),
-                        BuildStatus::Pending | BuildStatus::None =>
-                            format!("Build update for commit `{}`", &commit_sha[0..7]),
+                        BuildStatus::Success | BuildStatus::Failure => {
+                            format!("Build completed for commit `{}`", &commit_sha[0..7])
+                        }
+                        BuildStatus::Pending | BuildStatus::None => {
+                            format!("Build update for commit `{}`", &commit_sha[0..7])
+                        }
                     }
-                ))
+                    .to_string(),
+                )
                 .color(status_color)
                 .field("Repository", format!("{}/{}", repo_owner, repo_name), true)
                 .field("Commit", &commit_sha[0..7], true)

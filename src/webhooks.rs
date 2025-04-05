@@ -502,32 +502,23 @@ pub async fn start_websockets(
                 let pool_ref = &pool;
                 let kube_client_ref = &kube_client;
 
-                match read
-                    .for_each(|message| async {
-                        match message {
-                            Ok(msg) => {
-                                let data = msg.into_data();
-                                match serde_json::from_slice::<WebhookEvent>(&data) {
-                                    Ok(event) => {
-                                        process_event(
-                                            event,
-                                            pool_ref,
-                                            notifier_ref,
-                                            kube_client_ref,
-                                        )
+                read.for_each(|message| async {
+                    match message {
+                        Ok(msg) => {
+                            let data = msg.into_data();
+                            match serde_json::from_slice::<WebhookEvent>(&data) {
+                                Ok(event) => {
+                                    process_event(event, pool_ref, notifier_ref, kube_client_ref)
                                         .await
-                                    }
-                                    Err(e) => log::error!("Error parsing webhook event: {}", e),
                                 }
+                                Err(e) => log::error!("Error parsing webhook event: {}", e),
                             }
-                            Err(e) => log::error!("Error reading from websocket: {}", e),
                         }
-                    })
-                    .await
-                {
-                    // The for_each completes when the stream is closed
-                    _ => log::error!("WebSocket connection closed, will attempt to reconnect..."),
-                }
+                        Err(e) => log::error!("Error reading from websocket: {}", e),
+                    }
+                })
+                .await;
+                log::error!("WebSocket connection closed, will attempt to reconnect...");
             }
             Err(e) => {
                 log::error!("Failed to connect to WebSocket: {}", e);

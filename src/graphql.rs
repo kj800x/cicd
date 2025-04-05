@@ -48,7 +48,7 @@ pub struct QueryRoot;
 #[Object]
 impl QueryRoot {
     // Get builds from the last hour
-    async fn recent_builds<'a>(&self, ctx: &Context<'a>) -> Result<Vec<Build>> {
+    async fn recent_builds(&self, ctx: &Context<'_>) -> Result<Vec<Build>> {
         let pool = ctx
             .data_unchecked::<Pool<SqliteConnectionManager>>()
             .clone();
@@ -100,7 +100,7 @@ impl QueryRoot {
     }
 
     // Find a specific build by commit SHA
-    async fn build<'a>(&self, ctx: &Context<'a>, sha: String) -> Result<Option<Build>> {
+    async fn build(&self, ctx: &Context<'_>, sha: String) -> Result<Option<Build>> {
         let pool = ctx
             .data_unchecked::<Pool<SqliteConnectionManager>>()
             .clone();
@@ -141,9 +141,9 @@ impl QueryRoot {
     }
 
     // Get parent builds of a specific commit
-    async fn parent_builds<'a>(
+    async fn parent_builds(
         &self,
-        ctx: &Context<'a>,
+        ctx: &Context<'_>,
         sha: String,
         max_depth: Option<i32>,
     ) -> Result<Vec<Build>> {
@@ -175,7 +175,7 @@ impl QueryRoot {
             .unwrap();
 
         if let Some(repo) = commit_repo {
-            let max_depth = max_depth.unwrap_or(10).max(1).min(20) as usize;
+            let max_depth = max_depth.unwrap_or(10).clamp(1, 20) as usize;
             let parent_commits = get_parent_commits(&sha, &conn, max_depth).unwrap();
 
             let mut builds = Vec::new();
@@ -221,7 +221,7 @@ impl QueryRoot {
     }
 
     // Get child builds of a specific commit
-    async fn child_builds<'a>(&self, ctx: &Context<'a>, sha: String) -> Result<Vec<Build>> {
+    async fn child_builds(&self, ctx: &Context<'_>, sha: String) -> Result<Vec<Build>> {
         let pool = ctx
             .data_unchecked::<Pool<SqliteConnectionManager>>()
             .clone();
@@ -320,7 +320,7 @@ impl QueryRoot {
     }
 
     // Get repositories
-    async fn repositories<'a>(&self, ctx: &Context<'a>) -> Result<Vec<Repository>> {
+    async fn repositories(&self, ctx: &Context<'_>) -> Result<Vec<Repository>> {
         let pool = ctx
             .data_unchecked::<Pool<SqliteConnectionManager>>()
             .clone();
@@ -350,7 +350,7 @@ impl QueryRoot {
     }
 
     // Get branches for a repository
-    async fn branches<'a>(&self, ctx: &Context<'a>, repo_id: i64) -> Result<Vec<Branch>> {
+    async fn branches(&self, ctx: &Context<'_>, repo_id: i64) -> Result<Vec<Branch>> {
         let pool = ctx
             .data_unchecked::<Pool<SqliteConnectionManager>>()
             .clone();
