@@ -172,7 +172,7 @@ async fn process_event(
         }
     };
 
-    log::trace!("Received event: {}", event.event_type);
+    log::debug!("Received event: {}", event.event_type);
     match event.event_type.as_str() {
         "push" => {
             match serde_json::from_value::<PushEvent>(event.payload.clone()) {
@@ -332,29 +332,22 @@ async fn process_event(
             if let Ok(payload) = serde_json::from_value::<CheckRunEvent>(event.payload) {
                 match upsert_repo(&payload.repository, &conn) {
                     Ok(repo_id) => {
-                        // Get the commit to get its message
-                        if let Ok(Some(commit)) = get_commit(
+                        // Set the commit status to Pending
+                        if let Err(e) = set_commit_status(
+                            &payload.check_run.check_suite.head_sha,
+                            BuildStatus::Pending,
+                            payload.check_run.details_url.clone(),
+                            repo_id,
                             &conn,
-                            repo_id as i64,
-                            payload.check_run.check_suite.head_sha.clone(),
                         ) {
-                            // Set the commit status to Pending
-                            if let Err(e) = set_commit_status(
-                                &payload.check_run.check_suite.head_sha,
-                                BuildStatus::Pending,
-                                payload.check_run.details_url.clone(),
-                                repo_id,
-                                &conn,
-                            ) {
-                                log::error!("Error setting commit status to Pending: {}", e);
-                            } else {
-                                log::info!(
-                                    "Build started for {}/{} commit {}",
-                                    payload.repository.owner.login,
-                                    payload.repository.name,
-                                    &payload.check_run.check_suite.head_sha[0..7]
-                                );
-                            }
+                            log::error!("Error setting commit status to Pending: {}", e);
+                        } else {
+                            log::info!(
+                                "Build started for {}/{} commit {}",
+                                payload.repository.owner.login,
+                                payload.repository.name,
+                                &payload.check_run.check_suite.head_sha[0..7]
+                            );
                         }
                     }
                     Err(e) => {
