@@ -106,6 +106,22 @@ struct CheckSuiteEvent {
     repository: Repository,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct WorkflowRunEvent {
+    action: String,
+    workflow_run: WorkflowRun,
+    repository: Repository,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct WorkflowRun {
+    id: u64,
+    head_sha: String,
+    status: String,
+    conclusion: Option<String>,
+    html_url: String,
+}
+
 // Pushes can be for reasons other than branches, such as tags
 fn extract_branch_name(r#ref: &str) -> Option<String> {
     let branch_regex = Regex::new(r"^refs/heads/(.+)$").unwrap();
@@ -240,6 +256,77 @@ async fn process_event(
                 );
             }
         },
+        "workflow_run" => {
+            if let Ok(payload) = serde_json::from_value::<WorkflowRunEvent>(event.payload) {
+                match upsert_repo(&payload.repository, &conn) {
+                    Ok(repo_id) => {
+                        // Get the commit to get its message
+                        if let Ok(Some(commit)) =
+                            get_commit(&conn, repo_id as i64, payload.workflow_run.head_sha.clone())
+                        {
+                            let build_status = match payload.action.as_str() {
+                                "requested" | "in_progress" => BuildStatus::Pending,
+                                "completed" => BuildStatus::of(
+                                    &payload.workflow_run.status,
+                                    &payload.workflow_run.conclusion.as_deref(),
+                                ),
+                                _ => BuildStatus::None,
+                            };
+
+                            // Set the commit status
+                            if let Err(e) = set_commit_status(
+                                &payload.workflow_run.head_sha,
+                                build_status.clone(),
+                                payload.workflow_run.html_url.clone(),
+                                repo_id,
+                                &conn,
+                            ) {
+                                log::error!("Error setting commit status: {}", e);
+                            } else {
+                                log::info!(
+                                    "Build {} for {}/{} commit {} with status {:?}",
+                                    payload.action,
+                                    payload.repository.owner.login,
+                                    payload.repository.name,
+                                    &payload.workflow_run.head_sha[0..7],
+                                    build_status
+                                );
+
+                                // Send notification for workflow completion
+                                if payload.action == "completed" {
+                                    if let Some(notifier) = discord_notifier {
+                                        match notifier
+                                            .notify_build_completed(
+                                                &payload.repository.owner.login,
+                                                &payload.repository.name,
+                                                &payload.workflow_run.head_sha,
+                                                &commit.message,
+                                                &build_status,
+                                                Some(&payload.workflow_run.html_url),
+                                            )
+                                            .await
+                                        {
+                                            Ok(_) => {
+                                                log::debug!("Discord notification sent for build completion")
+                                            }
+                                            Err(e) => {
+                                                log::error!(
+                                                    "Failed to send Discord notification: {}",
+                                                    e
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("Error upserting repository from workflow_run event: {}", e);
+                    }
+                }
+            }
+        }
         "check_run" => {
             // Handle check run events (build starts)
             if let Ok(payload) = serde_json::from_value::<CheckRunEvent>(event.payload) {
@@ -267,27 +354,6 @@ async fn process_event(
                                     payload.repository.name,
                                     &payload.check_run.check_suite.head_sha[0..7]
                                 );
-                            }
-
-                            // Send a notification that build has started
-                            if let Some(notifier) = discord_notifier {
-                                match notifier
-                                    .notify_build_started(
-                                        &payload.repository.owner.login,
-                                        &payload.repository.name,
-                                        &payload.check_run.check_suite.head_sha,
-                                        &commit.message,
-                                        Some(&payload.check_run.details_url),
-                                    )
-                                    .await
-                                {
-                                    Ok(_) => {
-                                        log::debug!("Discord notification sent for build start")
-                                    }
-                                    Err(e) => {
-                                        log::error!("Failed to send Discord notification: {}", e)
-                                    }
-                                }
                             }
                         }
                     }
