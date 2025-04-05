@@ -196,37 +196,6 @@ async fn process_event(
                                                 log::error!("Error associating commit {} with branch {}: {}", commit.id, branch_name, e);
                                             }
                                         }
-
-                                        // For the head commit, send a notification that build has started
-                                        if let Some(notifier) = discord_notifier {
-                                            // Get the full commit info from DB
-                                            if let Ok(Some(commit)) = get_commit(
-                                                &conn,
-                                                repo_id as i64,
-                                                payload.head_commit.id.clone(),
-                                            ) {
-                                                match notifier
-                                                    .notify_build_started(
-                                                        &payload.repository.owner.login,
-                                                        &payload.repository.name,
-                                                        &payload.head_commit.id,
-                                                        &payload.head_commit.message,
-                                                        commit.build_url.as_deref(),
-                                                    )
-                                                    .await
-                                                {
-                                                    Ok(_) => log::info!(
-                                                        "Discord notification sent for build start"
-                                                    ),
-                                                    Err(e) => log::error!(
-                                                        "Failed to send Discord notification: {}",
-                                                        e
-                                                    ),
-                                                }
-                                            } else {
-                                                log::warn!("Could not find commit in DB to send Discord notification");
-                                            }
-                                        }
                                     }
                                     Err(e) => {
                                         log::error!("Error updating branch {}: {}", branch_name, e);
