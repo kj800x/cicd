@@ -290,6 +290,13 @@ async fn process_event(
                                 &conn,
                             ) {
                                 log::error!("Error setting commit status to Pending: {}", e);
+                            } else {
+                                log::info!(
+                                    "Build started for {}/{} commit {}",
+                                    payload.repository.owner.login,
+                                    payload.repository.name,
+                                    &payload.check_run.check_suite.head_sha[0..7]
+                                );
                             }
 
                             // Send a notification that build has started
@@ -305,7 +312,7 @@ async fn process_event(
                                     .await
                                 {
                                     Ok(_) => {
-                                        log::info!("Discord notification sent for build start")
+                                        log::debug!("Discord notification sent for build start")
                                     }
                                     Err(e) => {
                                         log::error!("Failed to send Discord notification: {}", e)
@@ -346,6 +353,14 @@ async fn process_event(
                             &conn,
                         ) {
                             log::error!("Error setting commit status: {}", e);
+                        } else {
+                            log::info!(
+                                "Build completed for {}/{} commit {} with status {:?}",
+                                payload.repository.owner.login,
+                                payload.repository.name,
+                                &payload.check_suite.head_sha[0..7],
+                                build_status
+                            );
                         }
 
                         // Get the commit to get its message
@@ -366,7 +381,9 @@ async fn process_event(
                                     .await
                                 {
                                     Ok(_) => {
-                                        log::info!("Discord notification sent for build completion")
+                                        log::debug!(
+                                            "Discord notification sent for build completion"
+                                        )
                                     }
                                     Err(e) => {
                                         log::error!("Failed to send Discord notification: {}", e)
@@ -383,7 +400,7 @@ async fn process_event(
                                     {
                                         for branch in branches {
                                             if commit.sha != branch.head_commit_sha {
-                                                log::info!("Commit {} is not the latest on branch {}, not updating DeployConfigs", commit.sha, branch.name);
+                                                log::debug!("Commit {} is not the latest on branch {}, not updating DeployConfigs", commit.sha, branch.name);
                                                 continue;
                                             }
 
@@ -403,7 +420,7 @@ async fn process_event(
                                                         payload.repository.owner.login,
                                                         payload.repository.name,
                                                         branch.name,
-                                                        commit.sha
+                                                        &commit.sha[0..7]
                                                     );
                                                 }
                                                 Err(e) => {

@@ -171,31 +171,15 @@ async fn start_kubernetes_controller(
 async fn main() -> std::io::Result<()> {
     // Configure logger with custom filter to prioritize Discord logs
     env_logger::builder()
-        .filter_level(log::LevelFilter::Warn) // Set default level to Warn for most modules
-        .filter(Some("cicd::discord"), log::LevelFilter::Debug) // Enable debug logs for Discord module
-        .filter(Some("serenity"), log::LevelFilter::Warn) // Serenity crate spams at info level
-        .filter(Some("cicd::kubernetes"), log::LevelFilter::Debug) // Enable debug logs for Kubernetes module
-        .filter(Some("cicd::web"), log::LevelFilter::Debug) // Enable debug logs for web module
-        .filter_module(
-            "cicd",
-            match std::env::var("RUST_LOG") {
-                Ok(level) => match level.as_str() {
-                    "trace" => log::LevelFilter::Trace,
-                    "debug" => log::LevelFilter::Debug,
-                    "info" => log::LevelFilter::Info,
-                    "warn" => log::LevelFilter::Warn,
-                    "error" => log::LevelFilter::Error,
-                    _ => log::LevelFilter::Warn,
-                },
-                Err(_) => log::LevelFilter::Warn,
-            },
-        )
+        .filter_level(log::LevelFilter::Info) // Set default level to Info for most modules
+        .filter_module("serenity", log::LevelFilter::Warn) // Serenity crate spams at info level
+        .filter_module("actix_web::middleware::logger", log::LevelFilter::Warn) // Actix web middleware logs every request at info
+        .filter_module("kube_runtime::controller", log::LevelFilter::Warn) // Kubernetes controller logs every reconciliation at info level
+        // .filter_module("cicd::discord", log::LevelFilter::Info)
+        // .filter_module("cicd::kubernetes", log::LevelFilter::Info)
+        // .filter_module("cicd::web", log::LevelFilter::Info)
+        .parse_default_env()
         .init();
-
-    log::info!("Starting CI/CD Build Status Dashboard");
-    log::info!(
-        "For focused Discord debugging, logs are filtered to highlight Discord-related events"
-    );
 
     let registry = prometheus::Registry::new();
     let exporter = opentelemetry_prometheus::exporter()

@@ -92,7 +92,7 @@ impl DiscordNotifier {
             "Preparing Discord notification for build start: {}/{} commit {}",
             repo_owner,
             repo_name,
-            commit_sha
+            &commit_sha[0..7]
         );
 
         // Create an embed for the build started notification
@@ -123,7 +123,7 @@ impl DiscordNotifier {
 
         match self.channel_id.send_message(&self.http, message).await {
             Ok(message) => {
-                log::info!(
+                log::debug!(
                     "Discord build notification sent for {}/{} ({})",
                     repo_owner,
                     repo_name,
@@ -168,7 +168,7 @@ impl DiscordNotifier {
             "Preparing Discord notification for build completion: {}/{} commit {} with status {:?}",
             repo_owner,
             repo_name,
-            commit_sha,
+            &commit_sha[0..7],
             build_status
         );
 
@@ -233,7 +233,7 @@ impl DiscordNotifier {
                 .await
             {
                 Ok(_) => {
-                    log::info!(
+                    log::debug!(
                         "Discord build status updated: {} for {}/{} ({})",
                         status_title,
                         repo_owner,
@@ -257,7 +257,7 @@ impl DiscordNotifier {
         } else {
             log::debug!(
                 "No existing message found for commit {}, sending new message",
-                commit_sha
+                &commit_sha[0..7]
             );
             self.send_new_discord_message(create_embed()).await
         }

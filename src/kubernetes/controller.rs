@@ -108,102 +108,52 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
     let ns = dc.namespace().unwrap_or_else(|| "default".to_string());
     let name = dc.name_any();
 
-    log::info!("Reconciling DeployConfig {}/{}", ns, name);
+    log::debug!("Reconciling DeployConfig {}/{}", ns, name);
 
     // RULE: When a deployment's SHA doesn't match wantedSha, update the Deployment
     // or create/delete as needed based on wantedSha presence
-    match &dc.status {
+    match dc.status.as_ref() {
         Some(status) => {
-            // Check if there's a wanted SHA set
-            match &status.wanted_sha {
-                Some(wanted_sha) => {
-                    // Get the API for deployments
-                    let deployments: Api<Deployment> = Api::namespaced(client.clone(), &ns);
-
-                    // Check if deployment exists
-                    match deployments.get(&name).await {
-                        Ok(deployment) => {
-                            // Deployment exists - check if SHA matches wanted SHA
-                            let current_sha = deployment.get_sha();
-
-                            if current_sha.is_some_and(|v| v == wanted_sha) {
-                                // Deployment is already at the desired version
-                                log::info!(
-                                    "Deployment {}/{} is already at the desired SHA: {}",
-                                    ns,
-                                    name,
-                                    wanted_sha
-                                );
-                            } else {
-                                // Deployment needs to be updated
-                                log::info!(
-                                    "Updating deployment {}/{} to use SHA {}",
-                                    ns,
-                                    name,
-                                    wanted_sha
-                                );
-
-                                let mut deployment_to_update = deployment.clone();
-
-                                // Ensure proper owner reference is set
-                                ensure_owner_reference(&mut deployment_to_update, dc.as_ref());
-
-                                // Update the deployment
-                                let _ = deployments
-                                    .patch(
-                                        &name,
-                                        &PatchParams::default(),
-                                        &Patch::Merge(
-                                            &deployment_to_update.with_version(wanted_sha),
-                                        ),
-                                    )
-                                    .await?;
-
-                                // Update the current SHA in status
-                                update_deploy_config_status_current(client, &ns, &name, wanted_sha)
-                                    .await?;
-
-                                // Notify if discord is enabled for the update
-                                if let Some(ref notifier) = ctx.discord_notifier {
-                                    let _ = notifier
-                                        .notify_k8s_deployment(
-                                            &dc.spec.spec.repo.owner,
-                                            &dc.spec.spec.repo.repo,
-                                            dc.status
-                                                .as_ref()
-                                                .and_then(|s| s.current_branch.clone())
-                                                .unwrap_or_else(|| {
-                                                    dc.spec.spec.repo.default_branch.clone()
-                                                })
-                                                .as_str(),
-                                            wanted_sha,
-                                            &name,
-                                            &ns,
-                                            "updated",
-                                        )
-                                        .await;
-                                }
-                            }
-                        }
-                        Err(kube::Error::Api(api_err)) if api_err.code == 404 => {
-                            // Deployment does not exist, but wantedSHA exists - create it
-                            log::info!(
-                                "Creating new deployment {}/{} with SHA {}",
+            // Check if we need to create a new deployment
+            if let Some(wanted_sha) = &status.wanted_sha {
+                // Check if deployment exists
+                let deployments: Api<Deployment> = Api::namespaced(client.clone(), &ns);
+                match deployments.get(&name).await {
+                    Ok(deployment) => {
+                        // Deployment exists - check if it needs updating
+                        if deployment.get_sha().is_some_and(|v| v == wanted_sha) {
+                            log::debug!(
+                                "Deployment {}/{} already at version {}",
                                 ns,
                                 name,
-                                wanted_sha
+                                &wanted_sha[0..7]
                             );
+                        } else {
+                            log::info!(
+                                "Updating deployment {}/{} to version {}",
+                                ns,
+                                name,
+                                &wanted_sha[0..7]
+                            );
+                            let mut deployment_to_update = deployment.clone();
 
-                            // Create deployment from DeployConfig spec
-                            let deployment = create_deployment_from_config(dc.as_ref(), wanted_sha);
-                            let _created =
-                                deployments.create(&Default::default(), &deployment).await?;
+                            // Ensure proper owner reference is set
+                            ensure_owner_reference(&mut deployment_to_update, dc.as_ref());
+
+                            // Update the deployment
+                            let _ = deployments
+                                .patch(
+                                    &name,
+                                    &PatchParams::default(),
+                                    &Patch::Merge(&deployment_to_update.with_version(wanted_sha)),
+                                )
+                                .await?;
 
                             // Update the current SHA in status
                             update_deploy_config_status_current(client, &ns, &name, wanted_sha)
                                 .await?;
 
-                            // Notify if discord is enabled
+                            // Notify if discord is enabled for the update
                             if let Some(ref notifier) = ctx.discord_notifier {
                                 let _ = notifier
                                     .notify_k8s_deployment(
@@ -219,78 +169,107 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
                                         wanted_sha,
                                         &name,
                                         &ns,
-                                        "created",
+                                        "updated",
                                     )
                                     .await;
                             }
                         }
-                        Err(e) => {
-                            log::error!("Error checking deployment: {:?}", e);
-                            return Err(Error::Kube(e));
+                    }
+                    Err(kube::Error::Api(kube::error::ErrorResponse { code: 404, .. })) => {
+                        // Deployment doesn't exist - create it
+                        log::info!(
+                            "Creating new deployment {}/{} with version {}",
+                            ns,
+                            name,
+                            &wanted_sha[0..7]
+                        );
+                        let deployment = create_deployment_from_config(dc.as_ref(), wanted_sha);
+                        let _created = deployments.create(&Default::default(), &deployment).await?;
+
+                        // Update the current SHA in status
+                        update_deploy_config_status_current(client, &ns, &name, wanted_sha).await?;
+
+                        // Notify if discord is enabled
+                        if let Some(ref notifier) = ctx.discord_notifier {
+                            let _ = notifier
+                                .notify_k8s_deployment(
+                                    &dc.spec.spec.repo.owner,
+                                    &dc.spec.spec.repo.repo,
+                                    dc.status
+                                        .as_ref()
+                                        .and_then(|s| s.current_branch.clone())
+                                        .unwrap_or_else(|| dc.spec.spec.repo.default_branch.clone())
+                                        .as_str(),
+                                    wanted_sha,
+                                    &name,
+                                    &ns,
+                                    "created",
+                                )
+                                .await;
                         }
                     }
+                    Err(e) => {
+                        log::error!("Error checking deployment: {:?}", e);
+                        return Err(Error::Kube(e));
+                    }
                 }
-                None => {
-                    // No wanted SHA - delete deployment if it exists
-                    let deployments: Api<Deployment> = Api::namespaced(client.clone(), &ns);
+            } else {
+                // No wanted SHA - delete deployment if it exists
+                let deployments: Api<Deployment> = Api::namespaced(client.clone(), &ns);
 
-                    match deployments.get(&name).await {
-                        Ok(_) => {
-                            // Deployment exists but no wanted SHA - delete it
-                            log::info!(
-                                "Deleting deployment {}/{} as no wantedSha is set",
-                                ns,
-                                name
-                            );
+                match deployments.get(&name).await {
+                    Ok(_) => {
+                        log::info!(
+                            "Deleting deployment {}/{} as no wanted SHA is set",
+                            ns,
+                            name
+                        );
+                        match deployments.delete(&name, &Default::default()).await {
+                            Ok(_) => {
+                                // Clear the current SHA from status
+                                update_deploy_config_status_current_none(client, &ns, &name)
+                                    .await?;
 
-                            match deployments.delete(&name, &Default::default()).await {
-                                Ok(_) => {
-                                    // Clear the current SHA from status
-                                    update_deploy_config_status_current_none(client, &ns, &name)
-                                        .await?;
-
-                                    // Notify if discord is enabled
-                                    if let Some(ref notifier) = ctx.discord_notifier {
-                                        let _ = notifier
-                                            .notify_k8s_deployment(
-                                                &dc.spec.spec.repo.owner,
-                                                &dc.spec.spec.repo.repo,
-                                                dc.status
-                                                    .as_ref()
-                                                    .and_then(|s| s.current_branch.clone())
-                                                    .unwrap_or_else(|| {
-                                                        dc.spec.spec.repo.default_branch.clone()
-                                                    })
-                                                    .as_str(),
-                                                "none",
-                                                &name,
-                                                &ns,
-                                                "deleted",
-                                            )
-                                            .await;
-                                    }
-                                }
-                                Err(e) => {
-                                    log::error!("Error deleting deployment: {:?}", e);
-                                    return Err(Error::Kube(e));
+                                // Notify if discord is enabled
+                                if let Some(ref notifier) = ctx.discord_notifier {
+                                    let _ = notifier
+                                        .notify_k8s_deployment(
+                                            &dc.spec.spec.repo.owner,
+                                            &dc.spec.spec.repo.repo,
+                                            dc.status
+                                                .as_ref()
+                                                .and_then(|s| s.current_branch.clone())
+                                                .unwrap_or_else(|| {
+                                                    dc.spec.spec.repo.default_branch.clone()
+                                                })
+                                                .as_str(),
+                                            "none",
+                                            &name,
+                                            &ns,
+                                            "deleted",
+                                        )
+                                        .await;
                                 }
                             }
+                            Err(e) => {
+                                log::error!("Error deleting deployment: {:?}", e);
+                                return Err(Error::Kube(e));
+                            }
                         }
-                        Err(kube::Error::Api(api_err)) if api_err.code == 404 => {
-                            // No deployment and no wanted SHA - nothing to do
-                            log::info!("No deployment and no wantedSha for {}/{}", ns, name);
-                        }
-                        Err(e) => {
-                            log::error!("Error checking deployment: {:?}", e);
-                            return Err(Error::Kube(e));
-                        }
+                    }
+                    Err(kube::Error::Api(kube::error::ErrorResponse { code: 404, .. })) => {
+                        log::debug!("No deployment and no wantedSha for {}/{}", ns, name);
+                    }
+                    Err(e) => {
+                        log::error!("Error checking deployment: {:?}", e);
+                        return Err(Error::Kube(e));
                     }
                 }
             }
         }
         None => {
             // No status yet - nothing to do
-            log::info!("No status set for DeployConfig {}/{}", ns, name);
+            log::debug!("No status set for DeployConfig {}/{}", ns, name);
         }
     }
 
@@ -464,7 +443,7 @@ pub async fn start_controller(
         .run(reconcile, error_policy, context.clone())
         .for_each(|res| async move {
             match res {
-                Ok(o) => log::info!("Reconciliation completed: {:?}", o),
+                Ok(o) => log::debug!("Reconciliation completed: {:?}", o),
                 Err(e) => log::error!("Reconciliation error: {:?}", e),
             }
         })
@@ -481,12 +460,12 @@ pub async fn handle_build_completed(
     branch: &str,
     sha: &str,
 ) -> Result<(), Error> {
-    log::info!(
+    log::debug!(
         "Build completed for {}/{} branch {} with SHA {}",
         owner,
         repo,
         branch,
-        sha
+        &sha[0..7]
     );
 
     // Find all DeployConfigs that match this repo and branch
@@ -518,7 +497,7 @@ pub async fn handle_build_completed(
             "Updating DeployConfig {}/{} with latest SHA {}",
             ns,
             name,
-            sha
+            &sha[0..7]
         );
 
         // RULE: When a build completes, update latestSha for all matching DeployConfigs
@@ -530,7 +509,7 @@ pub async fn handle_build_completed(
                 "DeployConfig {}/{} has autodeploy enabled - setting wantedSha to {}",
                 ns,
                 name,
-                sha
+                &sha[0..7]
             );
             update_deploy_config_status_wanted(client, &ns, &name, sha).await?;
         }
