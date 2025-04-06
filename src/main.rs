@@ -125,7 +125,8 @@ async fn start_http(
                 .service(deploy_config)
                 .service(undeploy_config)
                 .service(deploy_specific_config)
-                .service(override_branch);
+                .service(override_branch)
+                .service(toggle_autodeploy);
         }
 
         app = app

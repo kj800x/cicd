@@ -49,6 +49,8 @@ spec:
                   type: string
                 currentBranch:
                   type: string
+                autodeploy:
+                  type: boolean
       additionalPrinterColumns:
         - name: Repo
           jsonPath: .spec.repo.repo
@@ -65,6 +67,9 @@ spec:
         - name: Wanted SHA
           jsonPath: .status.wantedSha
           type: string
+        - name: Autodeploy
+          jsonPath: .status.autodeploy
+          type: boolean
         - name: Age
           jsonPath: .metadata.creationTimestamp
           type: date

@@ -37,6 +37,13 @@ pub struct DeployConfigStatus {
         rename = "currentBranch"
     )]
     pub current_branch: Option<String>,
+    /// The current state of autodeploy
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "autodeploy"
+    )]
+    pub autodeploy: Option<bool>,
 }
 
 /// DeployConfig spec fields represent the desired state for a deployment
@@ -72,4 +79,14 @@ pub struct DeployConfigSpec {
     /// Repository information and Deployment spec
     #[serde(flatten)]
     pub spec: DeployConfigSpecFields,
+}
+
+impl DeployConfig {
+    /// Get the current autodeploy state, falling back to the spec's autodeploy if not set in status
+    pub fn current_autodeploy(&self) -> bool {
+        self.status
+            .as_ref()
+            .and_then(|s| s.autodeploy)
+            .unwrap_or(self.spec.spec.autodeploy)
+    }
 }

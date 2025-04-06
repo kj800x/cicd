@@ -436,10 +436,28 @@ pub async fn deploy_configs(
                                     div class="detail-row" {
                                         div class="detail-label" { "Auto-deploy:" }
                                         div class="detail-value" {
-                                            @if selected_config.spec.spec.autodeploy {
-                                                span class="boolean-value boolean-true" { "Enabled" }
-                                            } @else {
-                                                span class="boolean-value boolean-false" { "Disabled" }
+                                            @let current_autodeploy = selected_config.current_autodeploy();
+                                            @let default_autodeploy = selected_config.spec.spec.autodeploy;
+
+                                            div style="display: flex; align-items: center; gap: 8px;" {
+                                                span class=(format!("boolean-value {}", if current_autodeploy { "boolean-true" } else { "boolean-false" })) {
+                                                    (if current_autodeploy { "Enabled" } else { "Disabled" })
+                                                }
+                                                @if current_autodeploy != default_autodeploy {
+                                                    span class="warning-icon" title=(format!("Auto-deploy is {} (default is {})",
+                                                        if current_autodeploy { "enabled" } else { "disabled" },
+                                                        if default_autodeploy { "enabled" } else { "disabled" })) {
+                                                        "⚠️"
+                                                    }
+                                                }
+                                                form action=(format!("/api/toggle-autodeploy/{}/{}",
+                                                    selected_config.namespace().unwrap_or_default(),
+                                                    selected_config.name_any()))
+                                                    method="post" style="margin-left: 8px;" {
+                                                    button type="submit" class="action-button" {
+                                                        (if current_autodeploy { "Disable Auto-deploy" } else { "Enable Auto-deploy" })
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -494,7 +512,7 @@ pub async fn deploy_configs(
                                     }
 
                                     // Add the deploy button if autodeploy is disabled
-                                    @if !selected_config.spec.spec.autodeploy {
+                                    @if !selected_config.current_autodeploy() {
                                         div class="detail-row" style="margin-top: 20px;" {
                                             // Check if we have a latest SHA and it's different from wanted SHA
                                             @let can_deploy = if let Some(status) = &selected_config.status {
@@ -533,7 +551,7 @@ pub async fn deploy_configs(
 
                                 h4 { "Actions" }
                                 div class="actions-container" {
-                                    @if selected_config.spec.spec.autodeploy {
+                                    @if selected_config.current_autodeploy() {
                                         // If autodeploy is enabled, show message that manual actions are disabled
                                         div class="info-message warning" {
                                             "Automatic deployment is enabled for this configuration. Manual deployment actions are disabled."
@@ -663,7 +681,7 @@ pub async fn deploy_config(
     match deploy_configs_api.get(&name).await {
         Ok(config) => {
             // Check if it has autodeploy enabled (shouldn't happen due to UI, but just to be sure)
-            if config.spec.spec.autodeploy {
+            if config.current_autodeploy() {
                 return HttpResponse::BadRequest()
                     .content_type("text/html; charset=utf-8")
                     .body("Cannot manually deploy when autodeploy is enabled.");
@@ -750,7 +768,7 @@ pub async fn undeploy_config(
     match deploy_configs_api.get(&name).await {
         Ok(config) => {
             // Check if it has autodeploy enabled
-            if config.spec.spec.autodeploy {
+            if config.current_autodeploy() {
                 return HttpResponse::BadRequest()
                     .content_type("text/html; charset=utf-8")
                     .body("Cannot manually undeploy when autodeploy is enabled.");
@@ -841,7 +859,7 @@ pub async fn deploy_specific_config(
     match deploy_configs_api.get(&name).await {
         Ok(config) => {
             // Check if it has autodeploy enabled
-            if config.spec.spec.autodeploy {
+            if config.current_autodeploy() {
                 return HttpResponse::BadRequest()
                     .content_type("text/html; charset=utf-8")
                     .body("Cannot manually deploy when autodeploy is enabled.");
@@ -1014,6 +1032,74 @@ pub async fn override_branch(
                         name
                     );
                     log::debug!("Updated DeployConfig status: {:?}", updated_config.status);
+                    // Redirect back to the DeployConfig page with the selected config
+                    HttpResponse::SeeOther()
+                        .append_header((
+                            "Location",
+                            format!("/deploy-configs?selected={}/{}", namespace, name),
+                        ))
+                        .finish()
+                }
+                Err(e) => {
+                    log::error!("Failed to update DeployConfig status: {}", e);
+                    HttpResponse::InternalServerError()
+                        .content_type("text/html; charset=utf-8")
+                        .body(format!("Failed to update DeployConfig status: {}", e))
+                }
+            }
+        }
+        Err(e) => {
+            log::error!("Failed to get DeployConfig {}/{}: {}", namespace, name, e);
+            HttpResponse::NotFound()
+                .content_type("text/html; charset=utf-8")
+                .body(format!("DeployConfig {}/{} not found.", namespace, name))
+        }
+    }
+}
+
+/// Handler for toggling autodeploy
+#[post("/api/toggle-autodeploy/{namespace}/{name}")]
+pub async fn toggle_autodeploy(
+    path: web::Path<(String, String)>,
+    client: Option<web::Data<Client>>,
+) -> impl Responder {
+    let (namespace, name) = path.into_inner();
+
+    // Check if Kubernetes client is available
+    let client = match client {
+        Some(client) => client,
+        None => {
+            return HttpResponse::ServiceUnavailable()
+                .content_type("text/html; charset=utf-8")
+                .body("Kubernetes client is not available. Autodeploy toggle functionality is disabled.");
+        }
+    };
+
+    // Get the DeployConfig
+    let deploy_configs_api: Api<DeployConfig> =
+        Api::namespaced(client.get_ref().clone(), &namespace);
+
+    match deploy_configs_api.get(&name).await {
+        Ok(config) => {
+            // Get current autodeploy state
+            let current_autodeploy = config.current_autodeploy();
+
+            // Toggle the autodeploy state
+            let status = serde_json::json!({
+                "status": {
+                    "autodeploy": !current_autodeploy
+                }
+            });
+
+            // Apply the status update
+            let patch = Patch::Merge(&status);
+            let params = PatchParams::default();
+
+            match deploy_configs_api
+                .patch_status(&name, &params, &patch)
+                .await
+            {
+                Ok(_) => {
                     // Redirect back to the DeployConfig page with the selected config
                     HttpResponse::SeeOther()
                         .append_header((

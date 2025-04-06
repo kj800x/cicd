@@ -504,7 +504,7 @@ pub async fn handle_build_completed(
         update_deploy_config_status_latest(client, &ns, &name, sha).await?;
 
         // RULE: If autodeploy is enabled, also update wantedSha
-        if config.spec.spec.autodeploy {
+        if config.current_autodeploy() {
             log::info!(
                 "DeployConfig {}/{} has autodeploy enabled - setting wantedSha to {}",
                 ns,
