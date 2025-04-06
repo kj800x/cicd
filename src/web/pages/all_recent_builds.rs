@@ -1,4 +1,5 @@
 use crate::prelude::*;
+use crate::web::pages::header;
 use chrono::{Local, TimeZone};
 
 /// Format a timestamp as a human-readable relative time
@@ -70,23 +71,31 @@ pub async fn all_recent_builds(pool: web::Data<Pool<SqliteConnectionManager>>) -
                         --none-color: #7f8c8d;
                         --bg-color: #f7f9fc;
                         --card-bg: #ffffff;
-                        --text-color: #333333;
-                        --accent-color: #3498db;
-                        --border-color: #e0e0e0;
+                        --text-color: #3a485a;
+                        --primary-blue: #0969da;
+                        --border-color: #d0d7de;
+                        --header-bg: #24292e;
                     }
                     body {
                         font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                        background-color: var(--bg-color);
+                        background-color: white;
                         color: var(--text-color);
                         margin: 0;
-                        padding: 20px;
+                        padding: 0;
+                        line-height: 1.5;
+                    }
+                    "#
+                    (header::styles())
+                    r#"
+                    .content {
+                        padding: 24px;
                     }
                     header {
                         text-align: center;
                         margin-bottom: 30px;
                     }
                     h1 {
-                        color: var(--accent-color);
+                        color: var(--primary-blue);
                         margin-bottom: 5px;
                     }
                     .subtitle {
@@ -101,16 +110,16 @@ pub async fn all_recent_builds(pool: web::Data<Pool<SqliteConnectionManager>>) -
                     .nav-links a {
                         margin: 0 10px;
                         padding: 8px 16px;
-                        color: var(--accent-color);
+                        color: var(--primary-blue);
                         text-decoration: none;
                         border-radius: 4px;
                         transition: background-color 0.2s;
                     }
                     .nav-links a:hover {
-                        background-color: rgba(52, 152, 219, 0.1);
+                        background-color: rgba(9, 105, 218, 0.1);
                     }
                     .nav-links a.active {
-                        background-color: var(--accent-color);
+                        background-color: var(--primary-blue);
                         color: white;
                     }
                     .build-grid {
@@ -261,7 +270,7 @@ pub async fn all_recent_builds(pool: web::Data<Pool<SqliteConnectionManager>>) -
                         color: #555;
                     }
                     .links a {
-                        color: var(--accent-color);
+                        color: var(--primary-blue);
                         text-decoration: none;
                         font-size: 0.9rem;
                         margin-left: 16px;
@@ -278,7 +287,7 @@ pub async fn all_recent_builds(pool: web::Data<Pool<SqliteConnectionManager>>) -
                         display: inline-block;
                         margin-top: 20px;
                         padding: 8px 16px;
-                        background-color: var(--accent-color);
+                        background-color: var(--primary-blue);
                         color: white;
                         border-radius: 4px;
                         text-decoration: none;
@@ -286,87 +295,84 @@ pub async fn all_recent_builds(pool: web::Data<Pool<SqliteConnectionManager>>) -
                         transition: background-color 0.2s;
                     }
                     .refresh:hover {
-                        background-color: #2980b9;
+                        background-color: #05509d;
                     }
                     "#
                 }
             }
             body {
-                header {
-                    h1 { "CI/CD Build Status Dashboard" }
-                    div class="subtitle" { "Recent builds from the last 24 hours" }
-                }
-
-                div class="nav-links" {
-                    a href="/" { "Recent Branches" }
-                    a href="/all-recent-builds" class="active" { "All Recent Builds" }
-                    a href="/deploy-configs" { "Deploy Configs" }
-                }
-
-                @if builds.is_empty() {
-                    div class="empty-state" {
-                        h2 { "No builds found" }
-                        p { "There are no builds in the last 24 hours." }
-                        a href="/all-recent-builds" class="refresh" { "Refresh" }
+                (header::render("builds"))
+                div class="content" {
+                    header {
+                        h1 { "CI/CD Build Status Dashboard" }
+                        div class="subtitle" { "Recent builds from the last 24 hours" }
                     }
-                } @else {
-                    div class="build-grid" {
-                        @for (commit, repo, branches, _) in &builds {
-                            // Determine status for styling
-                            @let status_class = match commit.build_status {
-                                BuildStatus::Success => "card-status-success",
-                                BuildStatus::Failure => "card-status-failure",
-                                BuildStatus::Pending => "card-status-pending",
-                                BuildStatus::None => "card-status-none",
-                            };
-                            div class=(format!("build-card {}", status_class)) {
-                                div class="build-header" {
-                                    div class=(format!("status-indicator status-{}", match commit.build_status {
-                                        BuildStatus::Success => "success",
-                                        BuildStatus::Failure => "failure",
-                                        BuildStatus::Pending => "pending",
-                                        BuildStatus::None => "none",
-                                    })) {}
-                                    div class="build-info" {
-                                        div class="repo-name" { (format!("{}/{}", repo.owner_name, repo.name)) }
-                                        div class="branch-name" {
-                                            @if branches.is_empty() {
-                                                "No branch"
-                                            } @else {
-                                                @for (i, branch) in branches.iter().enumerate() {
-                                                    @if i > 0 { ", " }
-                                                    (branch.name)
+
+                    @if builds.is_empty() {
+                        div class="empty-state" {
+                            h2 { "No builds found" }
+                            p { "There are no builds in the last 24 hours." }
+                            a href="/all-recent-builds" class="refresh" { "Refresh" }
+                        }
+                    } @else {
+                        div class="build-grid" {
+                            @for (commit, repo, branches, _) in &builds {
+                                // Determine status for styling
+                                @let status_class = match commit.build_status {
+                                    BuildStatus::Success => "card-status-success",
+                                    BuildStatus::Failure => "card-status-failure",
+                                    BuildStatus::Pending => "card-status-pending",
+                                    BuildStatus::None => "card-status-none",
+                                };
+                                div class=(format!("build-card {}", status_class)) {
+                                    div class="build-header" {
+                                        div class=(format!("status-indicator status-{}", match commit.build_status {
+                                            BuildStatus::Success => "success",
+                                            BuildStatus::Failure => "failure",
+                                            BuildStatus::Pending => "pending",
+                                            BuildStatus::None => "none",
+                                        })) {}
+                                        div class="build-info" {
+                                            div class="repo-name" { (format!("{}/{}", repo.owner_name, repo.name)) }
+                                            div class="branch-name" {
+                                                @if branches.is_empty() {
+                                                    "No branch"
+                                                } @else {
+                                                    @for (i, branch) in branches.iter().enumerate() {
+                                                        @if i > 0 { ", " }
+                                                        (branch.name)
+                                                    }
                                                 }
                                             }
                                         }
+                                        div class="build-time" {
+                                            (format_relative_time(commit.timestamp))
+                                        }
                                     }
-                                    div class="build-time" {
-                                        (format_relative_time(commit.timestamp))
+                                    div class="build-body" {
+                                        div class="commit-message" { (commit.message) }
                                     }
-                                }
-                                div class="build-body" {
-                                    div class="commit-message" { (commit.message) }
-                                }
-                                div class="build-footer" {
-                                    div class="sha" { (format_short_sha(&commit.sha)) }
-                                    div class="links" {
-                                        // Link to GitHub code (assuming GitHub)
-                                        a href=(format!("https://github.com/{}/{}/commit/{}",
-                                                        repo.owner_name, repo.name, commit.sha))
-                                            target="_blank" { "View code" }
+                                    div class="build-footer" {
+                                        div class="sha" { (format_short_sha(&commit.sha)) }
+                                        div class="links" {
+                                            // Link to GitHub code (assuming GitHub)
+                                            a href=(format!("https://github.com/{}/{}/commit/{}",
+                                                            repo.owner_name, repo.name, commit.sha))
+                                                target="_blank" { "View code" }
 
-                                        // Link to build logs if available
-                                        @if let Some(url) = &commit.build_url {
-                                            a href=(url) target="_blank" { "Build logs" }
+                                            // Link to build logs if available
+                                            @if let Some(url) = &commit.build_url {
+                                                a href=(url) target="_blank" { "Build logs" }
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                    }
 
-                    div style="text-align: center; margin-top: 30px;" {
-                        a href="/all-recent-builds" class="refresh" { "Refresh" }
+                        div style="text-align: center; margin-top: 30px;" {
+                            a href="/all-recent-builds" class="refresh" { "Refresh" }
+                        }
                     }
                 }
             }

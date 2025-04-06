@@ -1,5 +1,6 @@
 use crate::db::Commit;
 use crate::prelude::*;
+use crate::web::pages::header;
 use kube::{
     api::{Api, Patch, PatchParams},
     client::Client,
@@ -379,13 +380,19 @@ pub async fn deploy_configs(
                         color: var(--primary-blue);
                     }
                     "#
+                    (header::styles())
+                    r#"
+                    .content {
+                        padding: 24px;
+                    }
+                    "#
                 }
                 script {
                     r#"
                     function updateSelection() {
                         const selectElement = document.getElementById('deployConfigSelect');
                         const selectedValue = selectElement.value;
-                        window.location.href = '/deploy-configs?selected=' + encodeURIComponent(selectedValue);
+                        window.location.href = '/deploy?selected=' + encodeURIComponent(selectedValue);
                     }
 
                     function submitActionForm() {
@@ -395,35 +402,7 @@ pub async fn deploy_configs(
                 }
             }
             body {
-                header {
-                    div class="header" {
-                        span class="header-logo" { "Platform" }
-                        div class="header-nav" {
-                            a href="#" class="header-nav-item" { "Code" }
-                            a href="#" class="header-nav-item" { "Release" }
-                            a href="#" class="header-nav-item" { "Reliability" }
-                            a href="#" class="header-nav-item" { "Data" }
-                            a href="#" class="header-nav-item" { "AI" }
-                            a href="#" class="header-nav-item" { "Backend" }
-                            a href="#" class="header-nav-item" { "Frontend" }
-                            a href="#" class="header-nav-item" { "Documentation" }
-                        }
-                    }
-                    div class="subheader" {
-                        a href="#" class="subheader-brand" {
-                            "OrionUI"
-                        }
-                        div class="subheader-nav" {
-                            a href="#" class="subheader-nav-item" { "Deploy" }
-                            a href="#" class="subheader-nav-item" { "Acceptance tests" }
-                            a href="#" class="subheader-nav-item" { "Deploy history" }
-                            a href="#" class="subheader-nav-item" { "Blockers" }
-                            a href="#" class="subheader-nav-item" { "Continuous deployment" }
-                            a href="#" class="subheader-nav-item active" { "Browse deploy configs" }
-                        }
-                    }
-                }
-
+                (header::render("deploy"))
                 div class="content" {
                 @if sorted_deploy_configs.is_empty() {
                     div style="text-align:center; margin-top:40px;" {
@@ -435,7 +414,7 @@ pub async fn deploy_configs(
                             // Left side box with dropdown and actions
                         div class="left-box" {
                                 h3 { "Deploy config" }
-                                form action="/deploy-configs" method="get" {
+                                form action="/deploy" method="get" {
                                     select name="selected" onchange="this.form.submit()" {
                                 @for config in &sorted_deploy_configs {
                                     @let namespace = config.namespace().unwrap_or_default();
@@ -454,7 +433,7 @@ pub async fn deploy_configs(
                         }
 
                         @if let Some(selected_config) = selected_config {
-                                    form action="/deploy-configs" method="get" {
+                                    form action="/deploy" method="get" {
                                         input type="hidden" name="selected" value=(format!("{}/{}", selected_config.namespace().unwrap_or_default(), selected_config.name_any()));
 
                                         div class="action-radio-group" {
@@ -569,20 +548,18 @@ pub async fn deploy_configs(
                             @if let Some(selected_config) = selected_config {
                                 div class="right-box" {
                                     h1 {
-                                        @if let Some(action) = query.get("action") {
-                                            @match action.as_str() {
-                                                "track-branch" => {
-                                                    "Branch deploy of "
-                                                }
-                                                "toggle-autodeploy" => {
-                                                    "Option change for "
-                                                }
-                                                "undeploy" => {
-                                                    "Undeploy of "
-                                                }
-                                                "deploy-latest" | "specific-commit" | _ => {
-                                                    "Deploy of "
-                                                }
+                                        @match query.get("action").unwrap_or(&"".to_string()).as_str() {
+                                            "track-branch" => {
+                                                "Branch deploy of "
+                                            }
+                                            "toggle-autodeploy" => {
+                                                "Option change for "
+                                            }
+                                            "undeploy" => {
+                                                "Undeploy of "
+                                            }
+                                            "deploy-latest" | "specific-commit" | _ => {
+                                                "Deploy of "
                                             }
                                         }
                                         strong {
@@ -778,7 +755,7 @@ pub async fn deploy_config(
                     HttpResponse::SeeOther()
                         .append_header((
                             "Location",
-                            format!("/deploy-configs?selected={}/{}", namespace, name),
+                            format!("/deploy?selected={}/{}", namespace, name),
                         ))
                         .finish()
                 }
@@ -843,7 +820,7 @@ pub async fn undeploy_config(
                     HttpResponse::SeeOther()
                         .append_header((
                             "Location",
-                            format!("/deploy-configs?selected={}/{}", namespace, name),
+                            format!("/deploy?selected={}/{}", namespace, name),
                         ))
                         .finish()
                 }
@@ -927,7 +904,7 @@ pub async fn deploy_specific_config(
                     HttpResponse::SeeOther()
                         .append_header((
                             "Location",
-                            format!("/deploy-configs?selected={}/{}", namespace, name),
+                            format!("/deploy?selected={}/{}", namespace, name),
                         ))
                         .finish()
                 }
@@ -1078,7 +1055,7 @@ pub async fn override_branch(
                     HttpResponse::SeeOther()
                         .append_header((
                             "Location",
-                            format!("/deploy-configs?selected={}/{}", namespace, name),
+                            format!("/deploy?selected={}/{}", namespace, name),
                         ))
                         .finish()
                 }
@@ -1146,7 +1123,7 @@ pub async fn toggle_autodeploy(
                     HttpResponse::SeeOther()
                         .append_header((
                             "Location",
-                            format!("/deploy-configs?selected={}/{}", namespace, name),
+                            format!("/deploy?selected={}/{}", namespace, name),
                         ))
                         .finish()
                 }

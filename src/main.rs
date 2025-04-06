@@ -114,9 +114,9 @@ async fn start_http(
             .app_data(Data::new(pool.clone()))
             .wrap(middleware::Logger::default())
             .route("/api/hey", web_get().to(manual_hello))
+            .route("/deploy", web_get().to(deploy_configs))
             .route("/", web_get().to(index))
-            .route("/all-recent-builds", web_get().to(all_recent_builds))
-            .route("/deploy-configs", web_get().to(deploy_configs));
+            .route("/all-recent-builds", web_get().to(all_recent_builds));
 
         // Add Kubernetes client data if available
         if let Some(client) = &kube_client {

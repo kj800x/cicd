@@ -1,4 +1,5 @@
 use crate::prelude::*;
+use crate::web::pages::header;
 use chrono::{Local, TimeZone};
 
 /// Format a timestamp as a human-readable relative time
@@ -206,23 +207,31 @@ pub async fn index(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Respo
                         --none-color: #7f8c8d;
                         --bg-color: #f7f9fc;
                         --card-bg: #ffffff;
-                        --text-color: #333333;
-                        --accent-color: #3498db;
-                        --border-color: #e0e0e0;
+                        --text-color: #3a485a;
+                        --primary-blue: #0969da;
+                        --border-color: #d0d7de;
+                        --header-bg: #24292e;
                     }
                     body {
                         font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                        background-color: var(--bg-color);
+                        background-color: white;
                         color: var(--text-color);
                         margin: 0;
-                        padding: 20px;
+                        padding: 0;
+                        line-height: 1.5;
+                    }
+                    "#
+                    (header::styles())
+                    r#"
+                    .content {
+                        padding: 24px;
                     }
                     header {
                         text-align: center;
                         margin-bottom: 30px;
                     }
                     h1 {
-                        color: var(--accent-color);
+                        color: var(--primary-blue);
                         margin-bottom: 5px;
                     }
                     .subtitle {
@@ -237,16 +246,16 @@ pub async fn index(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Respo
                     .nav-links a {
                         margin: 0 10px;
                         padding: 8px 16px;
-                        color: var(--accent-color);
+                        color: var(--primary-blue);
                         text-decoration: none;
                         border-radius: 4px;
                         transition: background-color 0.2s;
                     }
                     .nav-links a:hover {
-                        background-color: rgba(52, 152, 219, 0.1);
+                        background-color: rgba(9, 105, 218, 0.1);
                     }
                     .nav-links a.active {
-                        background-color: var(--accent-color);
+                        background-color: var(--primary-blue);
                         color: white;
                     }
                     .branch-grid {
@@ -399,7 +408,7 @@ pub async fn index(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Respo
                         margin-right: 12px;
                     }
                     .commit-links a {
-                        color: var(--accent-color);
+                        color: var(--primary-blue);
                         text-decoration: none;
                         font-size: 0.85rem;
                         margin-left: 12px;
@@ -416,7 +425,7 @@ pub async fn index(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Respo
                         display: inline-block;
                         margin-top: 20px;
                         padding: 8px 16px;
-                        background-color: var(--accent-color);
+                        background-color: var(--primary-blue);
                         color: white;
                         border-radius: 4px;
                         text-decoration: none;
@@ -457,82 +466,79 @@ pub async fn index(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Respo
                 }
             }
             body {
-                header {
-                    h1 { "CI/CD Build Status Dashboard" }
-                    div class="subtitle" { "Recent branches and their commits" }
-                }
-
-                div class="nav-links" {
-                    a href="/" class="active" { "Recent Branches" }
-                    a href="/all-recent-builds" { "All Recent Builds" }
-                    a href="/deploy-configs" { "Deploy Configs" }
-                }
-
-                @if branch_data_list.is_empty() {
-                    div class="empty-state" {
-                        h2 { "No branches found" }
-                        p { "There are no branches with commits in the system." }
-                        a href="/" class="refresh" { "Refresh" }
+                (header::render("branches"))
+                div class="content" {
+                    header {
+                        h1 { "CI/CD Build Status Dashboard" }
+                        div class="subtitle" { "Recent branches and their commits" }
                     }
-                } @else {
-                    div class="branch-grid" {
-                        @for data in &branch_data_list {
-                            div class="branch-card" {
-                                div class="branch-header" {
-                                    div class="branch-info" {
-                                        div class="repo-name" { (format!("{}/{}", data.repo_owner, data.repo_name)) }
-                                        div class="branch-name-wrapper" {
-                                            @if data.is_default {
-                                                span class="branch-badge default" { (data.branch_name) }
-                                            } @else {
-                                                span class="branch-badge" { (data.branch_name) }
-                                            }
-                                            span {
-                                                // Show the latest commit time
-                                                @if let Some(commit) = data.commits.first() {
-                                                    (format!("updated {}", format_relative_time(commit.timestamp)))
+
+                    @if branch_data_list.is_empty() {
+                        div class="empty-state" {
+                            h2 { "No branches found" }
+                            p { "There are no branches with commits in the system." }
+                            a href="/" class="refresh" { "Refresh" }
+                        }
+                    } @else {
+                        div class="branch-grid" {
+                            @for data in &branch_data_list {
+                                div class="branch-card" {
+                                    div class="branch-header" {
+                                        div class="branch-info" {
+                                            div class="repo-name" { (format!("{}/{}", data.repo_owner, data.repo_name)) }
+                                            div class="branch-name-wrapper" {
+                                                @if data.is_default {
+                                                    span class="branch-badge default" { (data.branch_name) }
+                                                } @else {
+                                                    span class="branch-badge" { (data.branch_name) }
+                                                }
+                                                span {
+                                                    // Show the latest commit time
+                                                    @if let Some(commit) = data.commits.first() {
+                                                        (format!("updated {}", format_relative_time(commit.timestamp)))
+                                                    }
                                                 }
                                             }
                                         }
                                     }
-                                }
 
-                                div class="commit-list" {
-                                    @for commit in &data.commits {
-                                        div class=(format!("commit-row bg-{}", match commit.build_status {
-                                            BuildStatus::Success => "success",
-                                            BuildStatus::Failure => "failure",
-                                            BuildStatus::Pending => "pending",
-                                            BuildStatus::None => "none",
-                                        })) {
-                                            div class=(format!("commit-status status-{}", match commit.build_status {
+                                    div class="commit-list" {
+                                        @for commit in &data.commits {
+                                            div class=(format!("commit-row bg-{}", match commit.build_status {
                                                 BuildStatus::Success => "success",
                                                 BuildStatus::Failure => "failure",
                                                 BuildStatus::Pending => "pending",
                                                 BuildStatus::None => "none",
-                                            })) {}
+                                            })) {
+                                                div class=(format!("commit-status status-{}", match commit.build_status {
+                                                    BuildStatus::Success => "success",
+                                                    BuildStatus::Failure => "failure",
+                                                    BuildStatus::Pending => "pending",
+                                                    BuildStatus::None => "none",
+                                                })) {}
 
-                                            div class="commit-sha" { (format_short_sha(&commit.sha)) }
+                                                div class="commit-sha" { (format_short_sha(&commit.sha)) }
 
-                                            div class="commit-message-cell" {
-                                                div class="commit-message-text tooltipped" data-tooltip=(commit.message) {
-                                                    (truncate_message(&commit.message, 60))
+                                                div class="commit-message-cell" {
+                                                    div class="commit-message-text tooltipped" data-tooltip=(commit.message) {
+                                                        (truncate_message(&commit.message, 60))
+                                                    }
                                                 }
-                                            }
 
-                                            div class="commit-time" {
-                                                (format_relative_time(commit.timestamp))
-                                            }
+                                                div class="commit-time" {
+                                                    (format_relative_time(commit.timestamp))
+                                                }
 
-                                            div class="commit-links" {
-                                                // Link to GitHub code (assuming GitHub)
-                                                a href=(format!("https://github.com/{}/{}/commit/{}",
-                                                               data.repo_owner, data.repo_name, commit.sha))
-                                                    target="_blank" { "Code" }
+                                                div class="commit-links" {
+                                                    // Link to GitHub code (assuming GitHub)
+                                                    a href=(format!("https://github.com/{}/{}/commit/{}",
+                                                                   data.repo_owner, data.repo_name, commit.sha))
+                                                        target="_blank" { "Code" }
 
-                                                // Link to build logs if available
-                                                @if let Some(url) = &commit.build_url {
-                                                    a href=(url) target="_blank" { "Logs" }
+                                                    // Link to build logs if available
+                                                    @if let Some(url) = &commit.build_url {
+                                                        a href=(url) target="_blank" { "Logs" }
+                                                    }
                                                 }
                                             }
                                         }
@@ -540,10 +546,10 @@ pub async fn index(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Respo
                                 }
                             }
                         }
-                    }
 
-                    div style="text-align: center; margin-top: 30px;" {
-                        a href="/" class="refresh" { "Refresh" }
+                        div style="text-align: center; margin-top: 30px;" {
+                            a href="/" class="refresh" { "Refresh" }
+                        }
                     }
                 }
             }
