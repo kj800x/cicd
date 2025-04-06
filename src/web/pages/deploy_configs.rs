@@ -6,9 +6,41 @@ use kube::{
     client::Client,
     ResourceExt,
 };
-use maud::{html, Markup};
+use maud::{html, Markup, Render};
 use regex::Regex;
 use std::collections::HashMap;
+
+struct GitRef(String);
+
+impl Render for GitRef {
+    fn render(&self) -> Markup {
+        html!(
+            span.git-ref {
+                (self.0.clone())
+            }
+        )
+    }
+}
+
+struct AutodeployStatus(bool);
+
+impl Render for AutodeployStatus {
+    fn render(&self) -> Markup {
+        if self.0 {
+            html!(
+                span.autodeploy-status.autodeploy-enabled {
+                    "Enabled"
+                }
+            )
+        } else {
+            html!(
+                span.autodeploy-status.autodeploy-disabled {
+                    "Disabled"
+                }
+            )
+        }
+    }
+}
 
 /// Get the latest successful build for a branch
 fn get_latest_successful_build(
@@ -90,7 +122,7 @@ impl DeployedVersion {
     }
 
     /// Formats the version for display, showing branch:sha if branch differs from comparison
-    fn format(&self, other: Option<&DeployedVersion>) -> String {
+    fn format(&self, other: Option<&DeployedVersion>) -> Markup {
         let sha_prefix = &self.sha[..7];
 
         // If we have a branch and it differs from the other version's branch, show it
@@ -100,15 +132,17 @@ impl DeployedVersion {
             (None, None) => false,
         };
 
-        if show_branch {
+        let git_ref = if show_branch {
             if let Some(branch) = &self.branch {
-                format!("{}:{}", branch, sha_prefix)
+                GitRef(format!("{}:{}", branch.clone(), sha_prefix))
             } else {
-                sha_prefix.to_string()
+                GitRef(sha_prefix.to_string())
             }
         } else {
-            sha_prefix.to_string()
-        }
+            GitRef(sha_prefix.to_string())
+        };
+
+        html!((git_ref))
     }
 }
 
@@ -261,7 +295,7 @@ fn generate_status_header(config: &DeployConfig) -> Markup {
             div class="status-item" {
                 "Tracking branch: "
                 strong {
-                    (current_branch)
+                    (GitRef(current_branch.clone()))
                     @if current_branch != default_branch {
                         span class="warning-icon" title=(format!("Different from default branch ({})", default_branch)) {
                             "⚠️"
@@ -273,9 +307,9 @@ fn generate_status_header(config: &DeployConfig) -> Markup {
                 "Autodeploy: "
                 strong {
                     @if current_autodeploy {
-                        "enabled"
+                        (AutodeployStatus(true))
                     } @else {
-                        "disabled"
+                        (AutodeployStatus(false))
                     }
                     @if default_autodeploy != current_autodeploy {
                         span class="warning-icon" title="Different from default" {
@@ -317,15 +351,15 @@ fn generate_preview(
             html! {
                 "Autodeploy "
                 @if selected_config.current_autodeploy() {
-                    "Enabled"
+                    (AutodeployStatus(true))
                 } @else {
-                    "Disabled"
+                    (AutodeployStatus(false))
                 }
                 span class="preview-arrow" { "→" }
                 @if selected_config.current_autodeploy() {
-                    "Disabled"
+                    (AutodeployStatus(false))
                 } @else {
-                    "Enabled"
+                    (AutodeployStatus(true))
                 }
             }
         }
@@ -437,12 +471,11 @@ pub async fn deploy_configs(
                         padding: 0;
                         line-height: 1.5;
                     }
-                    .commit-sha {
+                    .commit-sha, .git-ref {
                         font-family: monospace;
                         font-size: 0.85rem;
                         width: 65px;
                         color: #555;
-                        margin-right: 12px;
                     }
                     .header {
                         background-color: var(--header-bg);
@@ -671,6 +704,7 @@ pub async fn deploy_configs(
                         flex-direction: column;
                         font-size: 12px;
                         margin-top: -10px;
+                        margin-bottom: 20px;
                     }
                     .status-item {
                         color: var(--secondary-text);
@@ -685,6 +719,20 @@ pub async fn deploy_configs(
                     }
                     .preview-transition {
                         margin-top: 8px;
+                    }
+                    .autodeploy-status.autodeploy-enabled {
+                        color: #00711f;
+                        font-weight: 600;
+                        background-color: #d0fddc;
+                        padding: 4px;
+                        border-radius: 10px;
+                    }
+                    .autodeploy-status.autodeploy-disabled {
+                        color: #a70007;
+                        font-weight: 600;
+                        background-color: #ffeaeb;
+                        padding: 4px;
+                        border-radius: 10px;
                     }
                     "#
                     (header::styles())
@@ -826,10 +874,9 @@ pub async fn deploy_configs(
                                                 }
                                             }
                                             "undeploy" => {
-                                                form data-test="hello" action=(format!("/api/undeploy/{}/{}",
+                                                form action=(format!("/api/undeploy/{}/{}",
                                                     selected_config.namespace().unwrap_or_default(),
                                                     selected_config.name_any()))
-                                                    data-action="undeploy"
                                                     method="post" {
                                                     button type="submit" class="primary-action-button danger" {
                                                         "Undeploy"
