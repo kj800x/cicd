@@ -6,6 +6,7 @@ use kube::{
     client::Client,
     ResourceExt,
 };
+use maud::{html, Markup};
 use regex::Regex;
 use std::collections::HashMap;
 
@@ -52,10 +53,246 @@ fn get_latest_successful_build(
         })
     });
 
-    match commit {
-        Ok(commit) => Ok(Some(commit)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(e),
+    Ok(Some(commit.unwrap()))
+}
+
+/// Represents a deployed version with its SHA and optional branch
+#[derive(Debug, Clone)]
+struct DeployedVersion {
+    sha: String,
+    branch: Option<String>,
+    build_time: Option<String>,
+}
+
+impl DeployedVersion {
+    /// Creates a new DeployedVersion with just a SHA
+    fn new(sha: String) -> Self {
+        Self {
+            sha,
+            branch: None,
+            build_time: None,
+        }
+    }
+
+    /// Creates a new DeployedVersion with a SHA and branch
+    fn with_branch(sha: String, branch: String) -> Self {
+        Self {
+            sha,
+            branch: Some(branch),
+            build_time: None,
+        }
+    }
+
+    /// Sets the build time and returns self for chaining
+    fn with_build_time(mut self, time: String) -> Self {
+        self.build_time = Some(time);
+        self
+    }
+
+    /// Formats the version for display, showing branch:sha if branch differs from comparison
+    fn format(&self, other: Option<&DeployedVersion>) -> String {
+        let sha_prefix = &self.sha[..7];
+
+        // If we have a branch and it differs from the other version's branch, show it
+        let show_branch = match (self.branch.as_ref(), other.and_then(|o| o.branch.as_ref())) {
+            (Some(my_branch), Some(other_branch)) => my_branch != other_branch,
+            (Some(_), None) | (None, Some(_)) => true,
+            (None, None) => false,
+        };
+
+        if show_branch {
+            if let Some(branch) = &self.branch {
+                format!("{}:{}", branch, sha_prefix)
+            } else {
+                sha_prefix.to_string()
+            }
+        } else {
+            sha_prefix.to_string()
+        }
+    }
+}
+
+/// Represents a transition between two deployed versions
+struct DeployTransition {
+    from: Option<DeployedVersion>,
+    to: Option<DeployedVersion>,
+}
+
+impl DeployTransition {
+    /// Creates a transition for deploying the latest version
+    fn deploy_latest(status: Option<&DeployConfigStatus>) -> Self {
+        let from = status.and_then(|s| {
+            s.wanted_sha.as_ref().map(|sha| {
+                if let Some(branch) = &s.current_branch {
+                    DeployedVersion::with_branch(sha.clone(), branch.clone())
+                } else {
+                    DeployedVersion::new(sha.clone())
+                }
+            })
+        });
+
+        let to = status.and_then(|s| {
+            s.latest_sha.as_ref().map(|sha| {
+                DeployedVersion::new(sha.clone()).with_build_time("5 minutes ago".to_string())
+            })
+        });
+
+        Self { from, to }
+    }
+
+    /// Creates a transition for deploying to a specific branch
+    fn deploy_branch(status: Option<&DeployConfigStatus>, new_branch: &str) -> Self {
+        let from = status.and_then(|s| {
+            s.wanted_sha.as_ref().map(|sha| {
+                if let Some(branch) = &s.current_branch {
+                    DeployedVersion::with_branch(sha.clone(), branch.clone())
+                } else {
+                    DeployedVersion::new(sha.clone())
+                }
+            })
+        });
+
+        let to = status.and_then(|s| {
+            s.latest_sha.as_ref().map(|sha| {
+                DeployedVersion::with_branch(sha.clone(), new_branch.to_string())
+                    .with_build_time("5 minutes ago".to_string())
+            })
+        });
+
+        Self { from, to }
+    }
+
+    /// Creates a transition for deploying a specific commit
+    fn deploy_commit(status: Option<&DeployConfigStatus>, sha: &str) -> Self {
+        let from = status.and_then(|s| {
+            s.wanted_sha.as_ref().map(|sha| {
+                if let Some(branch) = &s.current_branch {
+                    DeployedVersion::with_branch(sha.clone(), branch.clone())
+                } else {
+                    DeployedVersion::new(sha.clone())
+                }
+            })
+        });
+
+        let to = Some(
+            DeployedVersion::new(sha.to_string()).with_build_time("5 minutes ago".to_string()),
+        );
+
+        Self { from, to }
+    }
+
+    /// Creates a transition for undeploying
+    fn undeploy(status: Option<&DeployConfigStatus>) -> Self {
+        let from = status.and_then(|s| {
+            s.wanted_sha.as_ref().map(|sha| {
+                if let Some(branch) = &s.current_branch {
+                    DeployedVersion::with_branch(sha.clone(), branch.clone())
+                } else {
+                    DeployedVersion::new(sha.clone())
+                }
+            })
+        });
+
+        Self { from, to: None }
+    }
+
+    /// Formats the transition for display
+    fn format(&self) -> Markup {
+        match (&self.from, &self.to) {
+            (Some(from), Some(to)) => {
+                if from.sha == to.sha {
+                    html! {
+                        "Commit " (from.format(None)) " (unchanged)"
+                    }
+                } else {
+                    html! {
+                        "Commit " (from.format(Some(to))) " (currently deployed) "
+                        span class="preview-arrow" { "→" }
+                        " Commit " (to.format(Some(from)))
+                        @if let Some(time) = &to.build_time {
+                            " (last built, " (time) ")"
+                        }
+                    }
+                }
+            }
+            (Some(from), None) => {
+                html! {
+                    "Commit " (from.format(None)) " (currently deployed) "
+                    span class="preview-arrow" { "→" }
+                    " undeployed"
+                }
+            }
+            (None, Some(to)) => {
+                html! {
+                    "Not deployed "
+                    span class="preview-arrow" { "→" }
+                    " Commit " (to.format(None))
+                    @if let Some(time) = &to.build_time {
+                        " (last built, " (time) ")"
+                    }
+                }
+            }
+            (None, None) => html! {
+                "Not deployed "
+                span class="preview-arrow" { "→" }
+                " Unknown"
+            },
+        }
+    }
+}
+
+/// Generate the preview markup for a deploy config action
+fn generate_preview(
+    selected_config: &DeployConfig,
+    action: Option<&str>,
+    query: &HashMap<String, String>,
+) -> Markup {
+    // Handle the action matching at the Rust level first
+    let preview_content = match action {
+        Some("deploy-latest") | None => {
+            DeployTransition::deploy_latest(selected_config.status.as_ref()).format()
+        }
+        Some("track-branch") => {
+            if let Some(branch) = query.get("branch") {
+                DeployTransition::deploy_branch(selected_config.status.as_ref(), branch).format()
+            } else {
+                html! { "Select a branch" }
+            }
+        }
+        Some("specific-commit") => {
+            if let Some(sha) = query.get("sha") {
+                DeployTransition::deploy_commit(selected_config.status.as_ref(), sha).format()
+            } else {
+                html! { "Enter a commit SHA" }
+            }
+        }
+        Some("toggle-autodeploy") => {
+            html! {
+                "Autodeploy "
+                @if selected_config.current_autodeploy() {
+                    "Enabled"
+                } @else {
+                    "Disabled"
+                }
+                span class="preview-arrow" { "→" }
+                @if selected_config.current_autodeploy() {
+                    "Disabled"
+                } @else {
+                    "Enabled"
+                }
+            }
+        }
+        Some("undeploy") => DeployTransition::undeploy(selected_config.status.as_ref()).format(),
+        _ => html! {},
+    };
+
+    // Wrap the preview content in the container markup
+    html! {
+        div class="preview-container" {
+            div class="preview-content" {
+                (preview_content)
+            }
+        }
     }
 }
 
@@ -566,122 +803,7 @@ pub async fn deploy_configs(
                                             (format!("{}/{}", selected_config.namespace().unwrap_or_default(), selected_config.name_any()))
                                         }
                                     }
-                                    div class="preview-container" {
-                                        div class="preview-content" {
-                                            @if let Some(action) = query.get("action") {
-                                                @match action.as_str() {
-                                                    "deploy-latest" => {
-                                            @if let Some(status) = &selected_config.status {
-                                                            @if let Some(wanted_sha) = &status.wanted_sha {
-                                                                @if let Some(latest_sha) = &status.latest_sha {
-                                                                    @if wanted_sha == latest_sha {
-                                                                        "unchanged, nothing to deploy"
-                                                } @else {
-                                                                        (wanted_sha[..7]) span class="preview-arrow" { "→" } (latest_sha[..7])
-                                                                    }
-                                                                } @else {
-                                                                    (wanted_sha[..7]) span class="preview-arrow" { "→" } "Unknown"
-                                                                }
-                                                            } @else {
-                                                                "None" span class="preview-arrow" { "→" }
-                                                                @if let Some(latest_sha) = &status.latest_sha {
-                                                                    (latest_sha[..7])
-                                            } @else {
-                                                "Unknown"
-                                            }
-                                        }
-                                                        } @else {
-                                                            "None" span class="preview-arrow" { "→" } "Unknown"
-                                                        }
-                                                    }
-                                                    "track-branch" => {
-                                            @if let Some(status) = &selected_config.status {
-                                                            @if let Some(wanted_sha) = &status.wanted_sha {
-                                                                (wanted_sha[..7])
-                                                } @else {
-                                                    "None"
-                                                }
-                                            } @else {
-                                                "None"
-                                            }
-                                                        span class="preview-arrow" { "→" }
-                                                        @if let Some(branch) = query.get("branch") {
-                                                            (branch)
-                                                        } @else {
-                                                            "branch-name"
-                                                        }
-                                                    }
-                                                    "specific-commit" => {
-                                                        @if let Some(status) = &selected_config.status {
-                                                            @if let Some(wanted_sha) = &status.wanted_sha {
-                                                                (wanted_sha[..7])
-                                                            } @else {
-                                                                "None"
-                                                            }
-                                                        } @else {
-                                                            "None"
-                                                        }
-                                                        span class="preview-arrow" { "→" }
-                                                        @if let Some(sha) = query.get("sha") {
-                                                            (sha[..7])
-                                            } @else {
-                                                            "commit-sha"
-                                                        }
-                                                    }
-                                                    "toggle-autodeploy" => {
-                                                        "Autodeploy "
-                                    @if selected_config.current_autodeploy() {
-                                                            "Enabled"
-                                                        } @else {
-                                                            "Disabled"
-                                                        }
-                                                        span class="preview-arrow" { "→" }
-                                                        @if selected_config.current_autodeploy() {
-                                                            "Disabled"
-                                    } @else {
-                                                            "Enabled"
-                                                        }
-                                                    }
-                                                    "undeploy" => {
-                                                        @if let Some(status) = &selected_config.status {
-                                                            @if let Some(wanted_sha) = &status.wanted_sha {
-                                                                (wanted_sha[..7])
-                                                            } @else {
-                                                                "None"
-                                                            }
-                                                        } @else {
-                                                            "None"
-                                                        }
-                                                        span class="preview-arrow" { "→" } "undeployed"
-                                                    }
-                                                    _ => {}
-                                                }
-                                            } @else {
-                                                @if let Some(status) = &selected_config.status {
-                                                    @if let Some(wanted_sha) = &status.wanted_sha {
-                                                        @if let Some(latest_sha) = &status.latest_sha {
-                                                            @if wanted_sha == latest_sha {
-                                                                "unchanged, nothing to deploy"
-                                                            } @else {
-                                                                (wanted_sha[..7]) span class="preview-arrow" { "→" } (latest_sha[..7])
-                                                            }
-                                                        } @else {
-                                                            (wanted_sha[..7]) span class="preview-arrow" { "→" } "Unknown"
-                                                        }
-                                                    } @else {
-                                                        "None" span class="preview-arrow" { "→" }
-                                                        @if let Some(latest_sha) = &status.latest_sha {
-                                                            (latest_sha[..7])
-                                                        } @else {
-                                                            "Unknown"
-                                                        }
-                                                    }
-                                                } @else {
-                                                    "None" span class="preview-arrow" { "→" } "Unknown"
-                                                }
-                                            }
-                                        }
-                                    }
+                                    (generate_preview(selected_config, query.get("action").map(|s| s.as_str()), &query))
                                 }
                             }
                         }
@@ -799,7 +921,7 @@ pub async fn undeploy_config(
         Api::namespaced(client.get_ref().clone(), &namespace);
 
     match deploy_configs_api.get(&name).await {
-        Ok(config) => {
+        Ok(__config) => {
             // Set wantedSha to null
             let status = serde_json::json!({
                 "status": {
@@ -883,7 +1005,7 @@ pub async fn deploy_specific_config(
         Api::namespaced(client.get_ref().clone(), &namespace);
 
     match deploy_configs_api.get(&name).await {
-        Ok(config) => {
+        Ok(__config) => {
             // Update the wanted SHA to the specified value
             let status = serde_json::json!({
                 "status": {
