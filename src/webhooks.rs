@@ -28,7 +28,7 @@ pub struct Repository {
 pub struct CommitAuthor {
     pub name: String,
     pub email: String,
-    pub username: String,
+    // pub username: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -45,81 +45,82 @@ pub struct GhCommit {
 pub struct CheckSuite {
     pub id: u64,
     pub head_sha: String,
+    pub head_commit: Option<PushCommit>,
     pub status: String,
     pub conclusion: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct CheckRun {
-    details_url: String,
-    check_suite: CheckSuite,
+pub struct CheckRun {
+    pub details_url: String,
+    pub check_suite: CheckSuite,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct CheckRunEvent {
-    action: String,
-    check_run: CheckRun,
-    repository: Repository,
+pub struct CheckRunEvent {
+    pub action: String,
+    pub check_run: CheckRun,
+    pub repository: Repository,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct PingEvent {
-    zen: String,
-    repository: Repository,
+pub struct PingEvent {
+    pub zen: String,
+    pub repository: Repository,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct PushCommit {
-    id: String, // sha
-    message: String,
-    timestamp: String,
-    author: CommitAuthor,
-    committer: CommitAuthor,
-    parents: Option<Vec<ParentCommit>>, // Make parents optional
+pub struct PushCommit {
+    pub id: String, // sha
+    pub message: String,
+    pub timestamp: String,
+    pub author: CommitAuthor,
+    pub committer: CommitAuthor,
+    pub parents: Option<Vec<ParentCommit>>, // Make parents optional
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct ParentCommit {
-    sha: String,
-    url: String,
+pub struct ParentCommit {
+    pub sha: String,
+    pub url: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct PushEvent {
-    r#ref: String, // like "refs/heads/branch-name"
-    after: String,
-    repository: Repository,
-    head_commit: PushCommit,
-    commits: Vec<PushCommit>,
+pub struct PushEvent {
+    pub r#ref: String, // like "refs/heads/branch-name"
+    pub after: String,
+    pub repository: Repository,
+    pub head_commit: PushCommit,
+    pub commits: Vec<PushCommit>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct WebhookEvent {
-    event_type: String,
-    payload: serde_json::Value,
+pub struct WebhookEvent {
+    pub event_type: String,
+    pub payload: serde_json::Value,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct CheckSuiteEvent {
-    action: String,
-    check_suite: CheckSuite,
-    repository: Repository,
+pub struct CheckSuiteEvent {
+    pub action: String,
+    pub check_suite: CheckSuite,
+    pub repository: Repository,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct WorkflowRunEvent {
-    action: String,
-    workflow_run: WorkflowRun,
-    repository: Repository,
+pub struct WorkflowRunEvent {
+    pub action: String,
+    pub workflow_run: WorkflowRun,
+    pub repository: Repository,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct WorkflowRun {
-    id: u64,
-    head_sha: String,
-    status: String,
-    conclusion: Option<String>,
-    html_url: String,
+pub struct WorkflowRun {
+    pub id: u64,
+    pub head_sha: String,
+    pub status: String,
+    pub conclusion: Option<String>,
+    pub html_url: String,
 }
 
 // Pushes can be for reasons other than branches, such as tags
@@ -132,35 +133,10 @@ fn extract_branch_name(r#ref: &str) -> Option<String> {
     }
 }
 
-// Convert PushCommit to GhCommit, extracting all parents
-fn convert_to_gh_commit(push_commit: &PushCommit) -> GhCommit {
-    let parent_shas = if let Some(parents) = &push_commit.parents {
-        if !parents.is_empty() {
-            let mut shas = Vec::with_capacity(parents.len());
-            for parent in parents {
-                shas.push(parent.sha.clone());
-            }
-            Some(shas)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    GhCommit {
-        id: push_commit.id.clone(),
-        message: push_commit.message.clone(),
-        timestamp: push_commit.timestamp.clone(),
-        author: push_commit.author.clone(),
-        committer: push_commit.committer.clone(),
-        parent_shas,
-    }
-}
-
 /// Helper function to handle a new commit with no build status yet
 async fn handle_new_commit(
     repo: &Repository,
+    r#ref: &str,
     commit_sha: &str,
     commit_message: &str,
     author: &CommitAuthor,
@@ -168,7 +144,7 @@ async fn handle_new_commit(
     timestamp: &str,
     parent_shas: Option<Vec<String>>,
     conn: &PooledConnection<SqliteConnectionManager>,
-    discord_notifier: &Option<DiscordNotifier>,
+    __discord_notifier: &Option<DiscordNotifier>,
 ) -> Result<(), String> {
     match upsert_repo(repo, conn) {
         Ok(repo_id) => {
@@ -189,7 +165,7 @@ async fn handle_new_commit(
             }
 
             // Extract branch name if this is a branch push
-            if let Some(branch_name) = extract_branch_name(&repo.default_branch) {
+            if let Some(branch_name) = extract_branch_name(r#ref) {
                 if let Err(e) = upsert_branch(&branch_name, commit_sha, repo_id, conn) {
                     return Err(format!("Error updating branch: {}", e));
                 }
@@ -366,6 +342,7 @@ async fn process_event(
                     // Handle new commits but don't set any build status
                     if let Err(e) = handle_new_commit(
                         &payload.repository,
+                        &payload.r#ref,
                         &payload.head_commit.id,
                         &payload.head_commit.message,
                         &payload.head_commit.author,
@@ -389,89 +366,80 @@ async fn process_event(
                 }
             }
         }
-        "workflow_run" => {
-            if let Ok(payload) = serde_json::from_value::<WorkflowRunEvent>(event.payload) {
-                match payload.action.as_str() {
-                    "requested" | "in_progress" => {
-                        if let Err(e) = handle_build_started(
-                            &payload.repository,
-                            &payload.workflow_run.head_sha,
-                            &payload.workflow_run.head_sha, // TODO: Get actual commit message
-                            &payload.workflow_run.html_url,
-                            &conn,
-                            discord_notifier,
-                        )
-                        .await
-                        {
-                            log::error!("Error handling build start: {}", e);
-                        }
-                    }
-                    "completed" => {
-                        let build_status = match payload.workflow_run.conclusion.as_deref() {
-                            Some("success") => BuildStatus::Success,
-                            Some("failure") => BuildStatus::Failure,
-                            _ => BuildStatus::None,
-                        };
+        "check_run" => match serde_json::from_value::<CheckRunEvent>(event.payload) {
+            Ok(payload) => match payload.action.as_str() {
+                "created" => {
+                    let repo_id = upsert_repo(&payload.repository, &conn);
 
-                        if let Err(e) = handle_build_completed(
-                            &payload.repository,
-                            &payload.workflow_run.head_sha,
-                            &payload.workflow_run.head_sha, // TODO: Get actual commit message
-                            build_status,
-                            &payload.workflow_run.html_url,
-                            &conn,
-                            discord_notifier,
-                            kube_client,
-                        )
-                        .await
-                        {
-                            log::error!("Error handling build completion: {}", e);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        "check_suite" => {
-            if let Ok(payload) = serde_json::from_value::<CheckSuiteEvent>(event.payload) {
-                let build_status = BuildStatus::of(
-                    &payload.check_suite.status,
-                    &payload.check_suite.conclusion.as_deref(),
-                );
+                    let head_commit = get_commit(
+                        &conn,
+                        repo_id.unwrap() as i64,
+                        payload.check_run.check_suite.head_sha,
+                    )
+                    .unwrap()
+                    .unwrap();
 
-                if let Err(e) = handle_build_completed(
-                    &payload.repository,
-                    &payload.check_suite.head_sha,
-                    &payload.check_suite.head_sha, // TODO: Get actual commit message
-                    build_status,
-                    &format!(
-                        "https://github.com/{}/{}/commit/{}/checks",
-                        payload.repository.owner.login,
-                        payload.repository.name,
-                        payload.check_suite.head_sha
-                    ),
-                    &conn,
-                    discord_notifier,
-                    kube_client,
-                )
-                .await
-                {
-                    log::error!("Error handling build completion: {}", e);
+                    if let Err(e) = handle_build_started(
+                        &payload.repository,
+                        &head_commit.sha,
+                        &head_commit.message,
+                        &format!(
+                            "https://github.com/{}/{}/commit/{}/checks",
+                            payload.repository.owner.login,
+                            payload.repository.name,
+                            head_commit.sha
+                        ),
+                        &conn,
+                        discord_notifier,
+                    )
+                    .await
+                    {
+                        log::error!("Error handling build start: {}", e);
+                    }
                 }
+                _ => {}
+            },
+            Err(e) => {
+                log::error!("Failed to parse check run event: {}", e);
             }
-        }
+        },
+        "check_suite" => match serde_json::from_value::<CheckSuiteEvent>(event.payload) {
+            Ok(payload) => match payload.action.as_str() {
+                "completed" => {
+                    let build_status = BuildStatus::of(
+                        &payload.check_suite.status,
+                        &payload.check_suite.conclusion.as_deref(),
+                    );
+
+                    if let Err(e) = handle_build_completed(
+                        &payload.repository,
+                        &payload.check_suite.head_sha,
+                        &payload.check_suite.head_commit.as_ref().unwrap().message,
+                        build_status,
+                        &format!(
+                            "https://github.com/{}/{}/commit/{}/checks",
+                            payload.repository.owner.login,
+                            payload.repository.name,
+                            payload.check_suite.head_sha
+                        ),
+                        &conn,
+                        discord_notifier,
+                        kube_client,
+                    )
+                    .await
+                    {
+                        log::error!("Error handling build completion: {}", e);
+                    }
+                }
+                _ => {}
+            },
+            Err(e) => {
+                log::error!("Failed to parse check suite event: {}", e);
+            }
+        },
         _ => {
             log::debug!("Received unknown event: {}", event.event_type);
         }
-    }
-}
-
-// Helper function to truncate long payloads
-fn truncate_payload(payload: &str, max_length: usize) -> String {
-    if payload.len() <= max_length {
-        payload.to_string()
-    } else {
-        format!("{}...[truncated]", &payload[0..max_length])
     }
 }
 
