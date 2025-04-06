@@ -334,6 +334,12 @@ pub async fn deploy_configs(
                         border-left: 4px solid var(--pending-color);
                         color: #7d5a00;
                     }
+                    .warning-icon {
+                        color: var(--pending-color);
+                        margin-left: 8px;
+                        display: inline-flex;
+                        align-items: center;
+                    }
                     "#
                 }
                 script {
@@ -413,6 +419,11 @@ pub async fn deploy_configs(
                                             @if let Some(status) = &selected_config.status {
                                                 @if let Some(current_branch) = &status.current_branch {
                                                     (current_branch)
+                                                    @if current_branch != &selected_config.spec.spec.repo.default_branch {
+                                                        span class="warning-icon" title="Current branch is different from default branch" {
+                                                            "⚠️"
+                                                        }
+                                                    }
                                                 } @else {
                                                     "Not set"
                                                 }
