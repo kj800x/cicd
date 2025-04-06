@@ -241,6 +241,53 @@ impl DeployTransition {
     }
 }
 
+/// Generate the status header showing current branch and autodeploy status
+fn generate_status_header(config: &DeployConfig) -> Markup {
+    let default_branch = config.spec.spec.repo.default_branch.clone();
+    let default_autodeploy = config.spec.spec.autodeploy;
+    let current_autodeploy = config
+        .status
+        .as_ref()
+        .and_then(|s| s.autodeploy)
+        .unwrap_or(default_autodeploy);
+    let current_branch = config
+        .status
+        .as_ref()
+        .and_then(|s| s.current_branch.clone())
+        .unwrap_or(default_branch.clone());
+
+    html! {
+        div class="status-header" {
+            div class="status-item" {
+                "Tracking branch: "
+                strong {
+                    (current_branch)
+                    @if current_branch != default_branch {
+                        span class="warning-icon" title=(format!("Different from default branch ({})", default_branch)) {
+                            "⚠️"
+                        }
+                    }
+                }
+            }
+            div class="status-item" {
+                "Autodeploy: "
+                strong {
+                    @if current_autodeploy {
+                        "enabled"
+                    } @else {
+                        "disabled"
+                    }
+                    @if default_autodeploy != current_autodeploy {
+                        span class="warning-icon" title="Different from default" {
+                            "⚠️"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Generate the preview markup for a deploy config action
 fn generate_preview(
     selected_config: &DeployConfig,
@@ -290,7 +337,10 @@ fn generate_preview(
     html! {
         div class="preview-container" {
             div class="preview-content" {
-                (preview_content)
+                (generate_status_header(selected_config))
+                div class="preview-transition" {
+                    (preview_content)
+                }
             }
         }
     }
@@ -615,6 +665,26 @@ pub async fn deploy_configs(
                     .preview-arrow {
                         margin: 0 8px;
                         color: var(--primary-blue);
+                    }
+                    .status-header {
+                        display: flex;
+                        flex-direction: column;
+                        font-size: 12px;
+                        margin-top: -10px;
+                    }
+                    .status-item {
+                        color: var(--secondary-text);
+                    }
+                    .status-item strong {
+                        color: var(--text-color);
+                        font-weight: 500;
+                    }
+                    .warning-icon {
+                        margin-left: 4px;
+                        cursor: help;
+                    }
+                    .preview-transition {
+                        margin-top: 8px;
                     }
                     "#
                     (header::styles())
