@@ -264,7 +264,6 @@ pub async fn deploy_configs(
                     }
                     .preview-container {
                         padding: 20px;
-                        background-color: rgba(52, 152, 219, 0.1);
                         border-radius: 4px;
                         margin-top: 20px;
                     }
@@ -318,43 +317,45 @@ pub async fn deploy_configs(
                         // Left side box with dropdown and actions
                         div class="left-box" {
                             h3 { "Select DeployConfig" }
-                            select id="deployConfigSelect" onchange="updateSelection()" {
-                                @for config in &sorted_deploy_configs {
-                                    @let namespace = config.namespace().unwrap_or_default();
-                                    @let name = config.name_any();
-                                    @let selected = if let Some(default) = selected_config {
-                                        default.namespace().unwrap_or_default() == namespace && default.name_any() == name
-                                    } else {
-                                        false
-                                    };
+                            form action="/deploy-configs" method="get" {
+                                select name="selected" onchange="this.form.submit()" {
+                                    @for config in &sorted_deploy_configs {
+                                        @let namespace = config.namespace().unwrap_or_default();
+                                        @let name = config.name_any();
+                                        @let selected = if let Some(default) = selected_config {
+                                            default.namespace().unwrap_or_default() == namespace && default.name_any() == name
+                                        } else {
+                                            false
+                                        };
 
-                                    option value=(format!("{}/{}", namespace, name)) selected[selected] {
-                                        (format!("{}/{}", namespace, name))
+                                        option value=(format!("{}/{}", namespace, name)) selected[selected] {
+                                            (format!("{}/{}", namespace, name))
+                                        }
                                     }
                                 }
                             }
 
                             @if let Some(selected_config) = selected_config {
-                                form id="actionForm" action="/deploy-configs" method="get" {
+                                form action="/deploy-configs" method="get" {
                                     input type="hidden" name="selected" value=(format!("{}/{}", selected_config.namespace().unwrap_or_default(), selected_config.name_any()));
 
                                     div class="action-radio-group" {
                                         h4 { "Action:" }
                                         @let current_action = query.get("action");
                                         label class="action-radio" {
-                                            input type="radio" name="action" value="deploy-latest" checked[current_action.is_none() || current_action.unwrap() == "deploy-latest"] onchange="document.getElementById('actionForm').submit()";
+                                            input type="radio" name="action" value="deploy-latest" checked[current_action.is_none() || current_action.unwrap() == "deploy-latest"] onchange="this.form.submit()";
                                             "Deploy Latest (Default Branch)"
                                         }
                                         label class="action-radio" {
-                                            input type="radio" name="action" value="track-branch" checked[current_action.map_or(false, |a| a == "track-branch")] onchange="document.getElementById('actionForm').submit()";
+                                            input type="radio" name="action" value="track-branch" checked[current_action.map_or(false, |a| a == "track-branch")] onchange="this.form.submit()";
                                             "Deploy and Track Branch"
                                         }
                                         label class="action-radio" {
-                                            input type="radio" name="action" value="specific-commit" checked[current_action.map_or(false, |a| a == "specific-commit")] onchange="document.getElementById('actionForm').submit()";
+                                            input type="radio" name="action" value="specific-commit" checked[current_action.map_or(false, |a| a == "specific-commit")] onchange="this.form.submit()";
                                             "Deploy Specific Commit"
                                         }
                                         label class="action-radio" {
-                                            input type="radio" name="action" value="toggle-autodeploy" checked[current_action.map_or(false, |a| a == "toggle-autodeploy")] onchange="document.getElementById('actionForm').submit()";
+                                            input type="radio" name="action" value="toggle-autodeploy" checked[current_action.map_or(false, |a| a == "toggle-autodeploy")] onchange="this.form.submit()";
                                             @if selected_config.current_autodeploy() {
                                                 "Disable Autodeploy"
                                             } @else {
@@ -362,20 +363,8 @@ pub async fn deploy_configs(
                                             }
                                         }
                                         label class="action-radio" {
-                                            input type="radio" name="action" value="undeploy" checked[current_action.map_or(false, |a| a == "undeploy")] onchange="document.getElementById('actionForm').submit()";
+                                            input type="radio" name="action" value="undeploy" checked[current_action.map_or(false, |a| a == "undeploy")] onchange="this.form.submit()";
                                             "Undeploy"
-                                        }
-                                    }
-
-                                    @if query.get("action").map_or(false, |a| a == "track-branch") {
-                                        div class="action-input" {
-                                            input type="text" name="branch" placeholder="Enter branch name" required;
-                                        }
-                                    }
-
-                                    @if query.get("action").map_or(false, |a| a == "specific-commit") {
-                                        div class="action-input" {
-                                            input type="text" name="sha" placeholder="Enter commit SHA" required pattern="[0-9a-fA-F]{5,40}";
                                         }
                                     }
                                 }
@@ -397,7 +386,9 @@ pub async fn deploy_configs(
                                                 selected_config.namespace().unwrap_or_default(),
                                                 selected_config.name_any()))
                                                 method="post" {
-                                                input type="hidden" name="branch" value=(query.get("branch").unwrap_or(&"".to_string()));
+                                                div class="action-input" {
+                                                    input type="text" name="branch" placeholder="Enter branch name" required value=(query.get("branch").unwrap_or(&"".to_string()));
+                                                }
                                                 button type="submit" class="primary-action-button" {
                                                     "Deploy and Track Branch"
                                                 }
@@ -408,7 +399,9 @@ pub async fn deploy_configs(
                                                 selected_config.namespace().unwrap_or_default(),
                                                 selected_config.name_any()))
                                                 method="post" {
-                                                input type="hidden" name="sha" value=(query.get("sha").unwrap_or(&"".to_string()));
+                                                div class="action-input" {
+                                                    input type="text" name="sha" placeholder="Enter commit SHA" required pattern="[0-9a-fA-F]{5,40}" value=(query.get("sha").unwrap_or(&"".to_string()));
+                                                }
                                                 button type="submit" class="primary-action-button" {
                                                     "Deploy Specific Commit"
                                                 }
@@ -429,9 +422,10 @@ pub async fn deploy_configs(
                                             }
                                         }
                                         "undeploy" => {
-                                            form action=(format!("/api/undeploy/{}/{}",
+                                            form data-test="hello" action=(format!("/api/undeploy/{}/{}",
                                                 selected_config.namespace().unwrap_or_default(),
                                                 selected_config.name_any()))
+                                                data-action="undeploy"
                                                 method="post" {
                                                 button type="submit" class="primary-action-button danger" {
                                                     "Undeploy"
@@ -439,6 +433,15 @@ pub async fn deploy_configs(
                                             }
                                         }
                                         _ => {}
+                                    }
+                                } @else {
+                                    form action=(format!("/api/deploy/{}/{}",
+                                        selected_config.namespace().unwrap_or_default(),
+                                        selected_config.name_any()))
+                                        method="post" {
+                                        button type="submit" class="primary-action-button" {
+                                            "Deploy Latest"
+                                        }
                                     }
                                 }
                             }
@@ -536,12 +539,31 @@ pub async fn deploy_configs(
                                                     }
                                                     span class="preview-arrow" { "→" } "undeployed"
                                                 }
-                                                _ => {
-                                                    "Select an action to see its effect"
-                                                }
+                                                _ => {}
                                             }
                                         } @else {
-                                            "Select an action to see its effect"
+                                            @if let Some(status) = &selected_config.status {
+                                                @if let Some(wanted_sha) = &status.wanted_sha {
+                                                    @if let Some(latest_sha) = &status.latest_sha {
+                                                        @if wanted_sha == latest_sha {
+                                                            "unchanged, nothing to deploy"
+                                                        } @else {
+                                                            (wanted_sha[..7]) span class="preview-arrow" { "→" } (latest_sha[..7])
+                                                        }
+                                                    } @else {
+                                                        (wanted_sha[..7]) span class="preview-arrow" { "→" } "Unknown"
+                                                    }
+                                                } @else {
+                                                    "None" span class="preview-arrow" { "→" }
+                                                    @if let Some(latest_sha) = &status.latest_sha {
+                                                        (latest_sha[..7])
+                                                    } @else {
+                                                        "Unknown"
+                                                    }
+                                                }
+                                            } @else {
+                                                "None" span class="preview-arrow" { "→" } "Unknown"
+                                            }
                                         }
                                     }
                                 }
