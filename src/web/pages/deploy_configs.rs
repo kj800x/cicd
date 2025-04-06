@@ -140,12 +140,19 @@ pub async fn deploy_configs(
                         --danger-color: #cf222e;
                     }
                     body {
-                        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+                        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
                         background-color: white;
                         color: var(--text-color);
                         margin: 0;
                         padding: 0;
                         line-height: 1.5;
+                    }
+                    .commit-sha {
+                        font-family: monospace;
+                        font-size: 0.85rem;
+                        width: 65px;
+                        color: #555;
+                        margin-right: 12px;
                     }
                     .header {
                         background-color: var(--header-bg);
@@ -213,9 +220,22 @@ pub async fn deploy_configs(
                         display: flex;
                         gap: 40px;
                         max-width: 1200px;
+                        margin: 0 auto;
+
+                        @media (max-width: 768px) {
+                            flex-direction: column;
+                            align-items: center;
+
+                            .right-box {
+                                width: 100%;
+                            }
+                        }
                     }
                     .left-box {
                         width: 340px;
+                        border: 2px solid #dfe3eb;
+                        background-color: #f6f8fa;
+                        padding: 20px;
                     }
                     .right-box {
                         flex-grow: 1;
@@ -291,9 +311,6 @@ pub async fn deploy_configs(
                         top: 50%;
                         transform: translate(-50%, -50%);
                     }
-                    .action-input {
-                        margin: 8px 0 16px 24px;
-                    }
                     .action-input input {
                         width: calc(100% - 24px);
                         padding: 5px 12px;
@@ -301,7 +318,7 @@ pub async fn deploy_configs(
                         line-height: 20px;
                         border: 1px solid var(--border-color);
                         border-radius: 6px;
-                        background-color: #f6f8fa;
+                        background-color: white;
                     }
                     .action-input input:focus {
                         outline: none;
@@ -336,7 +353,6 @@ pub async fn deploy_configs(
                         margin-top: 8px;
                     }
                     .preview-content {
-                        font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
                         font-size: 14px;
                     }
                     .preview-arrow {
@@ -399,7 +415,7 @@ pub async fn deploy_configs(
                         div class="content-container" {
                             // Left side box with dropdown and actions
                             div class="left-box" {
-                                h3 { "Select DeployConfig" }
+                                h3 { "Deploy config" }
                                 form action="/deploy-configs" method="get" {
                                     select name="selected" onchange="this.form.submit()" {
                                         @for config in &sorted_deploy_configs {
