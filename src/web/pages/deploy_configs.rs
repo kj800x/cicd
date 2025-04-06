@@ -214,21 +214,19 @@ pub async fn deploy_configs(
                     .action-radio-group {
                         display: flex;
                         flex-direction: column;
-                        gap: 12px;
+                        gap: 4px;
                         margin-bottom: 20px;
+                    }
+                    .action-radio-group h4 {
+                        margin: 0 0 8px 0;
+                        font-size: 1rem;
+                        font-weight: 600;
                     }
                     .action-radio {
                         display: flex;
                         align-items: center;
                         gap: 8px;
-                        padding: 8px;
-                        border-radius: 4px;
-                        border: 1px solid var(--border-color);
                         cursor: pointer;
-                        transition: background-color 0.2s;
-                    }
-                    .action-radio:hover {
-                        background-color: rgba(52, 152, 219, 0.1);
                     }
                     .action-radio input[type="radio"] {
                         margin: 0;
@@ -341,6 +339,7 @@ pub async fn deploy_configs(
                                     input type="hidden" name="selected" value=(format!("{}/{}", selected_config.namespace().unwrap_or_default(), selected_config.name_any()));
 
                                     div class="action-radio-group" {
+                                        h4 { "Action:" }
                                         @let current_action = query.get("action");
                                         label class="action-radio" {
                                             input type="radio" name="action" value="deploy-latest" checked[current_action.is_none() || current_action.unwrap() == "deploy-latest"] onchange="document.getElementById('actionForm').submit()";
@@ -583,13 +582,6 @@ pub async fn deploy_config(
 
     match deploy_configs_api.get(&name).await {
         Ok(config) => {
-            // Check if it has autodeploy enabled (shouldn't happen due to UI, but just to be sure)
-            if config.current_autodeploy() {
-                return HttpResponse::BadRequest()
-                    .content_type("text/html; charset=utf-8")
-                    .body("Cannot manually deploy when autodeploy is enabled.");
-            }
-
             // Get the latest SHA
             let latest_sha = if let Some(status) = &config.status {
                 if let Some(sha) = &status.latest_sha {
@@ -670,13 +662,6 @@ pub async fn undeploy_config(
 
     match deploy_configs_api.get(&name).await {
         Ok(config) => {
-            // Check if it has autodeploy enabled
-            if config.current_autodeploy() {
-                return HttpResponse::BadRequest()
-                    .content_type("text/html; charset=utf-8")
-                    .body("Cannot manually undeploy when autodeploy is enabled.");
-            }
-
             // Set wantedSha to null
             let status = serde_json::json!({
                 "status": {
@@ -761,13 +746,6 @@ pub async fn deploy_specific_config(
 
     match deploy_configs_api.get(&name).await {
         Ok(config) => {
-            // Check if it has autodeploy enabled
-            if config.current_autodeploy() {
-                return HttpResponse::BadRequest()
-                    .content_type("text/html; charset=utf-8")
-                    .body("Cannot manually deploy when autodeploy is enabled.");
-            }
-
             // Update the wanted SHA to the specified value
             let status = serde_json::json!({
                 "status": {
