@@ -41,7 +41,7 @@ impl Render for HumanTime {
 
         html! {
             time datetime=(time.to_rfc3339()) {
-                (local.format("%B %d at %I:%M %p"))
+                (local.format("%B %d at %I:%M %p ET"))
             }
         }
     }
