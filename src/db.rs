@@ -493,8 +493,8 @@ pub fn get_parent_commits(
 
 pub fn get_repo(
     conn: &PooledConnection<SqliteConnectionManager>,
-    owner_name: String,
-    repo_name: String,
+    owner_name: &str,
+    repo_name: &str,
 ) -> Result<Option<Repo>, Error> {
     Ok(conn.prepare(
         "SELECT id, name, owner_name, default_branch, private, language FROM git_repo WHERE owner_name = ?1 AND name = ?2 LIMIT 1",

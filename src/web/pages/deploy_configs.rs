@@ -10,6 +10,14 @@ use maud::{html, Markup, Render};
 use regex::Regex;
 use std::collections::HashMap;
 
+struct PreviewArrow;
+
+impl Render for PreviewArrow {
+    fn render(&self) -> Markup {
+        html!(span.preview-arrow { "⇨" })
+    }
+}
+
 struct GitRef(String);
 
 impl Render for GitRef {
@@ -44,26 +52,27 @@ impl Render for AutodeployStatus {
 
 /// Get the latest successful build for a branch
 fn get_latest_successful_build(
-    owner: String,
-    repo: String,
-    branch: String,
+    owner: &str,
+    repo: &str,
+    branch: &str,
     conn: &PooledConnection<SqliteConnectionManager>,
-) -> Result<Option<Commit>, rusqlite::Error> {
+) -> Option<Commit> {
     // Get the repository ID
-    let repo_id = match get_repo(conn, owner.clone(), repo.clone())? {
+    let repo_id = match get_repo(conn, owner, repo).unwrap() {
         Some(repo) => repo.id,
-        None => return Ok(None),
+        None => return None,
     };
 
     // Get the branch ID
-    let branch_id = match get_branch_by_name(&branch, repo_id as u64, conn)? {
+    let branch_id = match get_branch_by_name(&branch, repo_id as u64, conn).unwrap() {
         Some(branch) => branch.id,
-        None => return Ok(None),
+        None => return None,
     };
 
     // Get the latest successful build for this branch
-    let mut stmt = conn.prepare(
-        r#"
+    let commit = conn
+        .prepare(
+            r#"
         SELECT c.id, c.sha, c.message, c.timestamp, c.build_status, c.build_url
         FROM git_commit c
         JOIN git_commit_branch cb ON c.sha = cb.commit_sha
@@ -72,209 +81,219 @@ fn get_latest_successful_build(
         ORDER BY c.timestamp DESC
         LIMIT 1
         "#,
-    )?;
-
-    let commit = stmt.query_row([branch_id], |row| {
-        Ok(Commit {
-            id: row.get(0)?,
-            sha: row.get(1)?,
-            message: row.get(2)?,
-            timestamp: row.get(3)?,
-            build_status: row.get::<_, Option<String>>(4)?.into(),
-            build_url: row.get(5)?,
+        )
+        .unwrap()
+        .query_row([branch_id], |row| {
+            Ok(Commit {
+                id: row.get(0)?,
+                sha: row.get(1)?,
+                message: row.get(2)?,
+                timestamp: row.get(3)?,
+                build_status: row.get::<_, Option<String>>(4)?.into(),
+                build_url: row.get(5)?,
+            })
         })
-    });
+        .optional()
+        .unwrap();
 
-    Ok(Some(commit.unwrap()))
+    commit
 }
 
-/// Represents a deployed version with its SHA and optional branch
+fn get_commit_by_sha(
+    sha: &str,
+    conn: &PooledConnection<SqliteConnectionManager>,
+) -> Option<Commit> {
+    conn.prepare(r#"SELECT * FROM git_commit WHERE sha = ?"#)
+        .unwrap()
+        .query_row([sha], |row| {
+            Ok(Commit {
+                id: row.get(0)?,
+                sha: row.get(1)?,
+                message: row.get(2)?,
+                timestamp: row.get(3)?,
+                build_status: row.get::<usize, Option<String>>(4)?.into(),
+                build_url: row.get(5)?,
+            })
+        })
+        .optional()
+        .unwrap()
+}
+
 #[derive(Debug, Clone)]
-struct DeployedVersion {
-    sha: String,
-    branch: Option<String>,
-    build_time: Option<String>,
+enum ResolvedVersion {
+    UnknownSha {
+        sha: String,
+    },
+    TrackedSha {
+        sha: String,
+        build_time: String,
+    },
+    BranchTracked {
+        sha: String,
+        branch: String,
+        build_time: String,
+    },
+    Undeployed,
+    ResolutionFailed,
 }
 
-impl DeployedVersion {
-    /// Creates a new DeployedVersion with just a SHA
-    fn new(sha: String) -> Self {
-        Self {
-            sha,
-            branch: None,
-            build_time: None,
+impl ResolvedVersion {
+    // If config.status is None, return Undeployed
+    // If config.status is Some, but wanted_sha is None, return Undeployed
+    // If config.status is Some, and wanted_sha is Some, return BranchTracked
+
+    fn from_config(
+        config: &DeployConfig,
+        conn: &PooledConnection<SqliteConnectionManager>,
+    ) -> Self {
+        match &config.status {
+            None => ResolvedVersion::Undeployed,
+            Some(status) => match &status.wanted_sha {
+                Some(sha) => {
+                    let commit = get_commit_by_sha(sha, conn);
+
+                    match commit {
+                        Some(commit) => ResolvedVersion::BranchTracked {
+                            sha: sha.clone(),
+                            branch: status.current_branch.clone().unwrap(),
+                            build_time: commit.timestamp.to_string(),
+                        },
+                        None => ResolvedVersion::UnknownSha { sha: sha.clone() },
+                    }
+                }
+                None => ResolvedVersion::Undeployed,
+            },
         }
     }
 
-    /// Creates a new DeployedVersion with a SHA and branch
-    fn with_branch(sha: String, branch: String) -> Self {
-        Self {
-            sha,
-            branch: Some(branch),
-            build_time: None,
+    fn from_action(
+        action: &Action,
+        config: &DeployConfig,
+        conn: &PooledConnection<SqliteConnectionManager>,
+    ) -> Self {
+        match action {
+            Action::DeployLatest => {
+                let branch = config
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.current_branch.clone())
+                    .unwrap_or(config.spec.spec.repo.default_branch.clone());
+
+                // Get the latest successful build for the current branch
+                let commit = get_latest_successful_build(
+                    &config.spec.spec.repo.owner,
+                    &config.spec.spec.repo.repo,
+                    &branch,
+                    conn,
+                );
+
+                match commit {
+                    Some(commit) => ResolvedVersion::BranchTracked {
+                        sha: commit.sha,
+                        branch: branch.clone(),
+                        build_time: commit.timestamp.to_string(),
+                    },
+                    None => ResolvedVersion::ResolutionFailed,
+                }
+            }
+            Action::DeployBranch { branch } => {
+                // Get the latest successful build for the current branch
+                let commit = get_latest_successful_build(
+                    &config.spec.spec.repo.owner,
+                    &config.spec.spec.repo.repo,
+                    &branch,
+                    conn,
+                );
+
+                match commit {
+                    Some(commit) => ResolvedVersion::BranchTracked {
+                        sha: commit.sha,
+                        branch: branch.clone(),
+                        build_time: commit.timestamp.to_string(),
+                    },
+                    None => ResolvedVersion::ResolutionFailed,
+                }
+            }
+            Action::DeployCommit { sha } => {
+                let commit = get_commit_by_sha(&sha, conn);
+
+                match commit {
+                    Some(commit) => ResolvedVersion::TrackedSha {
+                        sha: commit.sha,
+                        build_time: commit.timestamp.to_string(),
+                    },
+                    None => ResolvedVersion::UnknownSha { sha: sha.clone() },
+                }
+            }
+            Action::ToggleAutodeploy => ResolvedVersion::ResolutionFailed,
+            Action::Undeploy => ResolvedVersion::Undeployed,
         }
     }
 
-    /// Sets the build time and returns self for chaining
-    fn with_build_time(mut self, time: String) -> Self {
-        self.build_time = Some(time);
-        self
+    fn matches_branch(&self, other: Option<&ResolvedVersion>) -> bool {
+        match (self, other) {
+            (
+                ResolvedVersion::BranchTracked { branch, .. },
+                Some(ResolvedVersion::BranchTracked {
+                    branch: other_branch,
+                    ..
+                }),
+            ) => branch == other_branch,
+            _ => false,
+        }
     }
 
     /// Formats the version for display, showing branch:sha if branch differs from comparison
-    fn format(&self, other: Option<&DeployedVersion>) -> Markup {
-        let sha_prefix = if self.sha.len() >= 7 {
-            &self.sha[..7]
-        } else {
-            &self.sha
-        };
-
-        // If we have a branch and it differs from the other version's branch, show it
-        let show_branch = match (self.branch.as_ref(), other.and_then(|o| o.branch.as_ref())) {
-            (Some(my_branch), Some(other_branch)) => my_branch != other_branch,
-            (Some(_), None) | (None, Some(_)) => true,
-            (None, None) => false,
-        };
-
-        let git_ref = if show_branch {
-            if let Some(branch) = &self.branch {
-                GitRef(format!("{}:{}", branch.clone(), sha_prefix))
-            } else {
-                GitRef(sha_prefix.to_string())
+    fn format(&self, other: Option<&ResolvedVersion>) -> Markup {
+        match self {
+            ResolvedVersion::UnknownSha { sha } => {
+                let sha_prefix = if sha.len() >= 7 { &sha[..7] } else { &sha };
+                html!((sha_prefix))
             }
-        } else {
-            GitRef(sha_prefix.to_string())
-        };
+            ResolvedVersion::TrackedSha { sha, build_time: _ } => {
+                let sha_prefix = if sha.len() >= 7 { &sha[..7] } else { &sha };
+                html!((sha_prefix))
+            }
+            ResolvedVersion::BranchTracked {
+                sha,
+                branch,
+                build_time: _,
+            } => {
+                // If we have a branch and it differs from the other version's branch, show it
+                let show_branch = !self.matches_branch(other);
+                let sha_prefix = if sha.len() >= 7 { &sha[..7] } else { &sha };
 
-        html!((git_ref))
+                let git_ref = if show_branch {
+                    GitRef(format!("{}:{}", branch.clone(), sha_prefix))
+                } else {
+                    GitRef(sha_prefix.to_string())
+                };
+
+                html!((git_ref))
+            }
+            ResolvedVersion::Undeployed => {
+                html!("Undeployed")
+            }
+            ResolvedVersion::ResolutionFailed => {
+                html!("ERROR: Resolution failed")
+            }
+        }
     }
 }
 
-/// Represents a transition between two deployed versions
+/// Represents a transition between two resolved versions
 struct DeployTransition {
-    from: Option<DeployedVersion>,
-    to: Option<DeployedVersion>,
+    from: ResolvedVersion,
+    to: ResolvedVersion,
 }
 
 impl DeployTransition {
-    /// Creates a transition for deploying the latest version
-    fn deploy_latest(status: Option<&DeployConfigStatus>) -> Self {
-        let from = status.and_then(|s| {
-            s.wanted_sha.as_ref().map(|sha| {
-                if let Some(branch) = &s.current_branch {
-                    DeployedVersion::with_branch(sha.clone(), branch.clone())
-                } else {
-                    DeployedVersion::new(sha.clone())
-                }
-            })
-        });
-
-        let to = status.and_then(|s| {
-            s.latest_sha.as_ref().map(|sha| {
-                DeployedVersion::new(sha.clone()).with_build_time("5 minutes ago".to_string())
-            })
-        });
-
-        Self { from, to }
-    }
-
-    /// Creates a transition for deploying to a specific branch
-    fn deploy_branch(status: Option<&DeployConfigStatus>, new_branch: &str) -> Self {
-        let from = status.and_then(|s| {
-            s.wanted_sha.as_ref().map(|sha| {
-                if let Some(branch) = &s.current_branch {
-                    DeployedVersion::with_branch(sha.clone(), branch.clone())
-                } else {
-                    DeployedVersion::new(sha.clone())
-                }
-            })
-        });
-
-        let to = status.and_then(|s| {
-            s.latest_sha.as_ref().map(|sha| {
-                DeployedVersion::with_branch(sha.clone(), new_branch.to_string())
-                    .with_build_time("5 minutes ago".to_string())
-            })
-        });
-
-        Self { from, to }
-    }
-
-    /// Creates a transition for deploying a specific commit
-    fn deploy_commit(status: Option<&DeployConfigStatus>, sha: &str) -> Self {
-        let from = status.and_then(|s| {
-            s.wanted_sha.as_ref().map(|sha| {
-                if let Some(branch) = &s.current_branch {
-                    DeployedVersion::with_branch(sha.clone(), branch.clone())
-                } else {
-                    DeployedVersion::new(sha.clone())
-                }
-            })
-        });
-
-        let to = Some(
-            DeployedVersion::new(sha.to_string()).with_build_time("5 minutes ago".to_string()),
-        );
-
-        Self { from, to }
-    }
-
-    /// Creates a transition for undeploying
-    fn undeploy(status: Option<&DeployConfigStatus>) -> Self {
-        let from = status.and_then(|s| {
-            s.wanted_sha.as_ref().map(|sha| {
-                if let Some(branch) = &s.current_branch {
-                    DeployedVersion::with_branch(sha.clone(), branch.clone())
-                } else {
-                    DeployedVersion::new(sha.clone())
-                }
-            })
-        });
-
-        Self { from, to: None }
-    }
-
     /// Formats the transition for display
     fn format(&self) -> Markup {
-        match (&self.from, &self.to) {
-            (Some(from), Some(to)) => {
-                if from.sha == to.sha {
-                    html! {
-                        "Commit " (from.format(None)) " (unchanged)"
-                    }
-                } else {
-                    html! {
-                        "Commit " (from.format(Some(to))) " (currently deployed) "
-                        span class="preview-arrow" { "→" }
-                        " Commit " (to.format(Some(from)))
-                        @if let Some(time) = &to.build_time {
-                            " (last built, " (time) ")"
-                        }
-                    }
-                }
-            }
-            (Some(from), None) => {
-                html! {
-                    "Commit " (from.format(None)) " (currently deployed) "
-                    span class="preview-arrow" { "→" }
-                    " undeployed"
-                }
-            }
-            (None, Some(to)) => {
-                html! {
-                    "Not deployed "
-                    span class="preview-arrow" { "→" }
-                    " Commit " (to.format(None))
-                    @if let Some(time) = &to.build_time {
-                        " (last built, " (time) ")"
-                    }
-                }
-            }
-            (None, None) => html! {
-                "Not deployed "
-                span class="preview-arrow" { "→" }
-                " Unknown"
-            },
+        html! {
+            (self.from.format(Some(&self.to)))
+            ( PreviewArrow {} )
+            (self.to.format(Some(&self.from)))
         }
     }
 }
@@ -327,18 +346,20 @@ fn generate_status_header(config: &DeployConfig) -> Markup {
 }
 
 /// Generate the preview markup for a deploy config action
-fn generate_preview(selected_config: &DeployConfig, action: &Action) -> Markup {
-    // Handle the action matching at the Rust level first
+fn generate_preview(
+    selected_config: &DeployConfig,
+    action: &Action,
+    conn: &PooledConnection<SqliteConnectionManager>,
+) -> Markup {
     let preview_content = match action {
-        Action::DeployLatest => {
-            DeployTransition::deploy_latest(selected_config.status.as_ref()).format()
+        Action::DeployLatest
+        | Action::DeployBranch { .. }
+        | Action::DeployCommit { .. }
+        | Action::Undeploy => DeployTransition {
+            from: ResolvedVersion::from_config(selected_config, conn),
+            to: ResolvedVersion::from_action(action, selected_config, conn),
         }
-        Action::DeployBranch { branch } => {
-            DeployTransition::deploy_branch(selected_config.status.as_ref(), branch).format()
-        }
-        Action::DeployCommit { sha } => {
-            DeployTransition::deploy_commit(selected_config.status.as_ref(), sha).format()
-        }
+        .format(),
         Action::ToggleAutodeploy => {
             html! {
                 "Autodeploy "
@@ -347,7 +368,7 @@ fn generate_preview(selected_config: &DeployConfig, action: &Action) -> Markup {
                 } @else {
                     (AutodeployStatus(false))
                 }
-                span class="preview-arrow" { "→" }
+                ( PreviewArrow {} )
                 @if selected_config.current_autodeploy() {
                     (AutodeployStatus(false))
                 } @else {
@@ -355,7 +376,6 @@ fn generate_preview(selected_config: &DeployConfig, action: &Action) -> Markup {
                 }
             }
         }
-        Action::Undeploy => DeployTransition::undeploy(selected_config.status.as_ref()).format(),
     };
 
     // Wrap the preview content in the container markup
@@ -421,9 +441,11 @@ impl Action {
 
 /// Handler for the deploy configs page
 pub async fn deploy_configs(
-    _pool: web::Data<Pool<SqliteConnectionManager>>,
+    pool: web::Data<Pool<SqliteConnectionManager>>,
     query: web::Query<std::collections::HashMap<String, String>>,
 ) -> impl Responder {
+    let conn = pool.get().unwrap();
+
     // Initialize Kubernetes client
     let client = match Client::try_default().await {
         Ok(client) => client,
@@ -745,7 +767,7 @@ pub async fn deploy_configs(
                     }
                     .preview-arrow {
                         margin: 0 8px;
-                        color: var(--primary-blue);
+                        font-size: 16px;
                     }
                     .status-header {
                         display: flex;
@@ -940,7 +962,7 @@ pub async fn deploy_configs(
                                             (format!("{}/{}", selected_config.namespace().unwrap_or_default(), selected_config.name_any()))
                                         }
                                     }
-                                    (generate_preview(selected_config, &action))
+                                    (generate_preview(selected_config, &action, &conn))
                                 }
                             }
                         }
@@ -1255,12 +1277,12 @@ pub async fn override_branch(
 
             // Get the latest successful build for the new branch
             let latest_sha = match get_latest_successful_build(
-                config.spec.spec.repo.owner.clone(),
-                config.spec.spec.repo.repo.clone(),
-                branch.clone(),
+                &config.spec.spec.repo.owner,
+                &config.spec.spec.repo.repo,
+                &branch,
                 &conn,
             ) {
-                Ok(Some(commit)) => {
+                Some(commit) => {
                     log::debug!(
                         "Found latest successful build for branch {}: {}",
                         branch,
@@ -1268,17 +1290,11 @@ pub async fn override_branch(
                     );
                     Some(commit.sha)
                 }
-                Ok(None) => {
+                None => {
                     log::debug!("No successful builds found for branch {}", branch);
                     return HttpResponse::BadRequest()
                         .content_type("text/html; charset=utf-8")
                         .body(format!("No successful builds found for branch {}", branch));
-                }
-                Err(e) => {
-                    log::error!("Error getting latest successful build: {}", e);
-                    return HttpResponse::InternalServerError()
-                        .content_type("text/html; charset=utf-8")
-                        .body(format!("Error getting latest successful build: {}", e));
                 }
             };
 
