@@ -17,15 +17,26 @@ impl Render for PreviewArrow {
     }
 }
 
-struct GitRef(String);
+struct GitRef(String, String, String, bool);
 
 impl Render for GitRef {
     fn render(&self) -> Markup {
+        let owner = self.1.clone();
+        let repo = self.2.clone();
+        let sha = self.0.clone();
+        let disable_prefixing = self.3;
+
+        let sha_prefix = if !disable_prefixing && sha.len() >= 7 {
+            &sha[..7]
+        } else {
+            &sha
+        };
+
         html!(
             span {
-            // span.git-ref {
-                (self.0.clone())
-            // }
+                a.git-ref href=(format!("https://github.com/{}/{}/tree/{}", owner, repo, sha)) {
+                    (sha_prefix)
+                }
             }
         )
     }
@@ -89,14 +100,14 @@ fn get_latest_successful_build(
     let commit = conn
         .prepare(
             r#"
-        SELECT c.id, c.sha, c.message, c.timestamp, c.build_status, c.build_url
-        FROM git_commit c
-        JOIN git_commit_branch cb ON c.sha = cb.commit_sha
-        WHERE cb.branch_id = ?1
-        AND c.build_status = 'Success'
-        ORDER BY c.timestamp DESC
-        LIMIT 1
-        "#,
+            SELECT c.id, c.sha, c.message, c.timestamp, c.build_status, c.build_url
+            FROM git_commit c
+            JOIN git_commit_branch cb ON c.sha = cb.commit_sha
+            WHERE cb.branch_id = ?1
+            AND c.build_status = 'Success'
+            ORDER BY c.timestamp DESC
+            LIMIT 1
+            "#,
         )
         .unwrap()
         .query_row([branch_id], |row| {
@@ -161,10 +172,6 @@ impl ResolvedVersion {
             _ => None,
         }
     }
-
-    // If config.status is None, return Undeployed
-    // If config.status is Some, but wanted_sha is None, return Undeployed
-    // If config.status is Some, and wanted_sha is Some, return BranchTracked
 
     fn from_config(
         config: &DeployConfig,
@@ -270,15 +277,13 @@ impl ResolvedVersion {
     }
 
     /// Formats the version for display, showing branch:sha if branch differs from comparison
-    fn format(&self, other: Option<&ResolvedVersion>) -> Markup {
+    fn format(&self, other: Option<&ResolvedVersion>, owner: &str, repo: &str) -> Markup {
         match self {
             ResolvedVersion::UnknownSha { sha } => {
-                let sha_prefix = if sha.len() >= 7 { &sha[..7] } else { &sha };
-                html!((sha_prefix))
+                html!((GitRef(sha.clone(), owner.to_string(), repo.to_string(), false)))
             }
             ResolvedVersion::TrackedSha { sha, build_time: _ } => {
-                let sha_prefix = if sha.len() >= 7 { &sha[..7] } else { &sha };
-                html!((sha_prefix))
+                html!((GitRef(sha.clone(), owner.to_string(), repo.to_string(), false)))
             }
             ResolvedVersion::BranchTracked {
                 sha,
@@ -287,15 +292,21 @@ impl ResolvedVersion {
             } => {
                 // If we have a branch and it differs from the other version's branch, show it
                 let show_branch = !self.matches_branch(other);
-                let sha_prefix = if sha.len() >= 7 { &sha[..7] } else { &sha };
 
-                let git_ref = if show_branch {
-                    GitRef(format!("{}:{}", branch.clone(), sha_prefix))
+                if show_branch {
+                    html!(
+                        (branch)
+                        ":"
+                        (GitRef(
+                            sha.clone(),
+                            owner.to_string(),
+                            repo.to_string(),
+                            false,
+                        ))
+                    )
                 } else {
-                    GitRef(sha_prefix.to_string())
-                };
-
-                html!((git_ref))
+                    html!((GitRef(sha.clone(), owner.to_string(), repo.to_string(), false)))
+                }
             }
             ResolvedVersion::Undeployed => {
                 html!("Undeployed")
@@ -318,8 +329,29 @@ struct DeployTransition {
 }
 
 impl DeployTransition {
+    fn compare_url(&self, owner: &str, repo: &str) -> Option<String> {
+        match (&self.from, &self.to) {
+            (
+                ResolvedVersion::BranchTracked {
+                    branch: _,
+                    sha: from_sha,
+                    build_time: _,
+                },
+                ResolvedVersion::BranchTracked {
+                    branch: _,
+                    sha: to_sha,
+                    build_time: _,
+                },
+            ) => Some(format!(
+                "https://github.com/{}/{}/compare/{}...{}",
+                owner, repo, from_sha, to_sha
+            )),
+            _ => None,
+        }
+    }
+
     /// Formats the transition for display
-    fn format(&self) -> Markup {
+    fn format(&self, owner: &str, repo: &str) -> Markup {
         if self.from == self.to {
             if self.from.is_undeployed() {
                 html! {
@@ -327,7 +359,7 @@ impl DeployTransition {
                 }
             } else {
                 html! {
-                    (self.from.format(Some(&self.to)))
+                    (self.from.format(Some(&self.to), owner, repo))
                     span {
                         " (up to date"
                         @if let Some(build_time) = self.from.get_build_time() {
@@ -340,7 +372,7 @@ impl DeployTransition {
             }
         } else {
             html! {
-                (self.from.format(Some(&self.to)))
+                (self.from.format(Some(&self.to), owner, repo))
                 @if !self.from.is_undeployed() {
                     span {
                         " (last deployed"
@@ -352,7 +384,7 @@ impl DeployTransition {
                     }
                 }
                 ( PreviewArrow {} )
-                (self.to.format(Some(&self.from)))
+                (self.to.format(Some(&self.from), owner, repo))
                 @if !self.to.is_undeployed() {
                     span {
                         " (latest built"
@@ -363,13 +395,19 @@ impl DeployTransition {
                         ")"
                     }
                 }
+                @if let Some(compare_url) = self.compare_url(owner, repo) {
+                    " "
+                    a.git-ref href=(compare_url) {
+                        "[compare]"
+                    }
+                }
             }
         }
     }
 }
 
 /// Generate the status header showing current branch and autodeploy status
-fn generate_status_header(config: &DeployConfig) -> Markup {
+fn generate_status_header(config: &DeployConfig, owner: &str, repo: &str) -> Markup {
     let default_branch = config.spec.spec.repo.default_branch.clone();
     let default_autodeploy = config.spec.spec.autodeploy;
     let current_autodeploy = config
@@ -388,7 +426,12 @@ fn generate_status_header(config: &DeployConfig) -> Markup {
             div class="status-item" {
                 "Tracking branch: "
                 strong {
-                    (GitRef(current_branch.clone()))
+                    (GitRef(
+                        current_branch.clone(),
+                        owner.to_string(),
+                        repo.to_string(),
+                        true,
+                    ))
                     @if current_branch != default_branch {
                         span class="warning-icon" title=(format!("Different from default branch ({})", default_branch)) {
                             "⚠️"
@@ -421,6 +464,9 @@ fn generate_preview(
     action: &Action,
     conn: &PooledConnection<SqliteConnectionManager>,
 ) -> Markup {
+    let owner = selected_config.spec.spec.repo.owner.clone();
+    let repo = selected_config.spec.spec.repo.repo.clone();
+
     let preview_content = match action {
         Action::DeployLatest
         | Action::DeployBranch { .. }
@@ -429,7 +475,7 @@ fn generate_preview(
             from: ResolvedVersion::from_config(selected_config, conn),
             to: ResolvedVersion::from_action(action, selected_config, conn),
         }
-        .format(),
+        .format(&owner, &repo),
         Action::ToggleAutodeploy => {
             html! {
                 "Autodeploy "
@@ -452,7 +498,7 @@ fn generate_preview(
     html! {
         div class="preview-container" {
             div class="preview-content" {
-                (generate_status_header(selected_config))
+                (generate_status_header(selected_config, &owner, &repo))
                 div class="preview-transition" {
                     div class="preview-transition-header" {
                         (selected_config.name_any())
@@ -609,11 +655,14 @@ pub async fn deploy_configs(
                         padding: 0;
                         line-height: 1.5;
                     }
-                    .commit-sha, .git-ref {
-                        font-family: monospace;
-                        font-size: 0.85rem;
-                        width: 65px;
-                        color: #555;
+                    // .commit-sha, .git-ref {
+                    //     font-family: monospace;
+                    //     font-size: 0.85rem;
+                    //     width: 65px;
+                    //     color: #555;
+                    // }
+                    .git-ref {
+                        color: inherit;
                     }
                     .header {
                         background-color: var(--header-bg);
