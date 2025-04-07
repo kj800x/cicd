@@ -893,42 +893,27 @@ pub async fn deploy_configs(
                                             }
                                         }
                                     }
-                                    @match action {
-                                        Action::DeployLatest | Action::DeployBranch { .. } | Action::DeployCommit { .. } => {
-                                            form action=(format!("/api/deploy/{}/{}",
-                                                selected_config.namespace().unwrap_or_default(),
-                                                selected_config.name_any()))
-                                                method="post"
-                                            {
-                                                input type="hidden" name="branch" value=(query.get("branch").unwrap_or(&"".to_string()));
-                                                input type="hidden" name="sha" value=(query.get("sha").unwrap_or(&"".to_string()));
-                                                button type="submit" class="primary-action-button" {
+                                    form action=(format!("/api/deploy/{}/{}",
+                                        selected_config.namespace().unwrap_or_default(),
+                                        selected_config.name_any()))
+                                        method="post"
+                                    {
+                                        input type="hidden" name="branch" value=(query.get("branch").unwrap_or(&"".to_string()));
+                                        input type="hidden" name="sha" value=(query.get("sha").unwrap_or(&"".to_string()));
+                                        input type="hidden" name="action" value=(query.get("action").unwrap_or(&"".to_string()));
+                                        button.primary-action-button.danger-button[action.is_undeploy()] type="submit" {
+                                            @match action {
+                                                Action::DeployLatest | Action::DeployBranch { .. } | Action::DeployCommit { .. } => {
                                                     "Deploy"
                                                 }
-                                            }
-                                        }
-                                        Action::ToggleAutodeploy => {
-                                            form action=(format!("/api/toggle-autodeploy/{}/{}",
-                                                selected_config.namespace().unwrap_or_default(),
-                                                selected_config.name_any()))
-                                                method="post"
-                                            {
-                                                button type="submit" class="primary-action-button" {
+                                                Action::ToggleAutodeploy => {
                                                     @if selected_config.current_autodeploy() {
                                                         "Disable autodeploy"
                                                     } @else {
                                                         "Enable autodeploy"
                                                     }
                                                 }
-                                            }
-                                        }
-                                        Action::Undeploy => {
-                                            form action=(format!("/api/undeploy/{}/{}",
-                                                selected_config.namespace().unwrap_or_default(),
-                                                selected_config.name_any()))
-                                                method="post"
-                                            {
-                                                button type="submit" class="primary-action-button danger" {
+                                                Action::Undeploy => {
                                                     "Undeploy"
                                                 }
                                             }
@@ -982,7 +967,11 @@ pub async fn deploy_configs(
 pub async fn deploy_config(
     path: web::Path<(String, String)>,
     client: Option<web::Data<Client>>,
+    pool: web::Data<Pool<SqliteConnectionManager>>,
+    form: web::Form<HashMap<String, String>>,
 ) -> impl Responder {
+    let conn = pool.get().unwrap();
+    let action = Action::from_query(&form);
     let (namespace, name) = path.into_inner();
 
     // Check if Kubernetes client is available
@@ -999,422 +988,99 @@ pub async fn deploy_config(
     let deploy_configs_api: Api<DeployConfig> =
         Api::namespaced(client.get_ref().clone(), &namespace);
 
-    match deploy_configs_api.get(&name).await {
-        Ok(config) => {
-            // Get the latest SHA
-            let latest_sha = if let Some(status) = &config.status {
-                if let Some(sha) = &status.latest_sha {
-                    sha.clone()
-                } else {
+    let config = match deploy_configs_api.get(&name).await {
+        Ok(config) => config,
+        Err(e) => {
+            log::error!("Failed to get DeployConfig {}/{}: {}", namespace, name, e);
+            return HttpResponse::NotFound()
+                .content_type("text/html; charset=utf-8")
+                .body(format!("DeployConfig {}/{} not found.", namespace, name));
+        }
+    };
+
+    let return_url = format!(
+        "/deploy?selected={}/{}&action={}&branch={}&sha={}",
+        namespace,
+        name,
+        form.get("action").unwrap_or(&"".to_string()),
+        form.get("branch").unwrap_or(&"".to_string()),
+        form.get("sha").unwrap_or(&"".to_string())
+    );
+
+    let resolved_version = ResolvedVersion::from_action(&action, &config, &conn);
+
+    let status = match &action {
+        Action::DeployLatest | Action::DeployBranch { .. } | Action::DeployCommit { .. } => {
+            match resolved_version {
+                ResolvedVersion::UnknownSha { sha }
+                | ResolvedVersion::TrackedSha { sha, build_time: _ } => {
+                    serde_json::json!({
+                        "status": {
+                            "currentBranch": "",
+                            "latestSha": "",
+                            "wantedSha": sha
+                        }
+                    })
+                }
+                ResolvedVersion::BranchTracked {
+                    sha,
+                    branch,
+                    build_time: _,
+                } => serde_json::json!({
+                    "status": {
+                        "currentBranch": branch,
+                        "latestSha": sha,
+                        "wantedSha": sha
+                    }
+                }),
+                ResolvedVersion::Undeployed => {
+                    serde_json::json!({
+                        "status": {
+                            "wantedSha": null
+                        }
+                    })
+                }
+                ResolvedVersion::ResolutionFailed => {
                     return HttpResponse::BadRequest()
                         .content_type("text/html; charset=utf-8")
                         .body("No latest SHA available for deployment.");
                 }
-            } else {
-                return HttpResponse::BadRequest()
-                    .content_type("text/html; charset=utf-8")
-                    .body("No status available for the DeployConfig.");
-            };
-
-            // Update the wanted SHA
-            let status = serde_json::json!({
-                "status": {
-                    "wantedSha": latest_sha
-                }
-            });
-
-            // Apply the status update
-            let patch = Patch::Merge(&status);
-            let params = PatchParams::default();
-
-            match deploy_configs_api
-                .patch_status(&name, &params, &patch)
-                .await
-            {
-                Ok(_) => {
-                    // Redirect back to the DeployConfig page with the selected config
-                    HttpResponse::SeeOther()
-                        .append_header((
-                            "Location",
-                            format!("/deploy?selected={}/{}", namespace, name),
-                        ))
-                        .finish()
-                }
-                Err(e) => {
-                    log::error!("Failed to update DeployConfig status: {}", e);
-                    HttpResponse::InternalServerError()
-                        .content_type("text/html; charset=utf-8")
-                        .body(format!("Failed to update DeployConfig status: {}", e))
-                }
             }
         }
-        Err(e) => {
-            log::error!("Failed to get DeployConfig {}/{}: {}", namespace, name, e);
-            HttpResponse::NotFound()
-                .content_type("text/html; charset=utf-8")
-                .body(format!("DeployConfig {}/{} not found.", namespace, name))
+        Action::ToggleAutodeploy => {
+            serde_json::json!({
+                "status": {
+                    "autodeploy": !config.current_autodeploy()
+                }
+            })
         }
-    }
-}
-
-/// Handler for undeploying (setting wantedSha to null)
-#[post("/api/undeploy/{namespace}/{name}")]
-pub async fn undeploy_config(
-    path: web::Path<(String, String)>,
-    client: Option<web::Data<Client>>,
-) -> impl Responder {
-    let (namespace, name) = path.into_inner();
-
-    // Check if Kubernetes client is available
-    let client = match client {
-        Some(client) => client,
-        None => {
-            return HttpResponse::ServiceUnavailable()
-                .content_type("text/html; charset=utf-8")
-                .body("Kubernetes client is not available. Undeploy functionality is disabled.");
-        }
-    };
-
-    // Get the DeployConfig
-    let deploy_configs_api: Api<DeployConfig> =
-        Api::namespaced(client.get_ref().clone(), &namespace);
-
-    match deploy_configs_api.get(&name).await {
-        Ok(__config) => {
-            // Set wantedSha to null
-            let status = serde_json::json!({
+        Action::Undeploy => {
+            serde_json::json!({
                 "status": {
                     "wantedSha": null
                 }
-            });
-
-            // Apply the status update
-            let patch = Patch::Merge(&status);
-            let params = PatchParams::default();
-
-            match deploy_configs_api
-                .patch_status(&name, &params, &patch)
-                .await
-            {
-                Ok(_) => {
-                    // Redirect back to the DeployConfig page with the selected config
-                    HttpResponse::SeeOther()
-                        .append_header((
-                            "Location",
-                            format!("/deploy?selected={}/{}", namespace, name),
-                        ))
-                        .finish()
-                }
-                Err(e) => {
-                    log::error!("Failed to update DeployConfig status: {}", e);
-                    HttpResponse::InternalServerError()
-                        .content_type("text/html; charset=utf-8")
-                        .body(format!("Failed to update DeployConfig status: {}", e))
-                }
-            }
+            })
         }
+    };
+
+    // Apply the status update
+    let patch = Patch::Merge(&status);
+    let params = PatchParams::default();
+    match deploy_configs_api
+        .patch_status(&name, &params, &patch)
+        .await
+    {
+        Ok(_) => (),
         Err(e) => {
-            log::error!("Failed to get DeployConfig {}/{}: {}", namespace, name, e);
-            HttpResponse::NotFound()
+            log::error!("Failed to update DeployConfig status: {}", e);
+            return HttpResponse::InternalServerError()
                 .content_type("text/html; charset=utf-8")
-                .body(format!("DeployConfig {}/{} not found.", namespace, name))
-        }
-    }
-}
-
-/// Handler for deploying a specific SHA
-#[post("/api/deploy-specific/{namespace}/{name}")]
-pub async fn deploy_specific_config(
-    path: web::Path<(String, String)>,
-    form: web::Form<HashMap<String, String>>,
-    client: Option<web::Data<Client>>,
-) -> impl Responder {
-    let (namespace, name) = path.into_inner();
-
-    // Get the SHA from the form
-    let sha = match form.get("sha") {
-        Some(sha) => sha,
-        None => {
-            return HttpResponse::BadRequest()
-                .content_type("text/html; charset=utf-8")
-                .body("No SHA provided.");
+                .body(format!("Failed to update DeployConfig status: {}", e));
         }
     };
 
-    // Validate SHA format (simple validation, at least 5 hex characters)
-    let sha_regex = Regex::new(r"^[0-9a-fA-F]{5,40}$").unwrap();
-    if !sha_regex.is_match(sha) {
-        return HttpResponse::BadRequest()
-            .content_type("text/html; charset=utf-8")
-            .body("Invalid SHA format. SHA must be 5-40 hex characters.");
-    }
-
-    // Check if Kubernetes client is available
-    let client = match client {
-        Some(client) => client,
-        None => {
-            return HttpResponse::ServiceUnavailable()
-                .content_type("text/html; charset=utf-8")
-                .body("Kubernetes client is not available. Deploy functionality is disabled.");
-        }
-    };
-
-    // Get the DeployConfig
-    let deploy_configs_api: Api<DeployConfig> =
-        Api::namespaced(client.get_ref().clone(), &namespace);
-
-    match deploy_configs_api.get(&name).await {
-        Ok(__config) => {
-            // Update the wanted SHA to the specified value
-            let status = serde_json::json!({
-                "status": {
-                    "wantedSha": sha
-                }
-            });
-
-            // Apply the status update
-            let patch = Patch::Merge(&status);
-            let params = PatchParams::default();
-
-            match deploy_configs_api
-                .patch_status(&name, &params, &patch)
-                .await
-            {
-                Ok(_) => {
-                    // Redirect back to the DeployConfig page with the selected config
-                    HttpResponse::SeeOther()
-                        .append_header((
-                            "Location",
-                            format!("/deploy?selected={}/{}", namespace, name),
-                        ))
-                        .finish()
-                }
-                Err(e) => {
-                    log::error!("Failed to update DeployConfig status: {}", e);
-                    HttpResponse::InternalServerError()
-                        .content_type("text/html; charset=utf-8")
-                        .body(format!("Failed to update DeployConfig status: {}", e))
-                }
-            }
-        }
-        Err(e) => {
-            log::error!("Failed to get DeployConfig {}/{}: {}", namespace, name, e);
-            HttpResponse::NotFound()
-                .content_type("text/html; charset=utf-8")
-                .body(format!("DeployConfig {}/{} not found.", namespace, name))
-        }
-    }
-}
-
-/// Handler for overriding the branch of a DeployConfig
-#[post("/api/override-branch/{namespace}/{name}")]
-pub async fn override_branch(
-    path: web::Path<(String, String)>,
-    form: web::Form<HashMap<String, String>>,
-    client: Option<web::Data<Client>>,
-    pool: web::Data<Pool<SqliteConnectionManager>>,
-) -> impl Responder {
-    let (namespace, name) = path.into_inner();
-    log::debug!(
-        "Received branch override request for {}/{}",
-        namespace,
-        name
-    );
-
-    // Get the branch from the form
-    let branch = match form.get("branch") {
-        Some(branch) => {
-            log::debug!("Branch override value: {}", branch);
-            branch.clone()
-        }
-        None => {
-            log::error!("No branch provided in form");
-            return HttpResponse::BadRequest()
-                .content_type("text/html; charset=utf-8")
-                .body("No branch provided.");
-        }
-    };
-
-    // Check if Kubernetes client is available
-    let client = match client {
-        Some(client) => {
-            log::debug!("Kubernetes client is available");
-            client
-        }
-        None => {
-            log::error!("Kubernetes client is not available");
-            return HttpResponse::ServiceUnavailable()
-                .content_type("text/html; charset=utf-8")
-                .body("Kubernetes client is not available");
-        }
-    };
-
-    // Get the DeployConfig
-    let deploy_configs_api: Api<DeployConfig> =
-        Api::namespaced(client.get_ref().clone(), &namespace);
-
-    match deploy_configs_api.get(&name).await {
-        Ok(config) => {
-            log::debug!("Found DeployConfig {}/{}", namespace, name);
-            log::debug!(
-                "Current branch: {:?}",
-                config
-                    .status
-                    .as_ref()
-                    .and_then(|s| s.current_branch.clone())
-            );
-
-            // Get the latest successful build for the new branch
-            let conn = match pool.get() {
-                Ok(conn) => conn,
-                Err(e) => {
-                    log::error!("Failed to get database connection: {}", e);
-                    return HttpResponse::InternalServerError()
-                        .content_type("text/html; charset=utf-8")
-                        .body("Failed to get database connection");
-                }
-            };
-
-            // Get the latest successful build for the new branch
-            let latest_sha = match get_latest_successful_build(
-                &config.spec.spec.repo.owner,
-                &config.spec.spec.repo.repo,
-                &branch,
-                &conn,
-            ) {
-                Some(commit) => {
-                    log::debug!(
-                        "Found latest successful build for branch {}: {}",
-                        branch,
-                        commit.sha
-                    );
-                    Some(commit.sha)
-                }
-                None => {
-                    log::debug!("No successful builds found for branch {}", branch);
-                    return HttpResponse::BadRequest()
-                        .content_type("text/html; charset=utf-8")
-                        .body(format!("No successful builds found for branch {}", branch));
-                }
-            };
-
-            // Update the status with the new branch and SHA
-            let status_patch = serde_json::json!({
-                "status": {
-                    "currentBranch": branch,
-                    "latestSha": latest_sha,
-                    "wantedSha": latest_sha
-                }
-            });
-
-            log::debug!(
-                "Status patch payload: {}",
-                serde_json::to_string_pretty(&status_patch).unwrap()
-            );
-
-            let patch = Patch::Merge(&status_patch);
-            let params = PatchParams::default();
-
-            match deploy_configs_api
-                .patch_status(&name, &params, &patch)
-                .await
-            {
-                Ok(updated_config) => {
-                    log::debug!(
-                        "Successfully updated DeployConfig status {}/{}",
-                        namespace,
-                        name
-                    );
-                    log::debug!("Updated DeployConfig status: {:?}", updated_config.status);
-                    // Redirect back to the DeployConfig page with the selected config
-                    HttpResponse::SeeOther()
-                        .append_header((
-                            "Location",
-                            format!("/deploy?selected={}/{}", namespace, name),
-                        ))
-                        .finish()
-                }
-                Err(e) => {
-                    log::error!("Failed to update DeployConfig status: {}", e);
-                    HttpResponse::InternalServerError()
-                        .content_type("text/html; charset=utf-8")
-                        .body(format!("Failed to update DeployConfig status: {}", e))
-                }
-            }
-        }
-        Err(e) => {
-            log::error!("Failed to get DeployConfig {}/{}: {}", namespace, name, e);
-            HttpResponse::NotFound()
-                .content_type("text/html; charset=utf-8")
-                .body(format!("DeployConfig {}/{} not found.", namespace, name))
-        }
-    }
-}
-
-/// Handler for toggling autodeploy
-#[post("/api/toggle-autodeploy/{namespace}/{name}")]
-pub async fn toggle_autodeploy(
-    path: web::Path<(String, String)>,
-    client: Option<web::Data<Client>>,
-) -> impl Responder {
-    let (namespace, name) = path.into_inner();
-
-    // Check if Kubernetes client is available
-    let client = match client {
-        Some(client) => client,
-        None => {
-            return HttpResponse::ServiceUnavailable()
-                .content_type("text/html; charset=utf-8")
-                .body("Kubernetes client is not available. Autodeploy toggle functionality is disabled.");
-        }
-    };
-
-    // Get the DeployConfig
-    let deploy_configs_api: Api<DeployConfig> =
-        Api::namespaced(client.get_ref().clone(), &namespace);
-
-    match deploy_configs_api.get(&name).await {
-        Ok(config) => {
-            // Get current autodeploy state
-            let current_autodeploy = config.current_autodeploy();
-
-            // Toggle the autodeploy state
-            let status = serde_json::json!({
-                "status": {
-                    "autodeploy": !current_autodeploy
-                }
-            });
-
-            // Apply the status update
-            let patch = Patch::Merge(&status);
-            let params = PatchParams::default();
-
-            match deploy_configs_api
-                .patch_status(&name, &params, &patch)
-                .await
-            {
-                Ok(_) => {
-                    // Redirect back to the DeployConfig page with the selected config
-                    HttpResponse::SeeOther()
-                        .append_header((
-                            "Location",
-                            format!("/deploy?selected={}/{}", namespace, name),
-                        ))
-                        .finish()
-                }
-                Err(e) => {
-                    log::error!("Failed to update DeployConfig status: {}", e);
-                    HttpResponse::InternalServerError()
-                        .content_type("text/html; charset=utf-8")
-                        .body(format!("Failed to update DeployConfig status: {}", e))
-                }
-            }
-        }
-        Err(e) => {
-            log::error!("Failed to get DeployConfig {}/{}: {}", namespace, name, e);
-            HttpResponse::NotFound()
-                .content_type("text/html; charset=utf-8")
-                .body(format!("DeployConfig {}/{} not found.", namespace, name))
-        }
-    }
+    // Redirect back to the DeployConfig page with the selected config
+    HttpResponse::SeeOther()
+        .append_header(("Location", return_url))
+        .finish()
 }

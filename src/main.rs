@@ -123,10 +123,6 @@ async fn start_http(
             app = app
                 .app_data(Data::new(client.clone()))
                 .service(deploy_config)
-                .service(undeploy_config)
-                .service(deploy_specific_config)
-                .service(override_branch)
-                .service(toggle_autodeploy);
         }
 
         app = app
