@@ -7,7 +7,6 @@ use kube::{
     ResourceExt,
 };
 use maud::{html, Markup, Render};
-use regex::Regex;
 use std::collections::HashMap;
 
 struct PreviewArrow;
@@ -23,15 +22,32 @@ struct GitRef(String);
 impl Render for GitRef {
     fn render(&self) -> Markup {
         html!(
-            span.git-ref {
+            span {
+            // span.git-ref {
                 (self.0.clone())
+            // }
             }
         )
     }
 }
 
-struct AutodeployStatus(bool);
+struct HumanTime(u64);
 
+impl Render for HumanTime {
+    fn render(&self) -> Markup {
+        let time = Utc.timestamp_millis_opt(self.0 as i64).unwrap();
+        let eastern = chrono_tz::America::New_York;
+        let local = time.with_timezone(&eastern);
+
+        html! {
+            time datetime=(time.to_rfc3339()) {
+                (local.format("%B %d at %I:%M %p"))
+            }
+        }
+    }
+}
+
+struct AutodeployStatus(bool);
 impl Render for AutodeployStatus {
     fn render(&self) -> Markup {
         if self.0 {
@@ -119,25 +135,33 @@ fn get_commit_by_sha(
         .unwrap()
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum ResolvedVersion {
     UnknownSha {
         sha: String,
     },
     TrackedSha {
         sha: String,
-        build_time: String,
+        build_time: u64,
     },
     BranchTracked {
         sha: String,
         branch: String,
-        build_time: String,
+        build_time: u64,
     },
     Undeployed,
     ResolutionFailed,
 }
 
 impl ResolvedVersion {
+    fn get_build_time(&self) -> Option<u64> {
+        match self {
+            ResolvedVersion::BranchTracked { build_time, .. }
+            | ResolvedVersion::TrackedSha { build_time, .. } => Some(build_time.clone()),
+            _ => None,
+        }
+    }
+
     // If config.status is None, return Undeployed
     // If config.status is Some, but wanted_sha is None, return Undeployed
     // If config.status is Some, and wanted_sha is Some, return BranchTracked
@@ -154,11 +178,13 @@ impl ResolvedVersion {
 
                     match commit {
                         Some(commit) => ResolvedVersion::BranchTracked {
-                            sha: sha.clone(),
+                            sha: sha.to_string(),
                             branch: status.current_branch.clone().unwrap(),
-                            build_time: commit.timestamp.to_string(),
+                            build_time: commit.timestamp as u64,
                         },
-                        None => ResolvedVersion::UnknownSha { sha: sha.clone() },
+                        None => ResolvedVersion::UnknownSha {
+                            sha: sha.to_string(),
+                        },
                     }
                 }
                 None => ResolvedVersion::Undeployed,
@@ -191,7 +217,7 @@ impl ResolvedVersion {
                     Some(commit) => ResolvedVersion::BranchTracked {
                         sha: commit.sha,
                         branch: branch.clone(),
-                        build_time: commit.timestamp.to_string(),
+                        build_time: commit.timestamp as u64,
                     },
                     None => ResolvedVersion::ResolutionFailed,
                 }
@@ -209,7 +235,7 @@ impl ResolvedVersion {
                     Some(commit) => ResolvedVersion::BranchTracked {
                         sha: commit.sha,
                         branch: branch.clone(),
-                        build_time: commit.timestamp.to_string(),
+                        build_time: commit.timestamp as u64,
                     },
                     None => ResolvedVersion::ResolutionFailed,
                 }
@@ -220,7 +246,7 @@ impl ResolvedVersion {
                 match commit {
                     Some(commit) => ResolvedVersion::TrackedSha {
                         sha: commit.sha,
-                        build_time: commit.timestamp.to_string(),
+                        build_time: commit.timestamp as u64,
                     },
                     None => ResolvedVersion::UnknownSha { sha: sha.clone() },
                 }
@@ -279,6 +305,10 @@ impl ResolvedVersion {
             }
         }
     }
+
+    fn is_undeployed(&self) -> bool {
+        matches!(self, ResolvedVersion::Undeployed)
+    }
 }
 
 /// Represents a transition between two resolved versions
@@ -290,10 +320,50 @@ struct DeployTransition {
 impl DeployTransition {
     /// Formats the transition for display
     fn format(&self) -> Markup {
-        html! {
-            (self.from.format(Some(&self.to)))
-            ( PreviewArrow {} )
-            (self.to.format(Some(&self.from)))
+        if self.from == self.to {
+            if self.from.is_undeployed() {
+                html! {
+                    "Already undeployed"
+                }
+            } else {
+                html! {
+                    (self.from.format(Some(&self.to)))
+                    span {
+                        " (up to date"
+                        @if let Some(build_time) = self.from.get_build_time() {
+                            ", built "
+                            (HumanTime(build_time))
+                        }
+                        ")"
+                    }
+                }
+            }
+        } else {
+            html! {
+                (self.from.format(Some(&self.to)))
+                @if !self.from.is_undeployed() {
+                    span {
+                        " (last deployed"
+                        @if let Some(build_time) = self.from.get_build_time() {
+                            ", built "
+                            (HumanTime(build_time))
+                        }
+                        ")"
+                    }
+                }
+                ( PreviewArrow {} )
+                (self.to.format(Some(&self.from)))
+                @if !self.to.is_undeployed() {
+                    span {
+                        " (latest built"
+                        @if let Some(build_time) = self.to.get_build_time() {
+                            ", "
+                            (HumanTime(build_time))
+                        }
+                        ")"
+                    }
+                }
+            }
         }
     }
 }
@@ -384,7 +454,12 @@ fn generate_preview(
             div class="preview-content" {
                 (generate_status_header(selected_config))
                 div class="preview-transition" {
-                    (preview_content)
+                    div class="preview-transition-header" {
+                        (selected_config.name_any())
+                    }
+                    div class="preview-transition-content" {
+                        (preview_content)
+                    }
                 }
             }
         }
@@ -789,6 +864,15 @@ pub async fn deploy_configs(
                     }
                     .preview-transition {
                         margin-top: 8px;
+                    }
+                    .preview-transition-header {
+                        font-size: 14px;
+                        font-weight: 600;
+                        color: #3a485a;
+                    }
+                    .preview-transition-content {
+                        font-size: 12px;
+                        color: #586d8d;
                     }
                     .autodeploy-status.autodeploy-enabled {
                         color: #00711f;
