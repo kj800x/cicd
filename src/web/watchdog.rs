@@ -114,14 +114,40 @@ impl PartialEq for WatchdogIssue {
 impl Eq for WatchdogIssue {}
 
 fn render_issue(issue: &WatchdogIssue) -> Markup {
+    let base_url = format!(
+        "/deploy?selected={}/{}",
+        issue.config.namespace().unwrap_or_default(),
+        issue.config.name_any()
+    );
+
+    let action_url = match &issue.issue_type {
+        WatchdogIssueType::NonDefaultBranch => {
+            // Link to deploy with default branch to fix the non-default branch issue
+            format!(
+                "{}&action=deploy&branch={}",
+                base_url, issue.config.spec.spec.repo.default_branch
+            )
+        }
+        WatchdogIssueType::AutodeployMismatch => {
+            format!("{}&action=toggle-autodeploy", base_url)
+        }
+        WatchdogIssueType::UndeployedWithAutodeploy => {
+            // Link to deploy with default branch since we want to deploy the standard version
+            format!(
+                "{}&action=deploy&branch={}",
+                base_url, issue.config.spec.spec.repo.default_branch
+            )
+        }
+        // For out of sync and failing builds, just link to the deploy page
+        WatchdogIssueType::OutOfSync | WatchdogIssueType::FailingBuild => base_url,
+    };
+
     html! {
         div class=(format!("watchdog-card {}", issue.issue_type.css_class())) {
             div class="watchdog-card-header" {
                 h3 class="watchdog-card-title" { (issue.issue_type.title()) }
                 span class="watchdog-card-config" {
-                    a href=(format!("/deploy?selected={}/{}",
-                        issue.config.namespace().unwrap_or_default(),
-                        issue.config.name_any())) {
+                    a href=(action_url) {
                         (format!("{}/{}",
                             issue.config.namespace().unwrap_or_default(),
                             issue.config.name_any()))
@@ -212,7 +238,11 @@ pub async fn watchdog(
                             format!(
                                 "Branch '{}' HEAD ({}) has a failing build",
                                 current_branch,
-                                &latest_sha[..7]
+                                if latest_sha.len() >= 7 {
+                                    &latest_sha[..7]
+                                } else {
+                                    latest_sha
+                                }
                             ),
                         ));
                     }
@@ -234,7 +264,19 @@ pub async fn watchdog(
                     issues.push(WatchdogIssue::new(
                         WatchdogIssueType::OutOfSync,
                         config.clone(),
-                        format!("Latest: {}, Wanted: {}", &latest[..7], &wanted[..7]),
+                        format!(
+                            "Latest: {}, Wanted: {}",
+                            if latest.len() >= 7 {
+                                &latest[..7]
+                            } else {
+                                latest
+                            },
+                            if wanted.len() >= 7 {
+                                &wanted[..7]
+                            } else {
+                                wanted
+                            }
+                        ),
                     ));
                 }
             }
@@ -266,7 +308,7 @@ pub async fn watchdog(
                         --info-color: #0969da;
                     }
                     body {
-                        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+                        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
                         background-color: white;
                         color: var(--text-color);
                         margin: 0;
