@@ -2,7 +2,7 @@ use crate::prelude::*;
 use rusqlite::Error;
 use serde_variant::to_variant_name;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub enum BuildStatus {
     None,
     Pending,

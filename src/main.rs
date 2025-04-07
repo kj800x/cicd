@@ -13,7 +13,6 @@ pub mod prelude {
     };
 
     pub use crate::resource::*;
-
     pub use crate::web::*;
 
     pub use crate::webhooks::{
@@ -67,6 +66,7 @@ mod webhooks;
 
 use futures_util::future;
 use prometheus::Registry;
+use web::{all_recent_builds, deploy_config, index, watchdog};
 
 use crate::discord::setup_discord;
 use crate::prelude::*;
@@ -116,7 +116,8 @@ async fn start_http(
             .route("/api/hey", web_get().to(manual_hello))
             .route("/deploy", web_get().to(deploy_configs))
             .route("/", web_get().to(index))
-            .route("/all-recent-builds", web_get().to(all_recent_builds));
+            .route("/all-recent-builds", web_get().to(all_recent_builds))
+            .route("/watchdog", web_get().to(watchdog));
 
         // Add Kubernetes client data if available
         if let Some(client) = &kube_client {

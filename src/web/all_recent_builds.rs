@@ -1,5 +1,5 @@
 use crate::prelude::*;
-use crate::web::pages::header;
+use crate::web::header;
 use chrono::{Local, TimeZone};
 
 /// Format a timestamp as a human-readable relative time

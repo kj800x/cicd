@@ -1,6 +1,6 @@
 use crate::db::Commit;
 use crate::prelude::*;
-use crate::web::pages::header;
+use crate::web::header;
 use kube::{
     api::{Api, Patch, PatchParams},
     client::Client,
@@ -126,7 +126,8 @@ fn get_latest_successful_build(
     commit
 }
 
-fn get_commit_by_sha(
+/// Get the commit by SHA
+pub fn get_commit_by_sha(
     sha: &str,
     conn: &PooledConnection<SqliteConnectionManager>,
 ) -> Option<Commit> {
