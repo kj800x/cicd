@@ -1,5 +1,2 @@
-- show current branch and autodeploy status on deploy config page
 - show ongoing builds on deploy config page
-- have a "health" page that shows deploys on branches, with autodeploy not matching its default, or with non-latest deployed
 - support CronJob deployments too
-- Replace the DeployConfig page with a react app.
