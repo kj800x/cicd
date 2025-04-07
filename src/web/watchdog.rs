@@ -1,6 +1,5 @@
-use crate::db::BuildStatus;
+use crate::db::{get_latest_completed_build, BuildStatus};
 use crate::prelude::*;
-use crate::web::deploy_configs::get_commit_by_sha;
 use crate::web::header;
 use kube::{api::Api, client::Client, ResourceExt};
 use maud::{html, Markup};
@@ -229,23 +228,28 @@ pub async fn watchdog(
                 .as_ref()
                 .unwrap_or(&config.spec.spec.repo.default_branch);
 
-            if let Some(latest_sha) = &status.latest_sha {
-                if let Some(commit) = get_commit_by_sha(latest_sha, &conn) {
-                    if commit.build_status == BuildStatus::Failure {
-                        issues.push(WatchdogIssue::new(
-                            WatchdogIssueType::FailingBuild,
-                            config.clone(),
-                            format!(
-                                "Branch '{}' HEAD ({}) has a failing build",
-                                current_branch,
-                                if latest_sha.len() >= 7 {
-                                    &latest_sha[..7]
-                                } else {
-                                    latest_sha
-                                }
-                            ),
-                        ));
-                    }
+            let commit = get_latest_completed_build(
+                &config.spec.spec.repo.owner,
+                &config.spec.spec.repo.repo,
+                current_branch,
+                &conn,
+            );
+
+            if let Some(commit) = commit {
+                if commit.build_status == BuildStatus::Failure {
+                    issues.push(WatchdogIssue::new(
+                        WatchdogIssueType::FailingBuild,
+                        config.clone(),
+                        format!(
+                            "Branch '{}' HEAD ({}) has a failing build",
+                            current_branch,
+                            if commit.sha.len() >= 7 {
+                                &commit.sha[..7]
+                            } else {
+                                &commit.sha
+                            }
+                        ),
+                    ));
                 }
             }
 
