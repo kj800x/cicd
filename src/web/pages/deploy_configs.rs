@@ -123,7 +123,11 @@ impl DeployedVersion {
 
     /// Formats the version for display, showing branch:sha if branch differs from comparison
     fn format(&self, other: Option<&DeployedVersion>) -> Markup {
-        let sha_prefix = &self.sha[..7];
+        let sha_prefix = if self.sha.len() >= 7 {
+            &self.sha[..7]
+        } else {
+            &self.sha
+        };
 
         // If we have a branch and it differs from the other version's branch, show it
         let show_branch = match (self.branch.as_ref(), other.and_then(|o| o.branch.as_ref())) {
@@ -323,31 +327,19 @@ fn generate_status_header(config: &DeployConfig) -> Markup {
 }
 
 /// Generate the preview markup for a deploy config action
-fn generate_preview(
-    selected_config: &DeployConfig,
-    action: Option<&str>,
-    query: &HashMap<String, String>,
-) -> Markup {
+fn generate_preview(selected_config: &DeployConfig, action: &Action) -> Markup {
     // Handle the action matching at the Rust level first
     let preview_content = match action {
-        Some("deploy-latest") | None => {
+        Action::DeployLatest => {
             DeployTransition::deploy_latest(selected_config.status.as_ref()).format()
         }
-        Some("track-branch") => {
-            if let Some(branch) = query.get("branch") {
-                DeployTransition::deploy_branch(selected_config.status.as_ref(), branch).format()
-            } else {
-                html! { "Select a branch" }
-            }
+        Action::DeployBranch { branch } => {
+            DeployTransition::deploy_branch(selected_config.status.as_ref(), branch).format()
         }
-        Some("specific-commit") => {
-            if let Some(sha) = query.get("sha") {
-                DeployTransition::deploy_commit(selected_config.status.as_ref(), sha).format()
-            } else {
-                html! { "Enter a commit SHA" }
-            }
+        Action::DeployCommit { sha } => {
+            DeployTransition::deploy_commit(selected_config.status.as_ref(), sha).format()
         }
-        Some("toggle-autodeploy") => {
+        Action::ToggleAutodeploy => {
             html! {
                 "Autodeploy "
                 @if selected_config.current_autodeploy() {
@@ -363,8 +355,7 @@ fn generate_preview(
                 }
             }
         }
-        Some("undeploy") => DeployTransition::undeploy(selected_config.status.as_ref()).format(),
-        _ => html! {},
+        Action::Undeploy => DeployTransition::undeploy(selected_config.status.as_ref()).format(),
     };
 
     // Wrap the preview content in the container markup
@@ -377,6 +368,54 @@ fn generate_preview(
                 }
             }
         }
+    }
+}
+
+enum Action {
+    DeployLatest,
+    DeployBranch { branch: String },
+    DeployCommit { sha: String },
+    ToggleAutodeploy,
+    Undeploy,
+}
+
+impl Action {
+    fn from_query(query: &HashMap<String, String>) -> Self {
+        match query
+            .get("action")
+            .unwrap_or(&"deploy".to_string())
+            .as_str()
+        {
+            "deploy" => {
+                if let Some(sha) = query.get("sha").filter(|s| !s.is_empty()) {
+                    Action::DeployCommit { sha: sha.clone() }
+                } else if let Some(branch) = query.get("branch").filter(|s| !s.is_empty()) {
+                    Action::DeployBranch {
+                        branch: branch.clone(),
+                    }
+                } else {
+                    Action::DeployLatest
+                }
+            }
+            "toggle-autodeploy" => Action::ToggleAutodeploy,
+            "undeploy" => Action::Undeploy,
+            _ => Action::DeployLatest,
+        }
+    }
+
+    fn is_deploy(&self) -> bool {
+        matches!(
+            self,
+            Action::DeployLatest | Action::DeployBranch { .. } | Action::DeployCommit { .. }
+        )
+    }
+
+    fn is_toggle_autodeploy(&self) -> bool {
+        matches!(self, Action::ToggleAutodeploy)
+    }
+
+    fn is_undeploy(&self) -> bool {
+        matches!(self, Action::Undeploy)
     }
 }
 
@@ -407,6 +446,8 @@ pub async fn deploy_configs(
                 .body("Failed to list DeployConfigs".to_string());
         }
     };
+
+    let action = Action::from_query(&query);
 
     // Sort DeployConfigs by namespace and name for the dropdown
     let mut sorted_deploy_configs = deploy_configs.clone();
@@ -647,6 +688,13 @@ pub async fn deploy_configs(
                     .action-input {
                         margin-bottom: 16px;
                     }
+                    .action-input label {
+                        display: block;
+                        margin-bottom: 4px;
+                        font-size: 14px;
+                        font-weight: 600;
+                        color: var(--secondary-text);
+                    }
                     .action-input input {
                         width: calc(100% - 24px);
                         padding: 5px 12px;
@@ -766,48 +814,40 @@ pub async fn deploy_configs(
                     }
                 } @else {
                     div class="content-container" {
-                            // Left side box with dropdown and actions
+                        // Left side box with dropdown and actions
                         div class="left-box" {
                                 h3 { "Deploy config" }
                                 form action="/deploy" method="get" {
                                     select name="selected" onchange="this.form.submit()" {
-                                @for config in &sorted_deploy_configs {
-                                    @let namespace = config.namespace().unwrap_or_default();
-                                    @let name = config.name_any();
-                                    @let selected = if let Some(default) = selected_config {
-                                        default.namespace().unwrap_or_default() == namespace && default.name_any() == name
-                                    } else {
-                                        false
-                                    };
+                                        @for config in &sorted_deploy_configs {
+                                            @let namespace = config.namespace().unwrap_or_default();
+                                            @let name = config.name_any();
+                                            @let selected = if let Some(default) = selected_config {
+                                                default.namespace().unwrap_or_default() == namespace && default.name_any() == name
+                                            } else {
+                                                false
+                                            };
 
-                                    option value=(format!("{}/{}", namespace, name)) selected[selected] {
-                                        (format!("{}/{}", namespace, name))
+                                            option value=(format!("{}/{}", namespace, name)) selected[selected] {
+                                                (format!("{}/{}", namespace, name))
+                                            }
+                                        }
                                     }
                                 }
-                            }
-                        }
 
-                        @if let Some(selected_config) = selected_config {
+                                @if let Some(selected_config) = selected_config {
+                                    @let current_branch = selected_config.status.as_ref().and_then(|status| status.current_branch.clone()).unwrap_or(selected_config.spec.spec.repo.default_branch.clone());
                                     form action="/deploy" method="get" {
                                         input type="hidden" name="selected" value=(format!("{}/{}", selected_config.namespace().unwrap_or_default(), selected_config.name_any()));
 
                                         div class="action-radio-group" {
                                             h4 { "Action" }
-                                            @let current_action = query.get("action");
                                             label class="action-radio" {
-                                                input type="radio" name="action" value="deploy-latest" checked[current_action.is_none() || current_action.unwrap() == "deploy-latest"] onchange="this.form.submit()";
-                                                "Deploy latest"
+                                                input type="radio" name="action" value="deploy" checked[action.is_deploy()] onchange="this.form.submit()";
+                                                "Deploy"
                                             }
                                             label class="action-radio" {
-                                                input type="radio" name="action" value="track-branch" checked[current_action.map_or(false, |a| a == "track-branch")] onchange="this.form.submit()";
-                                                "Deploy and switch branch"
-                                            }
-                                            label class="action-radio" {
-                                                input type="radio" name="action" value="specific-commit" checked[current_action.map_or(false, |a| a == "specific-commit")] onchange="this.form.submit()";
-                                                "Deploy specific commit"
-                                            }
-                                            label class="action-radio" {
-                                                input type="radio" name="action" value="toggle-autodeploy" checked[current_action.map_or(false, |a| a == "toggle-autodeploy")] onchange="this.form.submit()";
+                                                input type="radio" name="action" value="toggle-autodeploy" checked[action.is_toggle_autodeploy()] onchange="this.form.submit()";
                                                 @if selected_config.current_autodeploy() {
                                                     "Disable autodeploy"
                                                 } @else {
@@ -815,83 +855,60 @@ pub async fn deploy_configs(
                                                 }
                                             }
                                             label class="action-radio" {
-                                                input type="radio" name="action" value="undeploy" checked[current_action.map_or(false, |a| a == "undeploy")] onchange="this.form.submit()";
+                                                input type="radio" name="action" value="undeploy" checked[action.is_undeploy()] onchange="this.form.submit()";
                                                 "Undeploy"
                                             }
                                         }
-                                    }
 
-                                    @if let Some(action) = query.get("action") {
-                                        @match action.as_str() {
-                                            "deploy-latest" => {
-                                                form action=(format!("/api/deploy/{}/{}",
-                                                    selected_config.namespace().unwrap_or_default(),
-                                                    selected_config.name_any()))
-                                                    method="post" {
-                                                    button type="submit" class="primary-action-button" {
-                                                        "Deploy"
+                                        @if action.is_deploy() {
+                                            div class="action-input" {
+                                                label for="branch" { "Branch" }
+                                                input id="branch" type="text" name="branch" placeholder="Enter branch name" value=(query.get("branch").unwrap_or(&current_branch)) onblur="this.form.submit()";
+                                            }
+                                            div class="action-input" {
+                                                label for="sha" { "SHA override" }
+                                                input id="sha" type="text" name="sha" placeholder="Enter commit SHA" pattern="[0-9a-fA-F]{5,40}" value=(query.get("sha").unwrap_or(&"".to_string())) onblur="this.form.submit()";
+                                            }
+                                        }
+                                    }
+                                    @match action {
+                                        Action::DeployLatest | Action::DeployBranch { .. } | Action::DeployCommit { .. } => {
+                                            form action=(format!("/api/deploy/{}/{}",
+                                                selected_config.namespace().unwrap_or_default(),
+                                                selected_config.name_any()))
+                                                method="post"
+                                            {
+                                                input type="hidden" name="branch" value=(query.get("branch").unwrap_or(&"".to_string()));
+                                                input type="hidden" name="sha" value=(query.get("sha").unwrap_or(&"".to_string()));
+                                                button type="submit" class="primary-action-button" {
+                                                    "Deploy"
+                                                }
+                                            }
+                                        }
+                                        Action::ToggleAutodeploy => {
+                                            form action=(format!("/api/toggle-autodeploy/{}/{}",
+                                                selected_config.namespace().unwrap_or_default(),
+                                                selected_config.name_any()))
+                                                method="post"
+                                            {
+                                                button type="submit" class="primary-action-button" {
+                                                    @if selected_config.current_autodeploy() {
+                                                        "Disable autodeploy"
+                                                    } @else {
+                                                        "Enable autodeploy"
                                                     }
                                                 }
                                             }
-                                            "track-branch" => {
-                                                form action=(format!("/api/override-branch/{}/{}",
-                                                    selected_config.namespace().unwrap_or_default(),
-                                                    selected_config.name_any()))
-                                                    method="post" {
-                                                    div class="action-input" {
-                                                        input type="text" name="branch" placeholder="Enter branch name" required value=(query.get("branch").unwrap_or(&"".to_string()));
-                                                    }
-                                                    button type="submit" class="primary-action-button" {
-                                                        "Deploy"
-                                                    }
+                                        }
+                                        Action::Undeploy => {
+                                            form action=(format!("/api/undeploy/{}/{}",
+                                                selected_config.namespace().unwrap_or_default(),
+                                                selected_config.name_any()))
+                                                method="post"
+                                            {
+                                                button type="submit" class="primary-action-button danger" {
+                                                    "Undeploy"
                                                 }
-                                            }
-                                            "specific-commit" => {
-                                                form action=(format!("/api/deploy-specific/{}/{}",
-                                                    selected_config.namespace().unwrap_or_default(),
-                                                    selected_config.name_any()))
-                                                    method="post" {
-                                                    div class="action-input" {
-                                                        input type="text" name="sha" placeholder="Enter commit SHA" required pattern="[0-9a-fA-F]{5,40}" value=(query.get("sha").unwrap_or(&"".to_string()));
-                                                    }
-                                                    button type="submit" class="primary-action-button" {
-                                                        "Deploy"
-                                                    }
-                                                }
-                                            }
-                                            "toggle-autodeploy" => {
-                                                form action=(format!("/api/toggle-autodeploy/{}/{}",
-                                                    selected_config.namespace().unwrap_or_default(),
-                                                    selected_config.name_any()))
-                                                    method="post" {
-                                                    button type="submit" class="primary-action-button" {
-                                                        @if selected_config.current_autodeploy() {
-                                                            "Disable autodeploy"
-                                                        } @else {
-                                                            "Enable autodeploy"
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            "undeploy" => {
-                                                form action=(format!("/api/undeploy/{}/{}",
-                                                    selected_config.namespace().unwrap_or_default(),
-                                                    selected_config.name_any()))
-                                                    method="post" {
-                                                    button type="submit" class="primary-action-button danger" {
-                                                        "Undeploy"
-                                                    }
-                                                }
-                                            }
-                                            _ => {}
-                                                }
-                                            } @else {
-                                        form action=(format!("/api/deploy/{}/{}",
-                                            selected_config.namespace().unwrap_or_default(),
-                                            selected_config.name_any()))
-                                            method="post" {
-                                            button type="submit" class="primary-action-button" {
-                                                "Deploy"
                                             }
                                         }
                                     }
@@ -902,25 +919,28 @@ pub async fn deploy_configs(
                             @if let Some(selected_config) = selected_config {
                                 div class="right-box" {
                                     h1 {
-                                        @match query.get("action").unwrap_or(&"".to_string()).as_str() {
-                                            "track-branch" => {
+                                        @match action {
+                                            Action::DeployLatest => {
+                                                "Deploy of "
+                                            }
+                                            Action::DeployBranch { .. } => {
                                                 "Branch deploy of "
                                             }
-                                            "toggle-autodeploy" => {
+                                            Action::DeployCommit { .. } => {
+                                                "Commit deploy of "
+                                            }
+                                            Action::ToggleAutodeploy => {
                                                 "Option change for "
                                             }
-                                            "undeploy" => {
+                                            Action::Undeploy => {
                                                 "Undeploy of "
-                                            }
-                                            "deploy-latest" | "specific-commit" | _ => {
-                                                "Deploy of "
                                             }
                                         }
                                         strong {
                                             (format!("{}/{}", selected_config.namespace().unwrap_or_default(), selected_config.name_any()))
                                         }
                                     }
-                                    (generate_preview(selected_config, query.get("action").map(|s| s.as_str()), &query))
+                                    (generate_preview(selected_config, &action))
                                 }
                             }
                         }
