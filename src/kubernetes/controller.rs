@@ -480,7 +480,7 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
 /// Create a new deployment from the DeployConfig
 fn create_deployment_from_config(dc: &DeployConfig, commit_sha: &str) -> Deployment {
     // Create a new Deployment with the spec from the DeployConfig
-    let mut deployment = Deployment {
+    let deployment = Deployment {
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(dc.name_any()),
             namespace: dc.namespace(),
@@ -515,7 +515,7 @@ fn create_deployment_from_config(dc: &DeployConfig, commit_sha: &str) -> Deploym
 /// Create a new cronjob from the DeployConfig
 fn create_cronjob_from_config(dc: &DeployConfig, commit_sha: &str) -> CronJob {
     // Create a new CronJob with the spec from the DeployConfig
-    let mut cronjob = CronJob {
+    let cronjob = CronJob {
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(dc.name_any()),
             namespace: dc.namespace(),
