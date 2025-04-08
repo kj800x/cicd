@@ -117,7 +117,8 @@ async fn start_http(
             .route("/deploy", web_get().to(deploy_configs))
             .route("/", web_get().to(index))
             .route("/all-recent-builds", web_get().to(all_recent_builds))
-            .route("/watchdog", web_get().to(watchdog));
+            .route("/watchdog", web_get().to(watchdog))
+            .route("/assets/htmx.min.js", web_get().to(htmx_js));
 
         // Add Kubernetes client data if available
         if let Some(client) = &kube_client {

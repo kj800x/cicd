@@ -464,6 +464,7 @@ pub async fn index(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Respo
                     }
                     "#
                 }
+                (header::scripts())
             }
             body {
                 (header::render("branches"))

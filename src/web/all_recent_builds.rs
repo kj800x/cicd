@@ -299,6 +299,7 @@ pub async fn all_recent_builds(pool: web::Data<Pool<SqliteConnectionManager>>) -
                     }
                     "#
                 }
+                (header::scripts())
             }
             body {
                 (header::render("builds"))

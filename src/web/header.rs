@@ -86,3 +86,10 @@ pub fn styles() -> &'static str {
     }
     "#
 }
+
+/// Common scripts for all pages
+pub fn scripts() -> Markup {
+    html! {
+        script src="/assets/htmx.min.js" {}
+    }
+}

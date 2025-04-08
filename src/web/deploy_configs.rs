@@ -946,6 +946,7 @@ pub async fn deploy_configs(
                     }
                     "#
                 }
+                (header::scripts())
                 script {
                     r#"
                     function updateSelection() {

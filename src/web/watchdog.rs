@@ -434,6 +434,7 @@ pub async fn watchdog(
                     "#
                     (header::styles())
                 }
+                (header::scripts())
             }
             body {
                 (header::render("watchdog"))
