@@ -1,4 +1,4 @@
-use crate::db::Commit;
+use crate::db::{get_latest_build, get_latest_completed_build, Commit};
 use crate::prelude::*;
 use crate::web::header;
 use kube::{
@@ -42,7 +42,7 @@ impl Render for GitRef {
     }
 }
 
-struct HumanTime(u64);
+pub struct HumanTime(pub u64);
 
 impl Render for HumanTime {
     fn render(&self) -> Markup {
@@ -148,7 +148,14 @@ pub fn get_commit_by_sha(
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum ResolvedVersion {
+pub enum BuildFilter {
+    Any,
+    Completed,
+    Successful,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResolvedVersion {
     UnknownSha {
         sha: String,
     },
@@ -200,10 +207,11 @@ impl ResolvedVersion {
         }
     }
 
-    fn from_action(
+    pub fn from_action(
         action: &Action,
         config: &DeployConfig,
         conn: &PooledConnection<SqliteConnectionManager>,
+        build_filter: BuildFilter,
     ) -> Self {
         match action {
             Action::DeployLatest => {
@@ -213,13 +221,26 @@ impl ResolvedVersion {
                     .and_then(|s| s.current_branch.clone())
                     .unwrap_or(config.spec.spec.repo.default_branch.clone());
 
-                // Get the latest successful build for the current branch
-                let commit = get_latest_successful_build(
-                    &config.spec.spec.repo.owner,
-                    &config.spec.spec.repo.repo,
-                    &branch,
-                    conn,
-                );
+                let commit = match build_filter {
+                    BuildFilter::Any => get_latest_build(
+                        &config.spec.spec.repo.owner,
+                        &config.spec.spec.repo.repo,
+                        &branch,
+                        conn,
+                    ),
+                    BuildFilter::Completed => get_latest_completed_build(
+                        &config.spec.spec.repo.owner,
+                        &config.spec.spec.repo.repo,
+                        &branch,
+                        conn,
+                    ),
+                    BuildFilter::Successful => get_latest_successful_build(
+                        &config.spec.spec.repo.owner,
+                        &config.spec.spec.repo.repo,
+                        &branch,
+                        conn,
+                    ),
+                };
 
                 match commit {
                     Some(commit) => ResolvedVersion::BranchTracked {
@@ -231,13 +252,26 @@ impl ResolvedVersion {
                 }
             }
             Action::DeployBranch { branch } => {
-                // Get the latest successful build for the current branch
-                let commit = get_latest_successful_build(
-                    &config.spec.spec.repo.owner,
-                    &config.spec.spec.repo.repo,
-                    &branch,
-                    conn,
-                );
+                let commit = match build_filter {
+                    BuildFilter::Any => get_latest_build(
+                        &config.spec.spec.repo.owner,
+                        &config.spec.spec.repo.repo,
+                        &branch,
+                        conn,
+                    ),
+                    BuildFilter::Completed => get_latest_completed_build(
+                        &config.spec.spec.repo.owner,
+                        &config.spec.spec.repo.repo,
+                        &branch,
+                        conn,
+                    ),
+                    BuildFilter::Successful => get_latest_successful_build(
+                        &config.spec.spec.repo.owner,
+                        &config.spec.spec.repo.repo,
+                        &branch,
+                        conn,
+                    ),
+                };
 
                 match commit {
                     Some(commit) => ResolvedVersion::BranchTracked {
@@ -278,7 +312,7 @@ impl ResolvedVersion {
     }
 
     /// Formats the version for display, showing branch:sha if branch differs from comparison
-    fn format(&self, other: Option<&ResolvedVersion>, owner: &str, repo: &str) -> Markup {
+    pub fn format(&self, other: Option<&ResolvedVersion>, owner: &str, repo: &str) -> Markup {
         match self {
             ResolvedVersion::UnknownSha { sha } => {
                 html!((GitRef(sha.clone(), owner.to_string(), repo.to_string(), false)))
@@ -474,7 +508,12 @@ fn generate_preview(
         | Action::DeployCommit { .. }
         | Action::Undeploy => DeployTransition {
             from: ResolvedVersion::from_config(selected_config, conn),
-            to: ResolvedVersion::from_action(action, selected_config, conn),
+            to: ResolvedVersion::from_action(
+                action,
+                selected_config,
+                conn,
+                BuildFilter::Successful,
+            ),
         }
         .format(&owner, &repo),
         Action::ToggleAutodeploy => {
@@ -500,6 +539,8 @@ fn generate_preview(
         div class="preview-container" {
             div class="preview-content" {
                 (generate_status_header(selected_config, &owner, &repo))
+                div.deploy-status-container hx-get=(format!("/fragments/deploy-status/{}/{}", selected_config.namespace().unwrap_or("default".to_string()), selected_config.name_any())) hx-trigger="load, every 2s" {}
+                div.build-status-container hx-get=(format!("/fragments/build-status/{}/{}?{}", selected_config.namespace().unwrap_or("default".to_string()), selected_config.name_any(), action.as_params())) hx-trigger="load, every 2s" {}
                 div class="preview-transition" {
                     div class="preview-transition-header" {
                         (selected_config.name_any())
@@ -513,7 +554,7 @@ fn generate_preview(
     }
 }
 
-enum Action {
+pub enum Action {
     DeployLatest,
     DeployBranch { branch: String },
     DeployCommit { sha: String },
@@ -522,7 +563,7 @@ enum Action {
 }
 
 impl Action {
-    fn from_query(query: &HashMap<String, String>) -> Self {
+    pub fn from_query(query: &HashMap<String, String>) -> Self {
         match query
             .get("action")
             .unwrap_or(&"deploy".to_string())
@@ -542,6 +583,16 @@ impl Action {
             "toggle-autodeploy" => Action::ToggleAutodeploy,
             "undeploy" => Action::Undeploy,
             _ => Action::DeployLatest,
+        }
+    }
+
+    pub fn as_params(&self) -> String {
+        match self {
+            Action::DeployLatest => "action=deploy".to_string(),
+            Action::DeployBranch { branch } => format!("action=deploy&branch={}", branch),
+            Action::DeployCommit { sha } => format!("action=deploy&sha={}", sha),
+            Action::ToggleAutodeploy => "action=toggle-autodeploy".to_string(),
+            Action::Undeploy => "action=undeploy".to_string(),
         }
     }
 
@@ -1142,7 +1193,8 @@ pub async fn deploy_config(
         form.get("sha").unwrap_or(&"".to_string())
     );
 
-    let resolved_version = ResolvedVersion::from_action(&action, &config, &conn);
+    let resolved_version =
+        ResolvedVersion::from_action(&action, &config, &conn, BuildFilter::Successful);
 
     let status = match &action {
         Action::DeployLatest | Action::DeployBranch { .. } | Action::DeployCommit { .. } => {

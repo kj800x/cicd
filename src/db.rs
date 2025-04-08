@@ -599,6 +599,50 @@ pub fn get_commits_since(
     Ok(commits)
 }
 
+pub fn get_latest_build(
+    owner: &str,
+    repo: &str,
+    branch: &str,
+    conn: &PooledConnection<SqliteConnectionManager>,
+) -> Option<Commit> {
+    let repo_id = match get_repo(conn, owner, repo).unwrap() {
+        Some(repo) => repo.id,
+        None => return None,
+    };
+
+    let branch_id = match get_branch_by_name(&branch, repo_id as u64, conn).unwrap() {
+        Some(branch) => branch.id,
+        None => return None,
+    };
+
+    let commit = conn
+        .prepare(
+            r#"
+            SELECT c.id, c.sha, c.message, c.timestamp, c.build_status, c.build_url
+            FROM git_commit c
+            JOIN git_commit_branch cb ON c.sha = cb.commit_sha
+            WHERE cb.branch_id = ?1
+            ORDER BY c.timestamp DESC
+            LIMIT 1
+            "#,
+        )
+        .unwrap()
+        .query_row([branch_id], |row| {
+            Ok(Commit {
+                id: row.get(0)?,
+                sha: row.get(1)?,
+                message: row.get(2)?,
+                timestamp: row.get(3)?,
+                build_status: row.get::<_, Option<String>>(4)?.into(),
+                build_url: row.get(5)?,
+            })
+        })
+        .optional()
+        .unwrap();
+
+    commit
+}
+
 pub fn get_latest_completed_build(
     owner: &str,
     repo: &str,
