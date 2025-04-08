@@ -3,6 +3,7 @@ use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::Pod;
 use kube::{Api, Client, ResourceExt};
 use maud::{html, Markup};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub async fn deploy_status(selected_config: &DeployConfig) -> Vec<Markup> {
     // Initialize Kubernetes client
@@ -36,6 +37,40 @@ pub async fn deploy_status(selected_config: &DeployConfig) -> Vec<Markup> {
     if let Some(status) = &deployment.status {
         if let Some(conditions) = &status.conditions {
             for condition in conditions {
+                if condition.type_ == "Progressing"
+                    && condition.status == "True"
+                    && condition.reason.as_deref() == Some("NewReplicaSetAvailable")
+                {
+                    let transition_time = condition
+                        .last_transition_time
+                        .as_ref()
+                        .map(|t| t.0.timestamp_millis() as u128)
+                        .unwrap_or(0);
+
+                    // only show if transition_time is within the last 5 minutes
+                    if transition_time
+                        > SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis()
+                            - 300000
+                    {
+                        let markup = html! {
+                            div.alert.alert-success {
+                                div class="alert-header" {
+                                    "Recent deployment succeeded"
+                                }
+                                div class="alert-content" {
+                                    div class="details" {
+                                        span { "Deployment completed successfully at " (HumanTime(transition_time as u64)) }
+                                    }
+                                }
+                            }
+                        };
+                        alerts.push(markup);
+                    }
+                }
+
                 if condition.type_ == "Progressing"
                     && condition.status == "True"
                     && condition.reason.as_deref() != Some("NewReplicaSetAvailable")

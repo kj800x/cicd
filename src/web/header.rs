@@ -104,6 +104,10 @@ pub fn styles() -> &'static str {
         background-color: #fef8f0;
         border-color: #fae0b5;
     }
+    .alert-success {
+        background-color: #e5f8f6;
+        border-color: #7fded2;
+    }
     .alert-content .details {
         display: flex;
         flex-direction: column;
