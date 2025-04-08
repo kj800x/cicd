@@ -493,8 +493,7 @@ fn generate_status_header(config: &DeployConfig, owner: &str, repo: &str) -> Mar
     }
 }
 
-/// Generate the preview markup for a deploy config action
-fn generate_preview(
+pub async fn render_preview_content(
     selected_config: &DeployConfig,
     action: &Action,
     conn: &PooledConnection<SqliteConnectionManager>,
@@ -534,20 +533,46 @@ fn generate_preview(
         }
     };
 
+    let mut alerts = vec![];
+    for alert in deploy_status(selected_config).await {
+        alerts.push(alert);
+    }
+    for alert in build_status(action, selected_config, conn).await {
+        alerts.push(alert);
+    }
+
+    html! {
+        @for alert in alerts {
+            (alert)
+        }
+        div class="preview-transition" {
+            div class="preview-transition-header" {
+                (selected_config.name_any())
+            }
+            div class="preview-transition-content" {
+                (preview_content)
+            }
+        }
+    }
+}
+
+/// Generate the preview markup for a deploy config action
+async fn generate_preview(
+    selected_config: &DeployConfig,
+    action: &Action,
+    conn: &PooledConnection<SqliteConnectionManager>,
+) -> Markup {
+    let owner = selected_config.spec.spec.repo.owner.clone();
+    let repo = selected_config.spec.spec.repo.repo.clone();
+
     // Wrap the preview content in the container markup
     html! {
         div class="preview-container" {
             div class="preview-content" {
                 (generate_status_header(selected_config, &owner, &repo))
-                div.deploy-status-container hx-get=(format!("/fragments/deploy-status/{}/{}", selected_config.namespace().unwrap_or("default".to_string()), selected_config.name_any())) hx-trigger="load, every 2s" {}
-                div.build-status-container hx-get=(format!("/fragments/build-status/{}/{}?{}", selected_config.namespace().unwrap_or("default".to_string()), selected_config.name_any(), action.as_params())) hx-trigger="load, every 2s" {}
-                div class="preview-transition" {
-                    div class="preview-transition-header" {
-                        (selected_config.name_any())
-                    }
-                    div class="preview-transition-content" {
-                        (preview_content)
-                    }
+
+                div.preview-content-poll-wrapper hx-get=(format!("/fragments/deploy-preview/{}/{}?{}", selected_config.namespace().unwrap_or("default".to_string()), selected_config.name_any(), action.as_params())) hx-trigger="load, every 2s" {
+                    (render_preview_content(selected_config, action, conn).await)
                 }
             }
         }
@@ -1133,7 +1158,7 @@ pub async fn deploy_configs(
                                             (format!("{}/{}", selected_config.namespace().unwrap_or_default(), selected_config.name_any()))
                                         }
                                     }
-                                    (generate_preview(selected_config, &action, &conn))
+                                    (generate_preview(selected_config, &action, &conn).await)
                                 }
                             }
                         }

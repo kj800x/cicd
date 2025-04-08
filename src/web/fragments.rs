@@ -4,37 +4,17 @@ use k8s_openapi::api::core::v1::Pod;
 use kube::{Api, Client, ResourceExt};
 use maud::{html, Markup};
 
-/// HTMX endpoint for fetching deploy status
-pub async fn deploy_status(path: web::Path<(String, String)>) -> impl Responder {
-    let (namespace, name) = path.into_inner();
-
+pub async fn deploy_status(selected_config: &DeployConfig) -> Vec<Markup> {
     // Initialize Kubernetes client
     let client = match Client::try_default().await {
         Ok(client) => client,
         Err(e) => {
             log::error!("Failed to initialize Kubernetes client: {}", e);
-            return HttpResponse::InternalServerError()
-                .content_type("text/html; charset=utf-8")
-                .body("Failed to connect to Kubernetes".to_string());
+            panic!("Failed to initialize Kubernetes client");
         }
     };
-    let deploy_configs_api: Api<DeployConfig> = Api::all(client.clone());
-    let deploy_configs = match deploy_configs_api.list(&Default::default()).await {
-        Ok(list) => list.items,
-        Err(e) => {
-            log::error!("Failed to list DeployConfigs: {}", e);
-            return HttpResponse::InternalServerError()
-                .content_type("text/html; charset=utf-8")
-                .body("Failed to list DeployConfigs".to_string());
-        }
-    };
-
-    let selected_config = deploy_configs
-        .into_iter()
-        .find(|config| {
-            config.namespace().unwrap_or_default() == namespace && config.name_any() == name
-        })
-        .unwrap();
+    let namespace = selected_config.namespace().unwrap_or_default();
+    let name = selected_config.name_any();
 
     // Get the deployment status
     let deployments_api: Api<Deployment> = Api::namespaced(client.clone(), &namespace);
@@ -42,15 +22,11 @@ pub async fn deploy_status(path: web::Path<(String, String)>) -> impl Responder 
         Ok(deployment) => deployment,
         Err(kube::Error::Api(kube::error::ErrorResponse { code: 404, .. })) => {
             // Deployment doesn't exist yet
-            return HttpResponse::Ok()
-                .content_type("text/html; charset=utf-8")
-                .body("");
+            return vec![];
         }
         Err(e) => {
             log::error!("Failed to get deployment: {}", e);
-            return HttpResponse::InternalServerError()
-                .content_type("text/html; charset=utf-8")
-                .body("Failed to get deployment status".to_string());
+            panic!("Failed to get deployment status");
         }
     };
 
@@ -93,9 +69,7 @@ pub async fn deploy_status(path: web::Path<(String, String)>) -> impl Responder 
         Ok(pods) => pods.items,
         Err(e) => {
             log::error!("Failed to list pods: {}", e);
-            return HttpResponse::InternalServerError()
-                .content_type("text/html; charset=utf-8")
-                .body("Failed to get pod status".to_string());
+            panic!("Failed to get pod status");
         }
     };
 
@@ -177,62 +151,14 @@ pub async fn deploy_status(path: web::Path<(String, String)>) -> impl Responder 
         }
     }
 
-    // Return all alerts or empty response
-    if !alerts.is_empty() {
-        let markup = html! {
-            @for alert in alerts {
-                (alert)
-            }
-        };
-        HttpResponse::Ok()
-            .content_type("text/html; charset=utf-8")
-            .body(markup.into_string())
-    } else {
-        HttpResponse::Ok()
-            .content_type("text/html; charset=utf-8")
-            .body("")
-    }
+    alerts
 }
 
-/// HTMX endpoint for fetching build status
 pub async fn build_status(
-    path: web::Path<(String, String)>,
-    query: web::Query<std::collections::HashMap<String, String>>,
-    pool: web::Data<Pool<SqliteConnectionManager>>,
-) -> impl Responder {
-    let (namespace, name) = path.into_inner();
-    let action_params = query.into_inner();
-    let conn = pool.get().unwrap();
-
-    // Initialize Kubernetes client
-    let client = match Client::try_default().await {
-        Ok(client) => client,
-        Err(e) => {
-            log::error!("Failed to initialize Kubernetes client: {}", e);
-            return HttpResponse::InternalServerError()
-                .content_type("text/html; charset=utf-8")
-                .body("Failed to connect to Kubernetes".to_string());
-        }
-    };
-    let deploy_configs_api: Api<DeployConfig> = Api::all(client.clone());
-    let deploy_configs = match deploy_configs_api.list(&Default::default()).await {
-        Ok(list) => list.items,
-        Err(e) => {
-            log::error!("Failed to list DeployConfigs: {}", e);
-            return HttpResponse::InternalServerError()
-                .content_type("text/html; charset=utf-8")
-                .body("Failed to list DeployConfigs".to_string());
-        }
-    };
-    let selected_config = deploy_configs
-        .into_iter()
-        .find(|config| {
-            config.namespace().unwrap_or_default() == namespace && config.name_any() == name
-        })
-        .unwrap();
-
-    let action = Action::from_query(&action_params);
-
+    action: &Action,
+    selected_config: &DeployConfig,
+    conn: &PooledConnection<SqliteConnectionManager>,
+) -> Vec<Markup> {
     let resolved_version =
         ResolvedVersion::from_action(&action, &selected_config, &conn, BuildFilter::Any);
 
@@ -245,9 +171,7 @@ pub async fn build_status(
             }
         };
 
-        return HttpResponse::Ok()
-            .content_type("text/html; charset=utf-8")
-            .body(markup.into_string());
+        return vec![markup];
     }
 
     let commit = match &resolved_version {
@@ -262,16 +186,12 @@ pub async fn build_status(
 
     let commit = match commit {
         Some(commit) => commit,
-        None => {
-            return HttpResponse::Ok()
-                .content_type("text/html; charset=utf-8")
-                .body("")
-        }
+        None => return vec![],
     };
 
-    let markup: Option<Markup> = match commit.build_status {
-        BuildStatus::Success => None,
-        BuildStatus::Pending | BuildStatus::None | BuildStatus::Failure => Some(html! {
+    let markup = match commit.build_status {
+        BuildStatus::Success => vec![],
+        BuildStatus::Pending | BuildStatus::None | BuildStatus::Failure => vec![html! {
           div.alert.alert-danger[matches!(commit.build_status, BuildStatus::Failure)].alert-warning[matches!(commit.build_status, BuildStatus::None | BuildStatus::Pending)] {
             div class="alert-header" {
               @match commit.build_status {
@@ -308,15 +228,47 @@ pub async fn build_status(
               }
             }
           }
-        }),
+        }],
     };
 
-    match markup {
-        Some(markup) => HttpResponse::Ok()
-            .content_type("text/html; charset=utf-8")
-            .body(markup.into_string()),
-        None => HttpResponse::Ok()
-            .content_type("text/html; charset=utf-8")
-            .body(""),
-    }
+    markup
+}
+
+pub async fn get_deploy_config(namespace: &str, name: &str) -> Option<DeployConfig> {
+    let client = match Client::try_default().await {
+        Ok(client) => client,
+        Err(e) => {
+            log::error!("Failed to initialize Kubernetes client: {}", e);
+            return None;
+        }
+    };
+    let deploy_configs_api: Api<DeployConfig> = Api::all(client.clone());
+    let deploy_configs = match deploy_configs_api.list(&Default::default()).await {
+        Ok(list) => list.items,
+        Err(e) => {
+            log::error!("Failed to list DeployConfigs: {}", e);
+            return None;
+        }
+    };
+
+    deploy_configs.into_iter().find(|config| {
+        config.namespace().unwrap_or_default() == namespace && config.name_any() == name
+    })
+}
+
+pub async fn deploy_preview(
+    path: web::Path<(String, String)>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+    pool: web::Data<Pool<SqliteConnectionManager>>,
+) -> impl Responder {
+    let (namespace, name) = path.into_inner();
+    let action_params = query.into_inner();
+    let conn = pool.get().unwrap();
+    let selected_config = get_deploy_config(&namespace, &name).await.unwrap();
+    let action = Action::from_query(&action_params);
+    let markup = render_preview_content(&selected_config, &action, &conn).await;
+
+    HttpResponse::Ok()
+        .content_type("text/html; charset=utf-8")
+        .body(markup.into_string())
 }

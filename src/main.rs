@@ -120,12 +120,8 @@ async fn start_http(
             .route("/watchdog", web_get().to(watchdog))
             .route("/assets/htmx.min.js", web_get().to(htmx_js))
             .route(
-                "/fragments/deploy-status/{namespace}/{name}",
-                web_get().to(deploy_status),
-            )
-            .route(
-                "/fragments/build-status/{namespace}/{name}",
-                web_get().to(build_status),
+                "/fragments/deploy-preview/{namespace}/{name}",
+                web_get().to(deploy_preview),
             );
 
         // Add Kubernetes client data if available
