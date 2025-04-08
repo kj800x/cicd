@@ -1,2 +1,3 @@
-- show ongoing builds on deploy config page
+- When builds complete revalidate displayed sha preview
+- Display current deployment status on the deploy config page
 - support CronJob deployments too
