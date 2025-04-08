@@ -1,4 +1,3 @@
-use k8s_openapi::api::apps::v1::DeploymentSpec;
 use kube::CustomResource;
 use serde::{Deserialize, Serialize};
 
@@ -46,6 +45,14 @@ pub struct DeployConfigStatus {
     pub autodeploy: Option<bool>,
 }
 
+/// The type of resource to manage
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum ResourceType {
+    Deployment,
+    CronJob,
+}
+
 /// DeployConfig spec fields represent the desired state for a deployment
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct DeployConfigSpecFields {
@@ -54,8 +61,11 @@ pub struct DeployConfigSpecFields {
     /// Autodeploy flag
     #[serde(default)]
     pub autodeploy: bool,
-    /// Deployment specification (from Kubernetes Deployment resource)
-    pub spec: Box<DeploymentSpec>,
+    /// The type of resource to manage
+    #[serde(rename = "resourceType")]
+    pub resource_type: ResourceType,
+    /// Resource specification (Deployment or CronJob)
+    pub spec: Box<serde_json::Value>,
 }
 
 /// The DeployConfig CustomResource
@@ -73,10 +83,11 @@ pub struct DeployConfigSpecFields {
     printcolumn = r#"{"name":"Current SHA", "jsonPath":".status.currentSha", "type":"string"}"#,
     printcolumn = r#"{"name":"Latest SHA", "jsonPath":".status.latestSha", "type":"string"}"#,
     printcolumn = r#"{"name":"Wanted SHA", "jsonPath":".status.wantedSha", "type":"string"}"#,
+    printcolumn = r#"{"name":"Resource Type", "jsonPath":".spec.resourceType", "type":"string"}"#,
     printcolumn = r#"{"name":"Autodeploy", "jsonPath":".spec.autodeploy", "type":"boolean"}"#
 )]
 pub struct DeployConfigSpec {
-    /// Repository information and Deployment spec
+    /// Repository information and resource spec
     #[serde(flatten)]
     pub spec: DeployConfigSpecFields,
 }
