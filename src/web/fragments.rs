@@ -3,7 +3,7 @@ use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::Pod;
 use kube::{Api, Client, ResourceExt};
 use maud::{html, Markup};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub async fn deploy_status(selected_config: &DeployConfig) -> Vec<Markup> {
     // Initialize Kubernetes client
