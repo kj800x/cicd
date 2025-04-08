@@ -571,7 +571,7 @@ async fn generate_preview(
             div class="preview-content" {
                 (generate_status_header(selected_config, &owner, &repo))
 
-                div.preview-content-poll-wrapper hx-get=(format!("/fragments/deploy-preview/{}/{}?{}", selected_config.namespace().unwrap_or("default".to_string()), selected_config.name_any(), action.as_params())) hx-trigger="load, every 2s" {
+                div.preview-content-poll-wrapper hx-get=(format!("/fragments/deploy-preview/{}/{}?{}", selected_config.namespace().unwrap_or("default".to_string()), selected_config.name_any(), action.as_params())) hx-trigger="load, every 2s" hx-swap="morph:innerHTML" {
                     (render_preview_content(selected_config, action, conn).await)
                 }
             }
@@ -1037,7 +1037,7 @@ pub async fn deploy_configs(
                     "#
                 }
             }
-            body {
+            body hx-ext="morph" {
                 (header::render("deploy"))
                 div class="content" {
                 @if sorted_deploy_configs.is_empty() {

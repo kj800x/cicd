@@ -139,5 +139,7 @@ Fragment markup:
 pub fn scripts() -> Markup {
     html! {
         script src="/assets/htmx.min.js" {}
+        script src="/assets/idiomorph.min.js" {}
+        script src="/assets/idiomorph-ext.min.js" {}
     }
 }

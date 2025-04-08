@@ -119,6 +119,11 @@ async fn start_http(
             .route("/all-recent-builds", web_get().to(all_recent_builds))
             .route("/watchdog", web_get().to(watchdog))
             .route("/assets/htmx.min.js", web_get().to(htmx_js))
+            .route("/assets/idiomorph.min.js", web_get().to(idiomorph_js))
+            .route(
+                "/assets/idiomorph-ext.min.js",
+                web_get().to(idiomorph_ext_js),
+            )
             .route(
                 "/fragments/deploy-preview/{namespace}/{name}",
                 web_get().to(deploy_preview),
