@@ -90,6 +90,7 @@ pub fn styles() -> &'static str {
     .alert {
         padding: 16px;
         border: 2px solid grey;
+        margin: 16px 0;
     }
     .alert-header {
         font-size: 1.4em;
