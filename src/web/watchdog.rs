@@ -210,14 +210,14 @@ pub async fn watchdog(
             }
 
             // Check for autodeploy mismatch
-            if status.autodeploy != Some(config.spec.spec.autodeploy) {
+            let current_autodeploy = status.autodeploy.unwrap_or(config.spec.spec.autodeploy);
+            if current_autodeploy != config.spec.spec.autodeploy {
                 issues.push(WatchdogIssue::new(
                     WatchdogIssueType::AutodeployMismatch,
                     config.clone(),
                     format!(
                         "State: {}, Spec: {}",
-                        status.autodeploy.unwrap_or(false),
-                        config.spec.spec.autodeploy
+                        current_autodeploy, config.spec.spec.autodeploy
                     ),
                 ));
             }
