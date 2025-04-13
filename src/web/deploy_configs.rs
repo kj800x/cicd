@@ -194,7 +194,10 @@ impl ResolvedVersion {
                     match commit {
                         Some(commit) => ResolvedVersion::BranchTracked {
                             sha: sha.to_string(),
-                            branch: status.current_branch.clone().unwrap(),
+                            branch: status
+                                .current_branch
+                                .clone()
+                                .unwrap_or_else(|| config.spec.spec.repo.default_branch.clone()),
                             build_time: commit.timestamp as u64,
                         },
                         None => ResolvedVersion::UnknownSha {
