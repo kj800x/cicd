@@ -116,6 +116,8 @@ async fn start_http(
             .route("/api/hey", web_get().to(manual_hello))
             .route("/deploy", web_get().to(deploy_configs))
             .route("/", web_get().to(index))
+            .route("/branch-grid-fragment", web_get().to(branch_grid_fragment))
+            .route("/build-grid-fragment", web_get().to(build_grid_fragment))
             .route("/all-recent-builds", web_get().to(all_recent_builds))
             .route("/watchdog", web_get().to(watchdog))
             .route("/assets/htmx.min.js", web_get().to(htmx_js))

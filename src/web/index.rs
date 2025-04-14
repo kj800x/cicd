@@ -1,6 +1,33 @@
+use crate::db::BuildStatus;
 use crate::prelude::*;
 use crate::web::header;
 use chrono::{Local, TimeZone};
+
+#[derive(Debug)]
+pub struct BranchData {
+    pub branch_id: i64,
+    pub branch_name: String,
+    pub head_commit_sha: String,
+    pub repo_id: i64,
+    pub repo_name: String,
+    pub repo_owner: String,
+    pub default_branch: String,
+    pub is_private: bool,
+    pub language: Option<String>,
+    pub is_default: bool,
+    pub commits: Vec<CommitData>,
+}
+
+#[derive(Debug)]
+pub struct CommitData {
+    pub id: i64,
+    pub sha: String,
+    pub message: String,
+    pub timestamp: i64,
+    pub build_status: BuildStatus,
+    pub build_url: Option<String>,
+    pub parent_shas: Vec<String>,
+}
 
 /// Format a timestamp as a human-readable relative time
 fn format_relative_time(timestamp: i64) -> String {
@@ -36,40 +63,12 @@ fn truncate_message(message: &str, max_length: usize) -> String {
     }
 }
 
-/// Generate HTML for the dashboard homepage that displays recent branches and their commits
-pub async fn index(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Responder {
+/// Generate the HTML fragment for the branch grid content
+pub fn render_branch_grid_fragment(pool: &Pool<SqliteConnectionManager>) -> Markup {
     let conn = pool.get().unwrap();
 
-    // Structure to hold our branch data
-    #[derive(Debug)]
-    #[allow(dead_code)]
-    struct BranchData {
-        branch_id: i64,
-        branch_name: String,
-        head_commit_sha: String,
-        repo_id: i64,
-        repo_name: String,
-        repo_owner: String,
-        default_branch: String,
-        is_private: bool,
-        language: Option<String>,
-        is_default: bool,
-        commits: Vec<CommitData>,
-    }
-
-    #[derive(Debug)]
-    #[allow(dead_code)]
-    struct CommitData {
-        id: i64,
-        sha: String,
-        message: String,
-        timestamp: i64,
-        build_status: BuildStatus,
-        build_url: Option<String>,
-        parent_shas: Vec<String>,
-    }
-
-    // Find branches with recent commits
+    // Reuse branch data fetching logic
+    let mut branch_data_list = Vec::new();
     let query = r#"
         SELECT
             b.id, b.name, b.head_commit_sha, b.repo_id,
@@ -96,8 +95,6 @@ pub async fn index(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Respo
         })
         .unwrap();
 
-    let mut branch_data_list = Vec::new();
-
     for (
         branch_id,
         branch_name,
@@ -110,10 +107,8 @@ pub async fn index(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Respo
         language,
     ) in branch_rows.flatten()
     {
-        // Determine if this is the default branch
         let is_default = branch_name == default_branch;
 
-        // Get last 10 commits for this branch
         let commits_query = r#"
             SELECT c.id, c.sha, c.message, c.timestamp, c.build_status, c.build_url
             FROM git_commit c
@@ -150,7 +145,6 @@ pub async fn index(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Respo
         for (commit_id, commit_sha, commit_message, commit_timestamp, build_status, build_url) in
             commit_rows.flatten()
         {
-            // Get parent SHAs for this commit
             let parent_shas = get_commit_parents(&commit_sha, &conn).unwrap_or_default();
 
             commits.push(CommitData {
@@ -164,7 +158,6 @@ pub async fn index(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Respo
             });
         }
 
-        // Only include branches that have commits
         if !commits.is_empty() {
             branch_data_list.push(BranchData {
                 branch_id,
@@ -189,6 +182,92 @@ pub async fn index(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Respo
         b_time.cmp(&a_time) // Reverse order for newest first
     });
 
+    html! {
+        @if branch_data_list.is_empty() {
+            div class="empty-state" {
+                h2 { "No branches found" }
+                p { "There are no branches with commits in the system." }
+            }
+        } @else {
+            div class="branch-grid" {
+                @for data in branch_data_list {
+                    div class="branch-card" {
+                        div class="branch-header" {
+                            div class="branch-info" {
+                                div class="repo-name" { (format!("{}/{}", data.repo_owner, data.repo_name)) }
+                                div class="branch-name-wrapper" {
+                                    @if data.is_default {
+                                        span class="branch-badge default" { (data.branch_name) }
+                                    } @else {
+                                        span class="branch-badge" { (data.branch_name) }
+                                    }
+                                    span {
+                                        // Show the latest commit time
+                                        @if let Some(commit) = data.commits.first() {
+                                            (format!("updated {}", format_relative_time(commit.timestamp)))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        div class="commit-list" {
+                            @for commit in &data.commits {
+                                div class=(format!("commit-row bg-{}", match commit.build_status {
+                                    BuildStatus::Success => "success",
+                                    BuildStatus::Failure => "failure",
+                                    BuildStatus::Pending => "pending",
+                                    BuildStatus::None => "none",
+                                })) {
+                                    div class=(format!("commit-status status-{}", match commit.build_status {
+                                        BuildStatus::Success => "success",
+                                        BuildStatus::Failure => "failure",
+                                        BuildStatus::Pending => "pending",
+                                        BuildStatus::None => "none",
+                                    })) {}
+
+                                    div class="commit-sha" { (format_short_sha(&commit.sha)) }
+
+                                    div class="commit-message-cell" {
+                                        div class="commit-message-text tooltipped" data-tooltip=(commit.message) {
+                                            (truncate_message(&commit.message, 60))
+                                        }
+                                    }
+
+                                    div class="commit-time" {
+                                        (format_relative_time(commit.timestamp))
+                                    }
+
+                                    div class="commit-links" {
+                                        a href=(format!("https://github.com/{}/{}/commit/{}", data.repo_owner, data.repo_name, commit.sha)) target="_blank" { "Code" }
+
+                                        @if let Some(url) = &commit.build_url {
+                                            a href=(url) target="_blank" { "Logs" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Handler for the branch grid fragment endpoint
+pub async fn branch_grid_fragment(
+    pool: web::Data<Pool<SqliteConnectionManager>>,
+) -> impl Responder {
+    let fragment = render_branch_grid_fragment(&pool);
+
+    HttpResponse::Ok()
+        .content_type("text/html; charset=utf-8")
+        .body(fragment.into_string())
+}
+
+/// Generate HTML for the dashboard homepage that displays recent branches and their commits
+pub async fn index(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Responder {
     // Render the HTML template using Maud
     let markup = html! {
         (DOCTYPE)
@@ -196,7 +275,6 @@ pub async fn index(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Respo
             head {
                 meta charset="UTF-8";
                 meta name="viewport" content="width=device-width, initial-scale=1.0";
-                meta http-equiv="refresh" content="3";
                 title { "CI/CD Build Status Dashboard" }
                 style {
                     r#"
@@ -466,7 +544,7 @@ pub async fn index(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Respo
                 }
                 (header::scripts())
             }
-            body {
+            body hx-ext="morph" {
                 (header::render("branches"))
                 div class="content" {
                     header {
@@ -474,83 +552,12 @@ pub async fn index(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Respo
                         div class="subtitle" { "Recent branches and their commits" }
                     }
 
-                    @if branch_data_list.is_empty() {
-                        div class="empty-state" {
-                            h2 { "No branches found" }
-                            p { "There are no branches with commits in the system." }
-                            a href="/" class="refresh" { "Refresh" }
-                        }
-                    } @else {
-                        div class="branch-grid" {
-                            @for data in &branch_data_list {
-                                div class="branch-card" {
-                                    div class="branch-header" {
-                                        div class="branch-info" {
-                                            div class="repo-name" { (format!("{}/{}", data.repo_owner, data.repo_name)) }
-                                            div class="branch-name-wrapper" {
-                                                @if data.is_default {
-                                                    span class="branch-badge default" { (data.branch_name) }
-                                                } @else {
-                                                    span class="branch-badge" { (data.branch_name) }
-                                                }
-                                                span {
-                                                    // Show the latest commit time
-                                                    @if let Some(commit) = data.commits.first() {
-                                                        (format!("updated {}", format_relative_time(commit.timestamp)))
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    div class="commit-list" {
-                                        @for commit in &data.commits {
-                                            div class=(format!("commit-row bg-{}", match commit.build_status {
-                                                BuildStatus::Success => "success",
-                                                BuildStatus::Failure => "failure",
-                                                BuildStatus::Pending => "pending",
-                                                BuildStatus::None => "none",
-                                            })) {
-                                                div class=(format!("commit-status status-{}", match commit.build_status {
-                                                    BuildStatus::Success => "success",
-                                                    BuildStatus::Failure => "failure",
-                                                    BuildStatus::Pending => "pending",
-                                                    BuildStatus::None => "none",
-                                                })) {}
-
-                                                div class="commit-sha" { (format_short_sha(&commit.sha)) }
-
-                                                div class="commit-message-cell" {
-                                                    div class="commit-message-text tooltipped" data-tooltip=(commit.message) {
-                                                        (truncate_message(&commit.message, 60))
-                                                    }
-                                                }
-
-                                                div class="commit-time" {
-                                                    (format_relative_time(commit.timestamp))
-                                                }
-
-                                                div class="commit-links" {
-                                                    // Link to GitHub code (assuming GitHub)
-                                                    a href=(format!("https://github.com/{}/{}/commit/{}",
-                                                                   data.repo_owner, data.repo_name, commit.sha))
-                                                        target="_blank" { "Code" }
-
-                                                    // Link to build logs if available
-                                                    @if let Some(url) = &commit.build_url {
-                                                        a href=(url) target="_blank" { "Logs" }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        div style="text-align: center; margin-top: 30px;" {
-                            a href="/" class="refresh" { "Refresh" }
-                        }
+                    // Add container with HTMX attributes for auto-refresh
+                    div id="branch-grid-container"
+                        hx-get="/branch-grid-fragment"
+                        hx-trigger="every 5s"
+                        hx-swap="morph:innerHTML" {
+                        (render_branch_grid_fragment(&pool))
                     }
                 }
             }

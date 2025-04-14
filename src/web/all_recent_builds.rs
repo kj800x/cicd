@@ -28,11 +28,10 @@ fn format_short_sha(sha: &str) -> &str {
     }
 }
 
-/// Generate HTML for the all recent builds page that displays recent builds
-pub async fn all_recent_builds(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Responder {
-    // Get recent builds from the database
+/// Generate the HTML fragment for the build grid content
+pub fn render_build_grid_fragment(pool: &Pool<SqliteConnectionManager>) -> Markup {
     let conn = pool.get().unwrap();
-    let since = Utc::now() - chrono::Duration::hours(24); // Show last 24 hours of builds
+    let since = Utc::now() - chrono::Duration::hours(24);
     let commits_result = get_commits_since(&conn, since.timestamp_millis());
 
     let mut builds = Vec::new();
@@ -53,6 +52,79 @@ pub async fn all_recent_builds(pool: web::Data<Pool<SqliteConnectionManager>>) -
         }
     }
 
+    html! {
+        @if builds.is_empty() {
+            div class="empty-state" {
+                h2 { "No builds found" }
+                p { "There are no builds in the last 24 hours." }
+            }
+        } @else {
+            div class="build-grid" {
+                @for (commit, repo, branches, _) in builds {
+                    @let status_class = match commit.build_status {
+                        BuildStatus::Success => "card-status-success",
+                        BuildStatus::Failure => "card-status-failure",
+                        BuildStatus::Pending => "card-status-pending",
+                        BuildStatus::None => "card-status-none",
+                    };
+                    div class=(format!("build-card {}", status_class)) {
+                        div class="build-header" {
+                            div class=(format!("status-indicator status-{}", match commit.build_status {
+                                BuildStatus::Success => "success",
+                                BuildStatus::Failure => "failure",
+                                BuildStatus::Pending => "pending",
+                                BuildStatus::None => "none",
+                            })) {}
+                            div class="build-info" {
+                                div class="repo-name" { (format!("{}/{}", repo.owner_name, repo.name)) }
+                                div class="branch-name" {
+                                    @if branches.is_empty() {
+                                        "No branch"
+                                    } @else {
+                                        @for (i, branch) in branches.iter().enumerate() {
+                                            @if i > 0 { ", " }
+                                            (branch.name)
+                                        }
+                                    }
+                                }
+                            }
+                            div class="build-time" {
+                                (format_relative_time(commit.timestamp))
+                            }
+                        }
+                        div class="build-body" {
+                            div class="commit-message" { (commit.message) }
+                        }
+                        div class="build-footer" {
+                            div class="sha" { (format_short_sha(&commit.sha)) }
+                            div class="links" {
+                                a href=(format!("https://github.com/{}/{}/commit/{}",
+                                                repo.owner_name, repo.name, commit.sha))
+                                    target="_blank" { "View code" }
+
+                                @if let Some(url) = &commit.build_url {
+                                    a href=(url) target="_blank" { "Build logs" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Handler for the build grid fragment endpoint
+pub async fn build_grid_fragment(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Responder {
+    let fragment = render_build_grid_fragment(&pool);
+
+    HttpResponse::Ok()
+        .content_type("text/html; charset=utf-8")
+        .body(fragment.into_string())
+}
+
+/// Generate HTML for the all recent builds page that displays recent builds
+pub async fn all_recent_builds(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Responder {
     // Render the HTML template using Maud
     let markup = html! {
         (DOCTYPE)
@@ -60,7 +132,6 @@ pub async fn all_recent_builds(pool: web::Data<Pool<SqliteConnectionManager>>) -
             head {
                 meta charset="UTF-8";
                 meta name="viewport" content="width=device-width, initial-scale=1.0";
-                meta http-equiv="refresh" content="3";
                 title { "CI/CD Build Status Dashboard - All Recent Builds" }
                 style {
                     r#"
@@ -301,7 +372,7 @@ pub async fn all_recent_builds(pool: web::Data<Pool<SqliteConnectionManager>>) -
                 }
                 (header::scripts())
             }
-            body {
+            body hx-ext="morph" {
                 (header::render("builds"))
                 div class="content" {
                     header {
@@ -309,71 +380,12 @@ pub async fn all_recent_builds(pool: web::Data<Pool<SqliteConnectionManager>>) -
                         div class="subtitle" { "Recent builds from the last 24 hours" }
                     }
 
-                    @if builds.is_empty() {
-                        div class="empty-state" {
-                            h2 { "No builds found" }
-                            p { "There are no builds in the last 24 hours." }
-                            a href="/all-recent-builds" class="refresh" { "Refresh" }
-                        }
-                    } @else {
-                        div class="build-grid" {
-                            @for (commit, repo, branches, _) in &builds {
-                                // Determine status for styling
-                                @let status_class = match commit.build_status {
-                                    BuildStatus::Success => "card-status-success",
-                                    BuildStatus::Failure => "card-status-failure",
-                                    BuildStatus::Pending => "card-status-pending",
-                                    BuildStatus::None => "card-status-none",
-                                };
-                                div class=(format!("build-card {}", status_class)) {
-                                    div class="build-header" {
-                                        div class=(format!("status-indicator status-{}", match commit.build_status {
-                                            BuildStatus::Success => "success",
-                                            BuildStatus::Failure => "failure",
-                                            BuildStatus::Pending => "pending",
-                                            BuildStatus::None => "none",
-                                        })) {}
-                                        div class="build-info" {
-                                            div class="repo-name" { (format!("{}/{}", repo.owner_name, repo.name)) }
-                                            div class="branch-name" {
-                                                @if branches.is_empty() {
-                                                    "No branch"
-                                                } @else {
-                                                    @for (i, branch) in branches.iter().enumerate() {
-                                                        @if i > 0 { ", " }
-                                                        (branch.name)
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        div class="build-time" {
-                                            (format_relative_time(commit.timestamp))
-                                        }
-                                    }
-                                    div class="build-body" {
-                                        div class="commit-message" { (commit.message) }
-                                    }
-                                    div class="build-footer" {
-                                        div class="sha" { (format_short_sha(&commit.sha)) }
-                                        div class="links" {
-                                            // Link to GitHub code (assuming GitHub)
-                                            a href=(format!("https://github.com/{}/{}/commit/{}",
-                                                            repo.owner_name, repo.name, commit.sha))
-                                                target="_blank" { "View code" }
-
-                                            // Link to build logs if available
-                                            @if let Some(url) = &commit.build_url {
-                                                a href=(url) target="_blank" { "Build logs" }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        div style="text-align: center; margin-top: 30px;" {
-                            a href="/all-recent-builds" class="refresh" { "Refresh" }
-                        }
+                    // Add container with HTMX attributes for auto-refresh
+                    div id="build-grid-container"
+                        hx-get="/build-grid-fragment"
+                        hx-trigger="every 5s"
+                        hx-swap="morph:innerHTML" {
+                        (render_build_grid_fragment(&pool))
                     }
                 }
             }
