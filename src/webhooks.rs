@@ -1,9 +1,14 @@
+use std::sync::Arc;
+use std::sync::RwLock;
+
 use crate::kubernetes;
 use crate::prelude::*;
+use futures_util::SinkExt;
 use futures_util::StreamExt;
 use kube::Client as KubeClient;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{client::IntoClientRequest, http::HeaderValue},
@@ -500,27 +505,69 @@ pub async fn start_websockets(
             Ok((ws_stream, _)) => {
                 log::info!("Connection to webhooks websocket established");
 
-                let (_, read) = ws_stream.split();
+                let (mut write, mut read) = ws_stream.split();
                 let notifier_ref = &discord_notifier;
                 let pool_ref = &pool;
                 let kube_client_ref = &kube_client;
 
-                read.for_each(|message| async {
+                let last_pong = Arc::new(RwLock::new(Box::new(std::time::Instant::now())));
+                let last_pong_clone = last_pong.clone();
+
+                let mut ping_closure = async || loop {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                    log::debug!("Sending ping message");
+                    write
+                        .send(Message::Text(
+                            "{\"event_type\":\"conn_ping\",\"payload\":{}}".to_string(),
+                        ))
+                        .await
+                        .unwrap();
+                };
+
+                let mut message_closure = async || loop {
+                    let message = read.next().await.unwrap();
                     match message {
                         Ok(msg) => {
                             let data = msg.into_data();
+                            *last_pong_clone.write().unwrap().as_mut() = std::time::Instant::now();
                             match serde_json::from_slice::<WebhookEvent>(&data) {
                                 Ok(event) => {
-                                    process_event(event, pool_ref, notifier_ref, kube_client_ref)
+                                    if event.event_type == "conn_ping" {
+                                        log::debug!("Got conn_ping reply");
+                                    } else {
+                                        process_event(
+                                            event,
+                                            pool_ref,
+                                            notifier_ref,
+                                            kube_client_ref,
+                                        )
                                         .await
+                                    }
                                 }
                                 Err(e) => log::error!("Error parsing webhook event: {}", e),
                             }
                         }
                         Err(e) => log::error!("Error reading from websocket: {}", e),
                     }
-                })
-                .await;
+                };
+
+                let watchdog_closure = async || loop {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(20)).await;
+                    let last_pong = last_pong_clone.read().unwrap();
+                    if last_pong.elapsed() > tokio::time::Duration::from_secs(10) {
+                        log::debug!("Watchdog failed");
+                        break;
+                    } else {
+                        log::debug!("Watchdog passed");
+                    }
+                };
+
+                tokio::select! {
+                    _ = ping_closure() => {}
+                    _ = message_closure() => {}
+                    _ = watchdog_closure() => {}
+                }
+
                 log::error!("WebSocket connection closed, will attempt to reconnect...");
             }
             Err(e) => {
