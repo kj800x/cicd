@@ -91,10 +91,16 @@ pub fn styles() -> &'static str {
         padding: 16px;
         border: 2px solid grey;
         margin: 16px 0;
+        width: 100%;
+        box-sizing: border-box;
+        word-wrap: break-word;
+        overflow-wrap: break-word;
     }
     .alert-header {
         font-size: 1.4em;
         margin-bottom: 4px;
+        word-wrap: break-word;
+        overflow-wrap: break-word;
     }
     .alert-danger {
         background-color: #fdedee;
@@ -112,6 +118,8 @@ pub fn styles() -> &'static str {
         display: flex;
         flex-direction: column;
         gap: 4px;
+        word-wrap: break-word;
+        overflow-wrap: break-word;
     }
     .alert-content .details {
         font-size: 12px;
