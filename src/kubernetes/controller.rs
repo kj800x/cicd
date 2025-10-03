@@ -1,6 +1,6 @@
 use futures_util::StreamExt;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
-use kube::api::{DeleteParams, GroupVersionKind, PostParams};
+use kube::api::{DeleteParams, GroupVersionKind, TypeMeta};
 use kube::discovery::pinned_kind;
 use kube::Resource;
 use kube::{
@@ -16,7 +16,11 @@ use std::{sync::Arc, time::Duration};
 use super::DeployConfig;
 use crate::prelude::*;
 
-pub async fn apply(client: &Client, obj: DynamicObject) -> Result<DynamicObject, anyhow::Error> {
+pub async fn apply(
+    client: &Client,
+    ns: &str,
+    obj: DynamicObject,
+) -> Result<DynamicObject, anyhow::Error> {
     // require name + type info
     let name = obj
         .metadata
@@ -29,7 +33,8 @@ pub async fn apply(client: &Client, obj: DynamicObject) -> Result<DynamicObject,
             .ok_or_else(|| anyhow::anyhow!("missing types on DynamicObject"))?,
     )
     .map_err(|e| anyhow::anyhow!("failed parsing GVK: {}", e))?;
-    let ns = obj.metadata.namespace.clone();
+
+    log::info!("Applying {}/{}", ns, name);
 
     // resolve ApiResource and scope
     let (ar, caps) = pinned_kind(client, &gvk)
@@ -37,20 +42,36 @@ pub async fn apply(client: &Client, obj: DynamicObject) -> Result<DynamicObject,
         .map_err(|e| anyhow::anyhow!("GVK {gvk:?} not found via discovery: {}", e))?;
 
     let api: Api<DynamicObject> = match caps.scope {
-        discovery::Scope::Namespaced => {
-            let ns = ns.ok_or_else(|| {
-                anyhow::anyhow!("namespaced resource requires metadata.namespace")
-            })?;
-            Api::namespaced_with(client.clone(), &ns, &ar)
-        }
+        discovery::Scope::Namespaced => Api::namespaced_with(client.clone(), &ns, &ar),
         discovery::Scope::Cluster => Api::all_with(client.clone(), &ar),
     };
 
+    log::info!("API: {api:?}");
+
     // SSA upsert
     let pp = PatchParams::apply("cicd-controller").force(); // drop .force() if you prefer conflicts to surface
-    api.patch(&name, &pp, &Patch::Apply(obj))
+    let response = api
+        .patch(&name, &pp, &Patch::Apply(obj))
         .await
-        .map_err(Into::into)
+        .map_err(|e| anyhow::anyhow!("failed to apply object: {}", e));
+
+    log::info!("Response: {response:#?}");
+
+    let fetched = api.get(&name).await?;
+    log::info!(
+        "applied {} rv={:?} managers={:?}",
+        fetched.name_any(),
+        fetched.metadata.resource_version,
+        fetched
+            .managed_fields()
+            .iter()
+            .map(|m| m.manager.clone())
+            .collect::<Vec<_>>(),
+    );
+
+    log::info!("Apply complete");
+
+    response
 }
 
 /// Delete a DynamicObject
@@ -58,6 +79,13 @@ pub async fn delete_dynamic_object(
     client: Client,
     obj: &DynamicObject,
 ) -> Result<(), anyhow::Error> {
+    log::info!(
+        "Deleting {}/{}",
+        obj.namespace().unwrap_or_else(|| "default".to_string()),
+        obj.name_any()
+    );
+    log::info!("Obj: {obj:#?}");
+
     let name = obj.name_any();
     let ns = obj.metadata.namespace.clone(); // may be None for cluster-scoped
     let gvk = GroupVersionKind::try_from(
@@ -99,11 +127,19 @@ pub async fn list_namespace_objects(
             if caps.scope != discovery::Scope::Namespaced || ar.plural.contains("/") {
                 continue;
             }
+            let types = TypeMeta {
+                api_version: ar.api_version.clone(),
+                kind: ar.kind.clone(),
+            };
 
+            println!("Listing namespace objects for {}/{}", ns, ar.plural);
             let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), ns, &ar);
 
             // Paginate to avoid truncation on large lists
-            let mut lp = ListParams::default().limit(500);
+            // only what *we* manage
+            let mut lp = ListParams::default()
+                .labels("app.kubernetes.io/managed-by=cicd-controller")
+                .limit(500);
             let mut continue_token: Option<String> = None;
 
             loop {
@@ -114,7 +150,12 @@ pub async fn list_namespace_objects(
                     };
                 }
 
+                println!(
+                    "Listing namespace objects for {}/{} with params {lp:#?}",
+                    ns, ar.plural
+                );
                 let res = api.list(&lp).await;
+                println!("Got response: {res:#?}");
                 let list = match res {
                     Ok(l) => l,
                     // 405 = method not allowed (common for subresources/misreported caps)
@@ -123,11 +164,17 @@ pub async fn list_namespace_objects(
                     Err(_) => break,
                 };
 
-                for obj in list.items {
-                    out.push(obj);
-                }
+                out.extend(list.items.into_iter().map(|mut o| {
+                    o.types = o.types.or(Some(types.clone()));
+                    o
+                }));
 
-                continue_token = list.metadata.continue_;
+                // FIXME: ChatGPT maybe suggests a "stall guard" (check to see if continue token is the same as the last one) to avoid k8s bugs.
+                continue_token =
+                    list.metadata
+                        .continue_
+                        .and_then(|x| if x == "" { None } else { Some(x) });
+
                 if continue_token.is_none() {
                     break;
                 }
@@ -272,9 +319,9 @@ fn ensure_owner_reference<T: ResourceExt>(resource: &mut T, dc: &DeployConfig) {
         owner_refs.push(
             k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
                 api_version: String::from("cicd.coolkev.com/v1"),
-                kind: String::from("DeployConfig"),
+                kind: String::from("TestDeployConfig"),
                 name: dc.name_any(),
-                uid: dc.uid().expect("DeployConfig should have a UID"),
+                uid: dc.uid().expect("TestDeployConfig should have a UID"),
                 controller: Some(true),
                 block_owner_deletion: Some(true),
             },
@@ -300,7 +347,7 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
             name
         );
 
-        return Ok(Action::requeue(Duration::from_secs(60)));
+        return Ok(Action::requeue(Duration::from_secs(5)));
     }
 
     match (wanted_sha, current_sha) {
@@ -323,20 +370,26 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
                 obj = obj.with_version(wanted_sha);
                 ensure_owner_reference(&mut obj, &dc);
                 ensure_labels(&mut obj);
+                log::info!("New obj: {obj:#?}");
                 log::info!("Updating resource {}/{}", ns, obj.name_any());
-                apply(client, obj).await?;
+                apply(client, &ns, obj).await?;
             }
 
             // Prune stale resources
+            log::info!("Pruning stale resources...");
             let objects = list_namespace_objects(client.clone(), &ns).await?;
+            log::info!("Got objects in namespace {}/{}", ns, name);
+            log::info!("Objects: {objects:#?}");
             let stale_objects = objects
                 .iter()
                 .filter(|o| is_owned_by(o, &dc.child_owner_reference()))
                 .filter(|o| o.get_sha() != Some(wanted_sha));
+            log::info!("Stale objects: {stale_objects:#?}");
             for object in stale_objects {
                 log::info!("Deleting stale resource {}/{}", ns, object.name_any());
                 delete_dynamic_object(client.clone(), object).await?;
             }
+            log::info!("Pruning stale resources complete");
 
             update_deploy_config_status_current(client, &ns, &name, wanted_sha).await?;
             log::debug!(
@@ -365,7 +418,7 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
                 ensure_owner_reference(&mut obj, &dc);
                 ensure_labels(&mut obj);
                 log::info!("Creating resource {}/{}", ns, obj.name_any());
-                apply(client, obj).await?;
+                apply(client, &ns, obj).await?;
             }
 
             update_deploy_config_status_current(client, &ns, &name, wanted_sha).await?;
@@ -403,7 +456,7 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
     }
 
     // Requeue reconciliation
-    Ok(Action::requeue(Duration::from_secs(60)))
+    Ok(Action::requeue(Duration::from_secs(5)))
 }
 
 /// Update the DeployConfig status with wanted SHA
@@ -512,7 +565,7 @@ async fn update_deploy_config_status_current_none(
 /// Error handler for the controller
 fn error_policy(_dc: Arc<DeployConfig>, error: &Error, _ctx: Arc<ControllerContext>) -> Action {
     log::error!("Error during reconciliation: {:?}", error);
-    Action::requeue(Duration::from_secs(60))
+    Action::requeue(Duration::from_secs(5))
 }
 
 /// Start the Kubernetes controller

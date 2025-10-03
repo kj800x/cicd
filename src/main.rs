@@ -184,10 +184,10 @@ async fn main() -> std::io::Result<()> {
         .filter_level(log::LevelFilter::Info) // Set default level to Info for most modules
         .filter_module("serenity", log::LevelFilter::Warn) // Serenity crate spams at info level
         .filter_module("actix_web::middleware::logger", log::LevelFilter::Warn) // Actix web middleware logs every request at info
-        .filter_module("kube_runtime::controller", log::LevelFilter::Warn) // Kubernetes controller logs every reconciliation at info level
-        // .filter_module("cicd::discord", log::LevelFilter::Info)
-        // .filter_module("cicd::kubernetes", log::LevelFilter::Info)
-        // .filter_module("cicd::web", log::LevelFilter::Info)
+        .filter_module("kube_runtime::controller", log::LevelFilter::Trace) // Kubernetes controller logs every reconciliation at info level
+        .filter_module("cicd::discord", log::LevelFilter::Info)
+        .filter_module("cicd::kubernetes", log::LevelFilter::Trace)
+        .filter_module("cicd::web", log::LevelFilter::Info)
         .parse_default_env()
         .init();
 
@@ -235,12 +235,12 @@ async fn main() -> std::io::Result<()> {
         log::info!("Kubernetes controller enabled - will start controller");
         // Start all three services: HTTP server, websockets, and K8s controller
         let http_server = start_http(registry, pool.clone(), discord_notifier.clone());
-        let websocket_server = start_websockets(
-            websocket_url,
-            client_secret,
-            pool.clone(),
-            discord_notifier.clone(),
-        );
+        // let websocket_server = start_websockets(
+        //     websocket_url,
+        //     client_secret,
+        //     pool.clone(),
+        //     discord_notifier.clone(),
+        // );
         let k8s_controller = start_kubernetes_controller(pool.clone(), discord_notifier);
 
         // Run all services concurrently
@@ -250,9 +250,9 @@ async fn main() -> std::io::Result<()> {
                     log::error!("HTTP server error: {:?}", e);
                 }
             }
-            _ = websocket_server => {
-                log::error!("WebSocket server stopped");
-            }
+            // _ = websocket_server => {
+            //     log::error!("WebSocket server stopped");
+            // }
             result = k8s_controller => {
                 if let Err(e) = result {
                     log::error!("Kubernetes controller error: {:?}", e);

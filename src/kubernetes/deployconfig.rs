@@ -64,8 +64,8 @@ pub struct DeployConfigSpecFields {
 #[kube(
     group = "cicd.coolkev.com",
     version = "v1",
-    kind = "DeployConfig",
-    shortname = "dc",
+    kind = "TestDeployConfig",
+    shortname = "tdc",
     namespaced,
     schema = "disabled",
     status = "DeployConfigStatus",
@@ -82,7 +82,7 @@ pub struct DeployConfigSpec {
     pub spec: DeployConfigSpecFields,
 }
 
-impl DeployConfig {
+impl TestDeployConfig {
     /// Get the current autodeploy state, falling back to the spec's autodeploy if not set in status
     pub fn current_autodeploy(&self) -> bool {
         self.status
