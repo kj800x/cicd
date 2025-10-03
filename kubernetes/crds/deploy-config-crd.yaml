@@ -30,18 +30,16 @@ spec:
                       type: string
                 autodeploy:
                   type: boolean
-                resourceType:
-                  type: string
-                  enum: [Deployment, CronJob]
-                spec:
-                  type: object
-                  description: "Kubernetes resource spec (Deployment or CronJob)"
-                  x-kubernetes-preserve-unknown-fields: true
+                specs:
+                  type: array
+                  description: "Array of Kubernetes resource manifests"
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
               required:
                 - repo
-                - spec
                 - autodeploy
-                - resourceType
+                - specs
             status:
               type: object
               properties:
@@ -70,9 +68,6 @@ spec:
           type: string
         - name: Wanted SHA
           jsonPath: .status.wantedSha
-          type: string
-        - name: Resource Type
-          jsonPath: .spec.resourceType
           type: string
         - name: Autodeploy
           jsonPath: .status.autodeploy

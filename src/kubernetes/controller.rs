@@ -1,90 +1,220 @@
 use futures_util::StreamExt;
-use k8s_openapi::api::apps::v1::Deployment;
-use k8s_openapi::api::batch::v1::CronJob;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
+use kube::api::{DeleteParams, GroupVersionKind, PostParams};
+use kube::discovery::pinned_kind;
+use kube::Resource;
 use kube::{
-    api::{Api, Patch, PatchParams, ResourceExt},
+    api::{Api, DynamicObject, ListParams, Patch, PatchParams, ResourceExt},
     client::Client,
+    core::discovery,
     runtime::{controller::Action, watcher, Controller},
+    Discovery,
 };
+use std::collections::BTreeMap;
 use std::{sync::Arc, time::Duration};
 
 use super::DeployConfig;
-use crate::kubernetes::deployconfig::ResourceType;
 use crate::prelude::*;
+
+pub async fn apply(client: &Client, obj: DynamicObject) -> Result<DynamicObject, anyhow::Error> {
+    // require name + type info
+    let name = obj
+        .metadata
+        .name
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("metadata.name required"))?;
+    let gvk = GroupVersionKind::try_from(
+        obj.types
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("missing types on DynamicObject"))?,
+    )
+    .map_err(|e| anyhow::anyhow!("failed parsing GVK: {}", e))?;
+    let ns = obj.metadata.namespace.clone();
+
+    // resolve ApiResource and scope
+    let (ar, caps) = pinned_kind(client, &gvk)
+        .await
+        .map_err(|e| anyhow::anyhow!("GVK {gvk:?} not found via discovery: {}", e))?;
+
+    let api: Api<DynamicObject> = match caps.scope {
+        discovery::Scope::Namespaced => {
+            let ns = ns.ok_or_else(|| {
+                anyhow::anyhow!("namespaced resource requires metadata.namespace")
+            })?;
+            Api::namespaced_with(client.clone(), &ns, &ar)
+        }
+        discovery::Scope::Cluster => Api::all_with(client.clone(), &ar),
+    };
+
+    // SSA upsert
+    let pp = PatchParams::apply("cicd-controller").force(); // drop .force() if you prefer conflicts to surface
+    api.patch(&name, &pp, &Patch::Apply(obj))
+        .await
+        .map_err(Into::into)
+}
+
+/// Delete a DynamicObject
+pub async fn delete_dynamic_object(
+    client: Client,
+    obj: &DynamicObject,
+) -> Result<(), anyhow::Error> {
+    let name = obj.name_any();
+    let ns = obj.metadata.namespace.clone(); // may be None for cluster-scoped
+    let gvk = GroupVersionKind::try_from(
+        obj.types
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("missing types"))?,
+    )
+    .map_err(|e| anyhow::anyhow!("failed to parse GVK: {}", e))?;
+
+    let (ar, caps) = pinned_kind(&client, &gvk).await?;
+
+    let api: Api<DynamicObject> = match caps.scope {
+        discovery::Scope::Namespaced => {
+            let ns = ns
+                .ok_or_else(|| anyhow::anyhow!("namespaced resource missing metadata.namespace"))?;
+            Api::namespaced_with(client, &ns, &ar)
+        }
+        discovery::Scope::Cluster => Api::all_with(client, &ar),
+    };
+
+    let result = api.delete(&name, &DeleteParams::default()).await;
+    match result {
+        Ok(_) => Ok(()),
+        Err(e) => Err(anyhow::anyhow!("failed to delete object: {}", e)),
+    }
+}
+
+/// Return all DynamicObjects in `ns`
+pub async fn list_namespace_objects(
+    client: Client,
+    ns: &str,
+) -> Result<Vec<DynamicObject>, anyhow::Error> {
+    let disc = Discovery::new(client.clone()).run().await?;
+    let mut out = Vec::new();
+
+    for group in disc.groups() {
+        for (ar, caps) in group.resources_by_stability() {
+            // Only namespaced top-level resources (skip subresources like */status)
+            if caps.scope != discovery::Scope::Namespaced || ar.plural.contains("/") {
+                continue;
+            }
+
+            let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), ns, &ar);
+
+            // Paginate to avoid truncation on large lists
+            let mut lp = ListParams::default().limit(500);
+            let mut continue_token: Option<String> = None;
+
+            loop {
+                if let Some(token) = continue_token.clone() {
+                    lp = ListParams {
+                        continue_token: Some(token),
+                        ..lp.clone()
+                    };
+                }
+
+                let res = api.list(&lp).await;
+                let list = match res {
+                    Ok(l) => l,
+                    // 405 = method not allowed (common for subresources/misreported caps)
+                    Err(kube::Error::Api(e)) if e.code == 405 => break,
+                    // 403/404/etc.: skip this kind but keep going
+                    Err(_) => break,
+                };
+
+                for obj in list.items {
+                    out.push(obj);
+                }
+
+                continue_token = list.metadata.continue_;
+                if continue_token.is_none() {
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+fn is_owned_by(obj: &DynamicObject, owner: &OwnerReference) -> bool {
+    let Some(owners) = &obj.metadata.owner_references else {
+        return false;
+    };
+
+    owners.iter().any(|or| or.uid == owner.uid)
+}
+
+trait WithInterpolatedVersion {
+    fn with_interpolated_version(&self, version: &str) -> Self;
+}
+
+impl WithInterpolatedVersion for serde_json::Value {
+    fn with_interpolated_version(&self, version: &str) -> Self {
+        match self {
+            serde_json::Value::Object(json) => {
+                let mut new_json = serde_json::Map::new();
+                for (key, value) in json {
+                    new_json.insert(key.clone(), value.with_interpolated_version(version));
+                }
+                serde_json::Value::Object(new_json)
+            }
+            serde_json::Value::Array(array) => {
+                let mut new_array = Vec::new();
+                for value in array {
+                    new_array.push(value.with_interpolated_version(version));
+                }
+                serde_json::Value::Array(new_array)
+            }
+            serde_json::Value::String(string) => {
+                serde_json::Value::String(string.replace("$SHA", version))
+            }
+            _ => self.clone(),
+        }
+    }
+}
+
+impl WithInterpolatedVersion for serde_json::Map<String, serde_json::Value> {
+    fn with_interpolated_version(&self, version: &str) -> Self {
+        serde_json::Value::Object(self.clone())
+            .with_interpolated_version(version)
+            .as_object()
+            .unwrap()
+            .clone()
+    }
+}
 
 trait WithVersion {
     fn with_version(&self, version: &str) -> Self;
     fn get_sha(&self) -> Option<&str>;
 }
 
-impl WithVersion for Deployment {
+impl WithVersion for DynamicObject {
+    /// Sets metadata.annotations.currentSha to the given version and interpolates the data with the given version
     fn with_version(&self, version: &str) -> Self {
-        let mut deployment = self.clone();
-        if let Some(spec) = deployment.spec.as_mut() {
-            if let Some(template) = spec.template.spec.as_mut() {
-                for container in &mut template.containers {
-                    if let Some(image) = &container.image {
-                        if let Some(idx) = image.rfind(':') {
-                            container.image = Some(format!("{}:commit-{}", &image[..idx], version));
-                        } else {
-                            container.image = Some(format!("{}:commit-{}", image, version));
-                        }
-                    }
-                }
-            }
+        let mut obj = self.clone();
+
+        if obj.meta_mut().annotations.is_none() {
+            obj.meta_mut().annotations = Some(BTreeMap::new());
         }
-        deployment
+
+        obj.meta_mut()
+            .annotations
+            .as_mut()
+            .unwrap()
+            .insert("currentSha".to_owned(), version.to_owned());
+
+        obj.data = obj.data.with_interpolated_version(version);
+        obj
     }
 
     fn get_sha(&self) -> Option<&str> {
-        self.spec.as_ref().and_then(|spec| {
-            spec.template.spec.as_ref().and_then(|template| {
-                template.containers.first().and_then(|container| {
-                    container.image.as_ref().and_then(|image| {
-                        let parts = image.split(":commit-").collect::<Vec<&str>>();
-                        parts.get(1).copied()
-                    })
-                })
-            })
-        })
-    }
-}
-
-impl WithVersion for CronJob {
-    fn with_version(&self, version: &str) -> Self {
-        let mut cronjob = self.clone();
-        if let Some(spec) = cronjob.spec.as_mut() {
-            if let Some(template) = spec.job_template.spec.as_mut() {
-                if let Some(template) = template.template.spec.as_mut() {
-                    for container in &mut template.containers {
-                        if let Some(image) = &container.image {
-                            if let Some(idx) = image.rfind(':') {
-                                container.image =
-                                    Some(format!("{}:commit-{}", &image[..idx], version));
-                            } else {
-                                container.image = Some(format!("{}:commit-{}", image, version));
-                            }
-                        }
-                    }
-                }
-            }
+        if let Some(annotations) = &self.meta().annotations {
+            annotations.get("currentSha").map(|s| s.as_str())
+        } else {
+            None
         }
-        cronjob
-    }
-
-    fn get_sha(&self) -> Option<&str> {
-        self.spec.as_ref().and_then(|spec| {
-            spec.job_template.spec.as_ref().and_then(|job_spec| {
-                job_spec.template.spec.as_ref().and_then(|template| {
-                    template.containers.first().and_then(|container| {
-                        container.image.as_ref().and_then(|image| {
-                            let parts = image.split(":commit-").collect::<Vec<&str>>();
-                            parts.get(1).copied()
-                        })
-                    })
-                })
-            })
-        })
     }
 }
 
@@ -113,8 +243,17 @@ pub enum Error {
     Other(#[from] anyhow::Error),
 }
 
+/// Ensure the labels are set on a resource
+fn ensure_labels<T: ResourceExt>(resource: &mut T) {
+    let labels = resource.meta_mut().labels.get_or_insert_with(BTreeMap::new);
+    labels.insert(
+        "app.kubernetes.io/managed-by".to_string(),
+        "cicd-controller".to_string(),
+    );
+}
+
 /// Ensure the owner reference is set on a resource
-fn ensure_owner_reference<T: kube::Resource>(resource: &mut T, dc: &DeployConfig) {
+fn ensure_owner_reference<T: ResourceExt>(resource: &mut T, dc: &DeployConfig) {
     // Get the current owner references or create an empty vec
     let owner_refs = resource
         .meta_mut()
@@ -151,400 +290,120 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
 
     log::debug!("Reconciling DeployConfig {}/{}", ns, name);
 
-    // RULE: When a resource's SHA doesn't match wantedSha, update the resource
-    // or create/delete as needed based on wantedSha presence
-    match dc.status.as_ref() {
-        Some(status) => {
-            // Check if we need to create a new resource
-            if let Some(wanted_sha) = &status.wanted_sha {
-                match dc.spec.spec.resource_type {
-                    ResourceType::Deployment => {
-                        // Check if deployment exists
-                        let deployments: Api<Deployment> = Api::namespaced(client.clone(), &ns);
-                        match deployments.get(&name).await {
-                            Ok(deployment) => {
-                                // Update deployment if needed
-                                if deployment.get_sha() != Some(wanted_sha) {
-                                    log::info!(
-                                        "Updating deployment {}/{} to version {}",
-                                        ns,
-                                        name,
-                                        &wanted_sha[0..7]
-                                    );
-                                    let mut deployment = deployment;
-                                    deployment = deployment.with_version(wanted_sha);
-                                    ensure_owner_reference(&mut deployment, &dc);
-                                    deployments
-                                        .replace(&name, &Default::default(), &deployment)
-                                        .await?;
+    let wanted_sha = dc.wanted_sha();
+    let current_sha = dc.current_sha();
 
-                                    // Update the current SHA in status
-                                    update_deploy_config_status_current(
-                                        client, &ns, &name, wanted_sha,
-                                    )
-                                    .await?;
+    if wanted_sha == current_sha {
+        log::trace!(
+            "DeployConfig {}/{} is already in the desired state",
+            ns,
+            name
+        );
 
-                                    // Notify if discord is enabled for the update
-                                    if let Some(ref notifier) = ctx.discord_notifier {
-                                        let _ = notifier
-                                            .notify_k8s_deployment(
-                                                &dc.spec.spec.repo.owner,
-                                                &dc.spec.spec.repo.repo,
-                                                dc.status
-                                                    .as_ref()
-                                                    .and_then(|s| s.current_branch.clone())
-                                                    .unwrap_or_else(|| {
-                                                        dc.spec.spec.repo.default_branch.clone()
-                                                    })
-                                                    .as_str(),
-                                                wanted_sha,
-                                                &name,
-                                                &ns,
-                                                "updated",
-                                            )
-                                            .await;
-                                    }
-                                } else {
-                                    log::debug!(
-                                        "Deployment {}/{} already at version {}",
-                                        ns,
-                                        name,
-                                        &wanted_sha[0..7]
-                                    );
-                                }
-                            }
-                            Err(kube::Error::Api(kube::error::ErrorResponse {
-                                code: 404, ..
-                            })) => {
-                                // Create new deployment
-                                log::info!(
-                                    "Creating new deployment {}/{} with version {}",
-                                    ns,
-                                    name,
-                                    &wanted_sha[0..7]
-                                );
-                                let deployment = create_deployment_from_config(&dc, wanted_sha);
-                                deployments.create(&Default::default(), &deployment).await?;
+        return Ok(Action::requeue(Duration::from_secs(60)));
+    }
 
-                                // Update the current SHA in status
-                                update_deploy_config_status_current(client, &ns, &name, wanted_sha)
-                                    .await?;
+    match (wanted_sha, current_sha) {
+        (Some(wanted_sha), Some(_)) => {
+            log::debug!(
+                "DeployConfig {}/{} current SHA differs from wanted SHA, updating resources",
+                ns,
+                name
+            );
 
-                                // Notify if discord is enabled
-                                if let Some(ref notifier) = ctx.discord_notifier {
-                                    let _ = notifier
-                                        .notify_k8s_deployment(
-                                            &dc.spec.spec.repo.owner,
-                                            &dc.spec.spec.repo.repo,
-                                            dc.status
-                                                .as_ref()
-                                                .and_then(|s| s.current_branch.clone())
-                                                .unwrap_or_else(|| {
-                                                    dc.spec.spec.repo.default_branch.clone()
-                                                })
-                                                .as_str(),
-                                            wanted_sha,
-                                            &name,
-                                            &ns,
-                                            "created",
-                                        )
-                                        .await;
-                                }
-                            }
-                            Err(e) => return Err(Error::Kube(e)),
-                        }
-                    }
-                    ResourceType::CronJob => {
-                        // Check if cronjob exists
-                        let cronjobs: Api<CronJob> = Api::namespaced(client.clone(), &ns);
-                        match cronjobs.get(&name).await {
-                            Ok(cronjob) => {
-                                // Update cronjob if needed
-                                if cronjob.get_sha() != Some(wanted_sha) {
-                                    log::info!(
-                                        "Updating cronjob {}/{} to version {}",
-                                        ns,
-                                        name,
-                                        &wanted_sha[0..7]
-                                    );
-                                    let mut cronjob = cronjob;
-                                    cronjob = cronjob.with_version(wanted_sha);
-                                    ensure_owner_reference(&mut cronjob, &dc);
-                                    cronjobs
-                                        .replace(&name, &Default::default(), &cronjob)
-                                        .await?;
-
-                                    // Update the current SHA in status
-                                    update_deploy_config_status_current(
-                                        client, &ns, &name, wanted_sha,
-                                    )
-                                    .await?;
-
-                                    // Notify if discord is enabled for the update
-                                    if let Some(ref notifier) = ctx.discord_notifier {
-                                        let _ = notifier
-                                            .notify_k8s_deployment(
-                                                &dc.spec.spec.repo.owner,
-                                                &dc.spec.spec.repo.repo,
-                                                dc.status
-                                                    .as_ref()
-                                                    .and_then(|s| s.current_branch.clone())
-                                                    .unwrap_or_else(|| {
-                                                        dc.spec.spec.repo.default_branch.clone()
-                                                    })
-                                                    .as_str(),
-                                                wanted_sha,
-                                                &name,
-                                                &ns,
-                                                "updated",
-                                            )
-                                            .await;
-                                    }
-                                } else {
-                                    log::debug!(
-                                        "CronJob {}/{} already at version {}",
-                                        ns,
-                                        name,
-                                        &wanted_sha[0..7]
-                                    );
-                                }
-                            }
-                            Err(kube::Error::Api(kube::error::ErrorResponse {
-                                code: 404, ..
-                            })) => {
-                                // Create new cronjob
-                                log::info!(
-                                    "Creating new cronjob {}/{} with version {}",
-                                    ns,
-                                    name,
-                                    &wanted_sha[0..7]
-                                );
-                                let cronjob = create_cronjob_from_config(&dc, wanted_sha);
-                                cronjobs.create(&Default::default(), &cronjob).await?;
-
-                                // Update the current SHA in status
-                                update_deploy_config_status_current(client, &ns, &name, wanted_sha)
-                                    .await?;
-
-                                // Notify if discord is enabled
-                                if let Some(ref notifier) = ctx.discord_notifier {
-                                    let _ = notifier
-                                        .notify_k8s_deployment(
-                                            &dc.spec.spec.repo.owner,
-                                            &dc.spec.spec.repo.repo,
-                                            dc.status
-                                                .as_ref()
-                                                .and_then(|s| s.current_branch.clone())
-                                                .unwrap_or_else(|| {
-                                                    dc.spec.spec.repo.default_branch.clone()
-                                                })
-                                                .as_str(),
-                                            wanted_sha,
-                                            &name,
-                                            &ns,
-                                            "created",
-                                        )
-                                        .await;
-                                }
-                            }
-                            Err(e) => return Err(Error::Kube(e)),
-                        }
-                    }
-                }
-            } else {
-                // No wanted SHA - delete the resource if it exists
-                match dc.spec.spec.resource_type {
-                    ResourceType::Deployment => {
-                        let deployments: Api<Deployment> = Api::namespaced(client.clone(), &ns);
-                        match deployments.get(&name).await {
-                            Ok(_) => {
-                                log::info!(
-                                    "Deleting deployment {}/{} as no wanted SHA is set",
-                                    ns,
-                                    name
-                                );
-                                match deployments.delete(&name, &Default::default()).await {
-                                    Ok(_) => {
-                                        // Clear the current SHA from status
-                                        update_deploy_config_status_current_none(
-                                            client, &ns, &name,
-                                        )
-                                        .await?;
-
-                                        // Notify if discord is enabled
-                                        if let Some(ref notifier) = ctx.discord_notifier {
-                                            let _ = notifier
-                                                .notify_k8s_deployment(
-                                                    &dc.spec.spec.repo.owner,
-                                                    &dc.spec.spec.repo.repo,
-                                                    dc.status
-                                                        .as_ref()
-                                                        .and_then(|s| s.current_branch.clone())
-                                                        .unwrap_or_else(|| {
-                                                            dc.spec.spec.repo.default_branch.clone()
-                                                        })
-                                                        .as_str(),
-                                                    "none",
-                                                    &name,
-                                                    &ns,
-                                                    "deleted",
-                                                )
-                                                .await;
-                                        }
-                                    }
-                                    Err(e) => {
-                                        log::error!("Error deleting deployment: {:?}", e);
-                                        return Err(Error::Kube(e));
-                                    }
-                                }
-                            }
-                            Err(kube::Error::Api(kube::error::ErrorResponse {
-                                code: 404, ..
-                            })) => {
-                                log::debug!("No deployment and no wantedSha for {}/{}", ns, name);
-                            }
-                            Err(e) => {
-                                log::error!("Error checking deployment: {:?}", e);
-                                return Err(Error::Kube(e));
-                            }
-                        }
-                    }
-                    ResourceType::CronJob => {
-                        let cronjobs: Api<CronJob> = Api::namespaced(client.clone(), &ns);
-                        match cronjobs.get(&name).await {
-                            Ok(_) => {
-                                log::info!(
-                                    "Deleting cronjob {}/{} as no wanted SHA is set",
-                                    ns,
-                                    name
-                                );
-                                match cronjobs.delete(&name, &Default::default()).await {
-                                    Ok(_) => {
-                                        // Clear the current SHA from status
-                                        update_deploy_config_status_current_none(
-                                            client, &ns, &name,
-                                        )
-                                        .await?;
-
-                                        // Notify if discord is enabled
-                                        if let Some(ref notifier) = ctx.discord_notifier {
-                                            let _ = notifier
-                                                .notify_k8s_deployment(
-                                                    &dc.spec.spec.repo.owner,
-                                                    &dc.spec.spec.repo.repo,
-                                                    dc.status
-                                                        .as_ref()
-                                                        .and_then(|s| s.current_branch.clone())
-                                                        .unwrap_or_else(|| {
-                                                            dc.spec.spec.repo.default_branch.clone()
-                                                        })
-                                                        .as_str(),
-                                                    "none",
-                                                    &name,
-                                                    &ns,
-                                                    "deleted",
-                                                )
-                                                .await;
-                                        }
-                                    }
-                                    Err(e) => {
-                                        log::error!("Error deleting cronjob: {:?}", e);
-                                        return Err(Error::Kube(e));
-                                    }
-                                }
-                            }
-                            Err(kube::Error::Api(kube::error::ErrorResponse {
-                                code: 404, ..
-                            })) => {
-                                log::debug!("No cronjob and no wantedSha for {}/{}", ns, name);
-                            }
-                            Err(e) => {
-                                log::error!("Error checking cronjob: {:?}", e);
-                                return Err(Error::Kube(e));
-                            }
-                        }
-                    }
-                }
+            // Create or update resources as needed
+            let resources = dc.spec.spec.specs.clone();
+            for resource in resources {
+                let mut obj: DynamicObject = serde_json::from_value(resource).map_err(|e| {
+                    anyhow::anyhow!(
+                        "JSON didn't look like a Kubernetes object (apiVersion/kind/metadata): {}",
+                        e
+                    )
+                })?;
+                obj = obj.with_version(wanted_sha);
+                ensure_owner_reference(&mut obj, &dc);
+                ensure_labels(&mut obj);
+                log::info!("Updating resource {}/{}", ns, obj.name_any());
+                apply(client, obj).await?;
             }
+
+            // Prune stale resources
+            let objects = list_namespace_objects(client.clone(), &ns).await?;
+            let stale_objects = objects
+                .iter()
+                .filter(|o| is_owned_by(o, &dc.child_owner_reference()))
+                .filter(|o| o.get_sha() != Some(wanted_sha));
+            for object in stale_objects {
+                log::info!("Deleting stale resource {}/{}", ns, object.name_any());
+                delete_dynamic_object(client.clone(), object).await?;
+            }
+
+            update_deploy_config_status_current(client, &ns, &name, wanted_sha).await?;
+            log::debug!(
+                "Resources for DeployConfig {}/{} have been synced",
+                ns,
+                name
+            );
         }
-        None => {
-            // No status yet - nothing to do
-            log::debug!("No status set for DeployConfig {}/{}", ns, name);
+        (Some(wanted_sha), None) => {
+            log::debug!(
+                "DeployConfig {}/{} has no current SHA, it's resources must be created",
+                ns,
+                name
+            );
+
+            // Create the resources for the first time
+            let resources = dc.spec.spec.specs.clone();
+            for resource in resources {
+                let mut obj: DynamicObject = serde_json::from_value(resource).map_err(|e| {
+                    anyhow::anyhow!(
+                        "JSON didn't look like a Kubernetes object (apiVersion/kind/metadata): {}",
+                        e
+                    )
+                })?;
+                obj = obj.with_version(wanted_sha);
+                ensure_owner_reference(&mut obj, &dc);
+                ensure_labels(&mut obj);
+                log::info!("Creating resource {}/{}", ns, obj.name_any());
+                apply(client, obj).await?;
+            }
+
+            update_deploy_config_status_current(client, &ns, &name, wanted_sha).await?;
+            log::debug!("DeployConfig {}/{} has created its resources", ns, name);
+        }
+        (None, Some(_)) => {
+            log::debug!(
+                "DeployConfig {}/{} has no wanted SHA, it's resources must be undeployed",
+                ns,
+                name
+            );
+
+            let objects = list_namespace_objects(client.clone(), &ns).await?;
+
+            // find objects that are owned by this DeployConfig
+            let owned_objects = objects
+                .iter()
+                .filter(|o| is_owned_by(o, &dc.child_owner_reference()));
+
+            for object in owned_objects {
+                log::info!("Deleting resource {}/{}", ns, object.name_any());
+                delete_dynamic_object(client.clone(), object).await?;
+            }
+
+            update_deploy_config_status_current_none(client, &ns, &name).await?;
+            log::debug!(
+                "Resources for DeployConfig {}/{} have been undeployed",
+                ns,
+                name
+            );
+        }
+        (None, None) => {
+            panic!("Unreachable, we already checked for None == None");
         }
     }
 
     // Requeue reconciliation
     Ok(Action::requeue(Duration::from_secs(60)))
-}
-
-/// Create a new deployment from the DeployConfig
-fn create_deployment_from_config(dc: &DeployConfig, commit_sha: &str) -> Deployment {
-    // Create a new Deployment with the spec from the DeployConfig
-    let deployment = Deployment {
-        metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
-            name: Some(dc.name_any()),
-            namespace: dc.namespace(),
-            labels: Some(
-                [(
-                    "app.kubernetes.io/managed-by".to_string(),
-                    "cicd-controller".to_string(),
-                )]
-                .iter()
-                .cloned()
-                .collect(),
-            ),
-            owner_references: Some(vec![
-                k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
-                    api_version: String::from("cicd.coolkev.com/v1"),
-                    kind: String::from("DeployConfig"),
-                    name: dc.name_any(),
-                    uid: dc.uid().expect("DeployConfig should have a UID"),
-                    controller: Some(true),
-                    block_owner_deletion: Some(true),
-                },
-            ]),
-            ..Default::default()
-        },
-        spec: Some(serde_json::from_value(*dc.spec.spec.spec.clone()).unwrap()),
-        status: None,
-    };
-
-    deployment.with_version(commit_sha)
-}
-
-/// Create a new cronjob from the DeployConfig
-fn create_cronjob_from_config(dc: &DeployConfig, commit_sha: &str) -> CronJob {
-    // Create a new CronJob with the spec from the DeployConfig
-    let cronjob = CronJob {
-        metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
-            name: Some(dc.name_any()),
-            namespace: dc.namespace(),
-            labels: Some(
-                [(
-                    "app.kubernetes.io/managed-by".to_string(),
-                    "cicd-controller".to_string(),
-                )]
-                .iter()
-                .cloned()
-                .collect(),
-            ),
-            owner_references: Some(vec![
-                k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
-                    api_version: String::from("cicd.coolkev.com/v1"),
-                    kind: String::from("DeployConfig"),
-                    name: dc.name_any(),
-                    uid: dc.uid().expect("DeployConfig should have a UID"),
-                    controller: Some(true),
-                    block_owner_deletion: Some(true),
-                },
-            ]),
-            ..Default::default()
-        },
-        spec: Some(serde_json::from_value(*dc.spec.spec.spec.clone()).unwrap()),
-        status: None,
-    };
-
-    cronjob.with_version(commit_sha)
 }
 
 /// Update the DeployConfig status with wanted SHA

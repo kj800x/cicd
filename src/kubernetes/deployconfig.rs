@@ -1,4 +1,5 @@
-use kube::CustomResource;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
+use kube::{CustomResource, ResourceExt};
 use serde::{Deserialize, Serialize};
 
 /// Represents repository information for a DeployConfig
@@ -45,14 +46,6 @@ pub struct DeployConfigStatus {
     pub autodeploy: Option<bool>,
 }
 
-/// The type of resource to manage
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "PascalCase")]
-pub enum ResourceType {
-    Deployment,
-    CronJob,
-}
-
 /// DeployConfig spec fields represent the desired state for a deployment
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct DeployConfigSpecFields {
@@ -61,11 +54,9 @@ pub struct DeployConfigSpecFields {
     /// Autodeploy flag
     #[serde(default)]
     pub autodeploy: bool,
-    /// The type of resource to manage
-    #[serde(rename = "resourceType")]
-    pub resource_type: ResourceType,
-    /// Resource specification (Deployment or CronJob)
-    pub spec: Box<serde_json::Value>,
+    /// Array of Kubernetes resource manifests
+    #[serde(default)]
+    pub specs: Vec<serde_json::Value>,
 }
 
 /// The DeployConfig CustomResource
@@ -83,7 +74,6 @@ pub struct DeployConfigSpecFields {
     printcolumn = r#"{"name":"Current SHA", "jsonPath":".status.currentSha", "type":"string"}"#,
     printcolumn = r#"{"name":"Latest SHA", "jsonPath":".status.latestSha", "type":"string"}"#,
     printcolumn = r#"{"name":"Wanted SHA", "jsonPath":".status.wantedSha", "type":"string"}"#,
-    printcolumn = r#"{"name":"Resource Type", "jsonPath":".spec.resourceType", "type":"string"}"#,
     printcolumn = r#"{"name":"Autodeploy", "jsonPath":".spec.autodeploy", "type":"boolean"}"#
 )]
 pub struct DeployConfigSpec {
@@ -99,5 +89,41 @@ impl DeployConfig {
             .as_ref()
             .and_then(|s| s.autodeploy)
             .unwrap_or(self.spec.spec.autodeploy)
+    }
+
+    pub fn wanted_sha(&self) -> Option<&str> {
+        self.status
+            .as_ref()
+            .and_then(|s| s.wanted_sha.as_ref().map(|s| s.as_str()))
+    }
+
+    pub fn latest_sha(&self) -> Option<&str> {
+        self.status
+            .as_ref()
+            .and_then(|s| s.latest_sha.as_ref().map(|s| s.as_str()))
+    }
+
+    pub fn current_sha(&self) -> Option<&str> {
+        self.status
+            .as_ref()
+            .and_then(|s| s.current_sha.as_ref().map(|s| s.as_str()))
+    }
+
+    pub fn current_branch(&self) -> Option<&str> {
+        self.status
+            .as_ref()
+            .and_then(|s| s.current_branch.as_ref().map(|s| s.as_str()))
+    }
+
+    /// Returns the owner reference to be applied to child resources
+    pub fn child_owner_reference(&self) -> OwnerReference {
+        OwnerReference {
+            api_version: String::from("cicd.coolkev.com/v1"),
+            kind: String::from("DeployConfig"),
+            name: self.name_any(),
+            uid: self.uid().expect("DeployConfig should have a UID"),
+            controller: Some(true),
+            block_owner_deletion: Some(true),
+        }
     }
 }
