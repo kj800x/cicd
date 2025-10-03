@@ -68,6 +68,7 @@ pub struct CheckRunEvent {
     pub repository: Repository,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PingEvent {
     pub zen: String,
@@ -112,6 +113,7 @@ pub struct CheckSuiteEvent {
     pub repository: Repository,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WorkflowRunEvent {
     pub action: String,
@@ -119,6 +121,7 @@ pub struct WorkflowRunEvent {
     pub repository: Repository,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WorkflowRun {
     pub id: u64,
