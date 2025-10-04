@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 use std::{sync::Arc, time::Duration};
 
 use super::DeployConfig;
+use crate::db::{insert_deploy_event, DeployEvent};
 use crate::prelude::*;
 
 pub async fn apply(
@@ -576,6 +577,7 @@ pub async fn handle_build_completed(
     repo: &str,
     branch: &str,
     sha: &str,
+    conn: &PooledConnection<SqliteConnectionManager>,
 ) -> Result<(), Error> {
     log::debug!(
         "Build completed for {}/{} branch {} with SHA {}",
@@ -628,6 +630,18 @@ pub async fn handle_build_completed(
                 name,
                 &sha[0..7]
             );
+            insert_deploy_event(
+                &DeployEvent {
+                    deploy_config: name.to_string(),
+                    team: config.spec.spec.team.clone(),
+                    timestamp: Utc::now().timestamp(),
+                    initiator: "autodeploy".to_string(),
+                    status: "SUCCESS".to_string(),
+                    branch: Some(branch.to_string()),
+                    sha: Some(sha.to_string()),
+                },
+                &conn,
+            )?;
             update_deploy_config_status_wanted(client, &ns, &name, sha).await?;
         }
     }

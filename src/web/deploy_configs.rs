@@ -1,4 +1,6 @@
-use crate::db::{get_latest_build, get_latest_completed_build, Commit};
+use crate::db::{
+    get_latest_build, get_latest_completed_build, insert_deploy_event, Commit, DeployEvent,
+};
 use crate::prelude::*;
 use crate::web::header;
 use kube::{
@@ -1277,6 +1279,56 @@ pub async fn deploy_config(
             })
         }
     };
+
+    match action {
+        Action::DeployLatest | Action::DeployBranch { .. } | Action::DeployCommit { .. } => {
+            let branch: Option<String> = match action {
+                Action::DeployLatest => Some(config.tracking_branch().to_string()),
+                Action::DeployBranch { branch } => Some(branch.clone()),
+                Action::DeployCommit { .. } => None,
+                Action::ToggleAutodeploy | Action::Undeploy => {
+                    panic!("unreachable")
+                }
+            };
+
+            let sha = status
+                .get("status")
+                .and_then(|s| s.get("wantedSha"))
+                .map(|s| s.to_string());
+
+            insert_deploy_event(
+                &DeployEvent {
+                    deploy_config: name.to_string(),
+                    team: config.spec.spec.team.clone(),
+                    timestamp: Utc::now().timestamp(),
+                    initiator: "USER".to_string(),
+                    status: "SUCCESS".to_string(),
+                    branch,
+                    sha,
+                },
+                &conn,
+            )
+            .unwrap();
+        }
+        Action::Undeploy => {
+            insert_deploy_event(
+                &DeployEvent {
+                    deploy_config: name.to_string(),
+                    team: config.spec.spec.team.clone(),
+                    timestamp: Utc::now().timestamp(),
+                    initiator: "USER".to_string(),
+                    status: "SUCCESS".to_string(),
+                    branch: None,
+                    sha: None,
+                },
+                &conn,
+            )
+            .unwrap();
+        }
+        Action::ToggleAutodeploy => {
+            // No event
+        }
+    }
 
     // Apply the status update
     let patch = Patch::Merge(&status);

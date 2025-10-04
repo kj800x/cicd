@@ -290,6 +290,7 @@ async fn handle_build_completed(
                                 &repo.name,
                                 &branch.name,
                                 commit_sha,
+                                conn,
                             )
                             .await
                             {

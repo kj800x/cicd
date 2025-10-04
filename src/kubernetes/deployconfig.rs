@@ -135,6 +135,13 @@ impl TestDeployConfig {
             .and_then(|s| s.current_branch.as_ref().map(|s| s.as_str()))
     }
 
+    pub fn tracking_branch(&self) -> &str {
+        self.status
+            .as_ref()
+            .and_then(|s| s.current_branch.as_ref().map(|s| s.as_str()))
+            .unwrap_or(&self.spec.spec.repo.default_branch)
+    }
+
     /// Returns the owner reference to be applied to child resources
     pub fn child_owner_reference(&self) -> OwnerReference {
         OwnerReference {

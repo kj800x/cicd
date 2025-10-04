@@ -94,6 +94,24 @@ pub struct CommitWithRepoBranches {
     pub parent_shas: Vec<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DeployEvent {
+    /// deploy config name
+    pub deploy_config: String,
+    /// deploy config team
+    pub team: String,
+    /// deploy event timestamp
+    pub timestamp: i64,
+    /// user or autodeploy or revert (what triggered the deploy)
+    pub initiator: String,
+    /// status (future proofing, always SUCCESS right now)
+    pub status: String,
+    /// sha (or null if undeployed)
+    pub sha: Option<String>,
+    /// branch (if the sha was from a branch deployment)
+    pub branch: Option<String>,
+}
+
 pub fn migrate(mut conn: PooledConnection<SqliteConnectionManager>) -> Result<(), rusqlite::Error> {
     let migrations: Migrations = Migrations::new(vec![
         M::up(
@@ -165,6 +183,21 @@ pub fn migrate(mut conn: PooledConnection<SqliteConnectionManager>) -> Result<()
             CREATE INDEX idx_git_commit_parent_commit ON git_commit_parent(commit_sha);
             CREATE INDEX idx_git_commit_parent_parent ON git_commit_parent(parent_sha);
             CREATE INDEX idx_git_commit_parent_repo ON git_commit_parent(repo_id);
+            ",
+        ),
+        M::up(
+            "CREATE TABLE deploy_event (
+                deploy_config TEXT NOT NULL, -- deploy config name
+                team TEXT NOT NULL,          -- deploy config team
+                timestamp INTEGER NOT NULL,  -- deploy event timestamp
+                initiator TEXT NOT NULL,     -- user or autodeploy or revert (what triggered the deploy)
+                status TEXT NOT NULL,        -- status (future proofing, always SUCCESS right now)
+                sha TEXT,                    -- sha (or null if undeployed)
+                branch TEXT                  -- branch (if the sha was from a branch deployment)
+            );
+
+            CREATE INDEX idx_deploy_event_timestamp ON deploy_event(timestamp);
+            CREATE INDEX idx_deploy_event_deploy_config ON deploy_event(deploy_config, timestamp);
             ",
         ),
         // In the future, add more migrations here:
@@ -841,4 +874,131 @@ pub fn get_branches_for_commit(
     }
 
     Ok(branches)
+}
+
+pub fn get_deploy_events_by_deploy_config_name(
+    deploy_config_name: &str,
+    conn: &PooledConnection<SqliteConnectionManager>,
+) -> Result<Vec<DeployEvent>, Error> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT deploy_config, team, timestamp, initiator, status, sha, branch
+             FROM deploy_event
+             WHERE deploy_config = ?1
+             ORDER BY timestamp DESC",
+        )
+        .unwrap();
+
+    let deploy_events_iter = stmt
+        .query_map([deploy_config_name], |row| {
+            Ok(DeployEvent {
+                deploy_config: row.get(0)?,
+                team: row.get(1)?,
+                timestamp: row.get(2)?,
+                initiator: row.get(3)?,
+                status: row.get(4)?,
+                sha: row.get(5)?,
+                branch: row.get(6)?,
+            })
+        })
+        .unwrap();
+
+    let mut deploy_events = Vec::new();
+    for event in deploy_events_iter {
+        deploy_events.push(event?);
+    }
+
+    Ok(deploy_events)
+}
+
+pub fn get_deploy_events_by_team(
+    team: &str,
+    conn: &PooledConnection<SqliteConnectionManager>,
+) -> Result<Vec<DeployEvent>, Error> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT deploy_config, team, timestamp, initiator, status, sha, branch
+             FROM deploy_event
+             WHERE team = ?1
+             ORDER BY timestamp DESC",
+        )
+        .unwrap();
+
+    let deploy_events_iter = stmt
+        .query_map([team], |row| {
+            Ok(DeployEvent {
+                deploy_config: row.get(0)?,
+                team: row.get(1)?,
+                timestamp: row.get(2)?,
+                initiator: row.get(3)?,
+                status: row.get(4)?,
+                sha: row.get(5)?,
+                branch: row.get(6)?,
+            })
+        })
+        .unwrap();
+
+    let mut deploy_events = Vec::new();
+    for event in deploy_events_iter {
+        deploy_events.push(event?);
+    }
+
+    Ok(deploy_events)
+}
+
+pub fn get_recent_deploy_events(
+    conn: &PooledConnection<SqliteConnectionManager>,
+) -> Result<Vec<DeployEvent>, Error> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT deploy_config, team, timestamp, initiator, status, sha, branch
+             FROM deploy_event
+             ORDER BY timestamp DESC
+             LIMIT 100",
+        )
+        .unwrap();
+
+    let deploy_events_iter = stmt
+        .query_map([], |row| {
+            Ok(DeployEvent {
+                deploy_config: row.get(0)?,
+                team: row.get(1)?,
+                timestamp: row.get(2)?,
+                initiator: row.get(3)?,
+                status: row.get(4)?,
+                sha: row.get(5)?,
+                branch: row.get(6)?,
+            })
+        })
+        .unwrap();
+
+    let mut deploy_events = Vec::new();
+    for event in deploy_events_iter {
+        deploy_events.push(event?);
+    }
+
+    Ok(deploy_events)
+}
+
+pub fn insert_deploy_event(
+    deploy_event: &DeployEvent,
+    conn: &PooledConnection<SqliteConnectionManager>,
+) -> Result<(), Error> {
+    conn.prepare(
+        "INSERT INTO deploy_event (deploy_config, team, timestamp, initiator, status, sha, branch)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+    )
+    .unwrap()
+    .execute(params![
+        &deploy_event.deploy_config,
+        &deploy_event.team,
+        deploy_event.timestamp,
+        &deploy_event.initiator,
+        &deploy_event.status,
+        &deploy_event.sha,
+        &deploy_event.branch,
+    ])
+    .unwrap();
+
+    Ok(())
 }
