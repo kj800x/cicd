@@ -57,6 +57,8 @@ pub struct DeployConfigSpecFields {
     /// Array of Kubernetes resource manifests
     #[serde(default)]
     pub specs: Vec<serde_json::Value>,
+    /// Team
+    pub team: String,
 }
 
 /// The DeployConfig CustomResource
@@ -69,6 +71,7 @@ pub struct DeployConfigSpecFields {
     namespaced,
     schema = "disabled",
     status = "DeployConfigStatus",
+    printcolumn = r#"{"name":"Team", "jsonPath":".spec.team", "type": "string"}"#,
     printcolumn = r#"{"name":"Repo", "jsonPath":".spec.repo.repo", "type":"string"}"#,
     printcolumn = r#"{"name":"Branch", "jsonPath":".spec.repo.default_branch", "type":"string"}"#,
     printcolumn = r#"{"name":"Current SHA", "jsonPath":".status.currentSha", "type":"string"}"#,

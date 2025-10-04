@@ -5,6 +5,7 @@ metadata:
   namespace: test
 spec:
   autodeploy: false
+  team: kj800x
   metadata:
   repo:
     owner: kj800x

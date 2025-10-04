@@ -30,6 +30,8 @@ spec:
                       type: string
                 autodeploy:
                   type: boolean
+                team:
+                  type: string
                 specs:
                   type: array
                   description: "Array of Kubernetes resource manifests"
@@ -39,6 +41,7 @@ spec:
               required:
                 - repo
                 - autodeploy
+                - team
                 - specs
             status:
               type: object
@@ -54,6 +57,9 @@ spec:
                 autodeploy:
                   type: boolean
       additionalPrinterColumns:
+        - name: Team
+          jsonPath: .spec.team
+          type: string
         - name: Repo
           jsonPath: .spec.repo.repo
           type: string
