@@ -184,9 +184,9 @@ async fn main() -> std::io::Result<()> {
         .filter_level(log::LevelFilter::Info) // Set default level to Info for most modules
         .filter_module("serenity", log::LevelFilter::Warn) // Serenity crate spams at info level
         .filter_module("actix_web::middleware::logger", log::LevelFilter::Warn) // Actix web middleware logs every request at info
-        .filter_module("kube_runtime::controller", log::LevelFilter::Trace) // Kubernetes controller logs every reconciliation at info level
+        .filter_module("kube_runtime::controller", log::LevelFilter::Warn) // Kubernetes controller logs every reconciliation at info level
         .filter_module("cicd::discord", log::LevelFilter::Info)
-        .filter_module("cicd::kubernetes", log::LevelFilter::Trace)
+        .filter_module("cicd::kubernetes", log::LevelFilter::Info)
         .filter_module("cicd::web", log::LevelFilter::Info)
         .parse_default_env()
         .init();

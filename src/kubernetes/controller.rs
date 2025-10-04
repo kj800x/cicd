@@ -34,7 +34,7 @@ pub async fn apply(
     )
     .map_err(|e| anyhow::anyhow!("failed parsing GVK: {}", e))?;
 
-    log::info!("Applying {}/{}", ns, name);
+    log::debug!("Applying {}/{}", ns, name);
 
     // resolve ApiResource and scope
     let (ar, caps) = pinned_kind(client, &gvk)
@@ -46,32 +46,11 @@ pub async fn apply(
         discovery::Scope::Cluster => Api::all_with(client.clone(), &ar),
     };
 
-    log::info!("API: {api:?}");
-
     // SSA upsert
     let pp = PatchParams::apply("cicd-controller").force(); // drop .force() if you prefer conflicts to surface
-    let response = api
-        .patch(&name, &pp, &Patch::Apply(obj))
+    api.patch(&name, &pp, &Patch::Apply(obj))
         .await
-        .map_err(|e| anyhow::anyhow!("failed to apply object: {}", e));
-
-    log::info!("Response: {response:#?}");
-
-    let fetched = api.get(&name).await?;
-    log::info!(
-        "applied {} rv={:?} managers={:?}",
-        fetched.name_any(),
-        fetched.metadata.resource_version,
-        fetched
-            .managed_fields()
-            .iter()
-            .map(|m| m.manager.clone())
-            .collect::<Vec<_>>(),
-    );
-
-    log::info!("Apply complete");
-
-    response
+        .map_err(|e| anyhow::anyhow!("failed to apply object: {}", e))
 }
 
 /// Delete a DynamicObject
@@ -79,12 +58,11 @@ pub async fn delete_dynamic_object(
     client: Client,
     obj: &DynamicObject,
 ) -> Result<(), anyhow::Error> {
-    log::info!(
+    log::debug!(
         "Deleting {}/{}",
         obj.namespace().unwrap_or_else(|| "default".to_string()),
         obj.name_any()
     );
-    log::info!("Obj: {obj:#?}");
 
     let name = obj.name_any();
     let ns = obj.metadata.namespace.clone(); // may be None for cluster-scoped
@@ -132,7 +110,6 @@ pub async fn list_namespace_objects(
                 kind: ar.kind.clone(),
             };
 
-            println!("Listing namespace objects for {}/{}", ns, ar.plural);
             let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), ns, &ar);
 
             // Paginate to avoid truncation on large lists
@@ -150,12 +127,7 @@ pub async fn list_namespace_objects(
                     };
                 }
 
-                println!(
-                    "Listing namespace objects for {}/{} with params {lp:#?}",
-                    ns, ar.plural
-                );
                 let res = api.list(&lp).await;
-                println!("Got response: {res:#?}");
                 let list = match res {
                     Ok(l) => l,
                     // 405 = method not allowed (common for subresources/misreported caps)
@@ -341,7 +313,7 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
     let current_sha = dc.current_sha();
 
     if wanted_sha == current_sha {
-        log::trace!(
+        log::debug!(
             "DeployConfig {}/{} is already in the desired state",
             ns,
             name
@@ -352,7 +324,7 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
 
     match (wanted_sha, current_sha) {
         (Some(wanted_sha), Some(_)) => {
-            log::debug!(
+            log::info!(
                 "DeployConfig {}/{} current SHA differs from wanted SHA, updating resources",
                 ns,
                 name
@@ -370,36 +342,34 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
                 obj = obj.with_version(wanted_sha);
                 ensure_owner_reference(&mut obj, &dc);
                 ensure_labels(&mut obj);
-                log::info!("New obj: {obj:#?}");
-                log::info!("Updating resource {}/{}", ns, obj.name_any());
                 apply(client, &ns, obj).await?;
             }
 
             // Prune stale resources
-            log::info!("Pruning stale resources...");
+            log::debug!("Pruning stale resources...");
             let objects = list_namespace_objects(client.clone(), &ns).await?;
-            log::info!("Got objects in namespace {}/{}", ns, name);
-            log::info!("Objects: {objects:#?}");
+            log::debug!("Got objects in namespace {}/{}", ns, name);
+            log::debug!("Objects: {objects:#?}");
             let stale_objects = objects
                 .iter()
                 .filter(|o| is_owned_by(o, &dc.child_owner_reference()))
                 .filter(|o| o.get_sha() != Some(wanted_sha));
-            log::info!("Stale objects: {stale_objects:#?}");
+            log::debug!("Stale objects: {stale_objects:#?}");
             for object in stale_objects {
-                log::info!("Deleting stale resource {}/{}", ns, object.name_any());
+                log::debug!("Deleting stale resource {}/{}", ns, object.name_any());
                 delete_dynamic_object(client.clone(), object).await?;
             }
-            log::info!("Pruning stale resources complete");
+            log::debug!("Pruning stale resources complete");
 
             update_deploy_config_status_current(client, &ns, &name, wanted_sha).await?;
-            log::debug!(
+            log::info!(
                 "Resources for DeployConfig {}/{} have been synced",
                 ns,
                 name
             );
         }
         (Some(wanted_sha), None) => {
-            log::debug!(
+            log::info!(
                 "DeployConfig {}/{} has no current SHA, it's resources must be created",
                 ns,
                 name
@@ -417,15 +387,15 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
                 obj = obj.with_version(wanted_sha);
                 ensure_owner_reference(&mut obj, &dc);
                 ensure_labels(&mut obj);
-                log::info!("Creating resource {}/{}", ns, obj.name_any());
+                log::debug!("Creating resource {}/{}", ns, obj.name_any());
                 apply(client, &ns, obj).await?;
             }
 
             update_deploy_config_status_current(client, &ns, &name, wanted_sha).await?;
-            log::debug!("DeployConfig {}/{} has created its resources", ns, name);
+            log::info!("DeployConfig {}/{} has created its resources", ns, name);
         }
         (None, Some(_)) => {
-            log::debug!(
+            log::info!(
                 "DeployConfig {}/{} has no wanted SHA, it's resources must be undeployed",
                 ns,
                 name
@@ -439,12 +409,12 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
                 .filter(|o| is_owned_by(o, &dc.child_owner_reference()));
 
             for object in owned_objects {
-                log::info!("Deleting resource {}/{}", ns, object.name_any());
+                log::debug!("Deleting resource {}/{}", ns, object.name_any());
                 delete_dynamic_object(client.clone(), object).await?;
             }
 
             update_deploy_config_status_current_none(client, &ns, &name).await?;
-            log::debug!(
+            log::info!(
                 "Resources for DeployConfig {}/{} have been undeployed",
                 ns,
                 name
