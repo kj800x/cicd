@@ -14,9 +14,26 @@ pub struct Repository {
     pub default_branch: String,
 }
 
+/// Represents a defining repo for a DeployConfig
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DefiningRepo {
+    /// GitHub username or organization
+    pub owner: String,
+    /// Repository name
+    pub repo: String,
+}
+
 /// DeployConfig status information
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct DeployConfigStatus {
+    /// The repo that contains the definition for this deploy config.
+    /// May not be the artifact repo that this config is tracking.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "definingRepo"
+    )]
+    pub defining_repo: Option<DefiningRepo>,
     /// The currently deployed Git commit SHA
     #[serde(
         default,

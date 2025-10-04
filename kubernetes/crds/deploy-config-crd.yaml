@@ -46,6 +46,13 @@ spec:
             status:
               type: object
               properties:
+                definingRepo:
+                  type: object
+                  properties:
+                    owner:
+                      type: string
+                    repo:
+                      type: string
                 currentSha:
                   type: string
                 wantedSha:
