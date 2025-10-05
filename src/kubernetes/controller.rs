@@ -15,6 +15,7 @@ use std::{sync::Arc, time::Duration};
 
 use super::DeployConfig;
 use crate::db::{insert_deploy_event, DeployEvent};
+use crate::kubernetes::deployconfig::DEPLOY_CONFIG_KIND;
 use crate::prelude::*;
 
 pub async fn apply(
@@ -282,23 +283,14 @@ fn ensure_owner_reference<T: ResourceExt>(resource: &mut T, dc: &DeployConfig) {
 
     // Check if owner reference for this DeployConfig already exists
     let owner_ref_exists = owner_refs.iter().any(|ref_| {
-        ref_.kind == "DeployConfig"
+        ref_.kind == DEPLOY_CONFIG_KIND
             && ref_.name == dc.name_any()
             && ref_.api_version == "cicd.coolkev.com/v1"
     });
 
     // If it doesn't exist, add it
     if !owner_ref_exists {
-        owner_refs.push(
-            k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
-                api_version: String::from("cicd.coolkev.com/v1"),
-                kind: String::from("TestDeployConfig"),
-                name: dc.name_any(),
-                uid: dc.uid().expect("TestDeployConfig should have a UID"),
-                controller: Some(true),
-                block_owner_deletion: Some(true),
-            },
-        );
+        owner_refs.push(dc.child_owner_reference());
     }
 }
 

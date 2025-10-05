@@ -2,6 +2,12 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use kube::{CustomResource, ResourceExt};
 use serde::{Deserialize, Serialize};
 
+pub const DEPLOY_CONFIG_KIND: &str = if cfg!(feature = "test-crd") {
+    "TestDeployConfig"
+} else {
+    "DeployConfig"
+};
+
 /// Represents repository information for a DeployConfig
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Repository {
@@ -80,11 +86,17 @@ pub struct DeployConfigSpecFields {
 
 /// The DeployConfig CustomResource
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(
+    feature = "test-crd",
+    kube(kind = "TestDeployConfig", shortname = "tdc")
+)]
+#[cfg_attr(
+    not(feature = "test-crd"),
+    kube(kind = "DeployConfig", shortname = "dc")
+)]
 #[kube(
     group = "cicd.coolkev.com",
     version = "v1",
-    kind = "TestDeployConfig",
-    shortname = "tdc",
     namespaced,
     schema = "disabled",
     status = "DeployConfigStatus",
@@ -102,7 +114,10 @@ pub struct DeployConfigSpec {
     pub spec: DeployConfigSpecFields,
 }
 
-impl TestDeployConfig {
+#[cfg(feature = "test-crd")]
+pub type DeployConfig = TestDeployConfig;
+
+impl DeployConfig {
     /// Get the current autodeploy state, falling back to the spec's autodeploy if not set in status
     pub fn current_autodeploy(&self) -> bool {
         self.status
@@ -146,7 +161,7 @@ impl TestDeployConfig {
     pub fn child_owner_reference(&self) -> OwnerReference {
         OwnerReference {
             api_version: String::from("cicd.coolkev.com/v1"),
-            kind: String::from("DeployConfig"),
+            kind: String::from(DEPLOY_CONFIG_KIND),
             name: self.name_any(),
             uid: self.uid().expect("DeployConfig should have a UID"),
             controller: Some(true),
