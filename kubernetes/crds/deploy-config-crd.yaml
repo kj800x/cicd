@@ -32,6 +32,9 @@ spec:
                   type: boolean
                 team:
                   type: string
+                kind:
+                  type: string
+                  description: "The kind of deployable (service, worker, job, meta, etc.)"
                 specs:
                   type: array
                   description: "Array of Kubernetes resource manifests"
@@ -66,6 +69,9 @@ spec:
       additionalPrinterColumns:
         - name: Team
           jsonPath: .spec.team
+          type: string
+        - name: Kind
+          jsonPath: .spec.kind
           type: string
         - name: Repo
           jsonPath: .spec.repo.repo

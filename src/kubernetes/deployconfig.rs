@@ -72,6 +72,10 @@ pub struct DeployConfigStatus {
 /// DeployConfig spec fields represent the desired state for a deployment
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct DeployConfigSpecFields {
+    /// Kind of deployable
+    /// Typed as a string to allow for future flexibility
+    /// Right now valid values are "service", "worker", "job", "meta", etc.
+    pub kind: String,
     /// Repository information
     pub repo: Repository,
     /// Autodeploy flag
@@ -101,6 +105,7 @@ pub struct DeployConfigSpecFields {
     schema = "disabled",
     status = "DeployConfigStatus",
     printcolumn = r#"{"name":"Team", "jsonPath":".spec.team", "type": "string"}"#,
+    printcolumn = r#"{"name":"Kind", "jsonPath":".spec.kind", "type": "string"}"#,
     printcolumn = r#"{"name":"Repo", "jsonPath":".spec.repo.repo", "type":"string"}"#,
     printcolumn = r#"{"name":"Branch", "jsonPath":".spec.repo.default_branch", "type":"string"}"#,
     printcolumn = r#"{"name":"Current SHA", "jsonPath":".status.currentSha", "type":"string"}"#,
