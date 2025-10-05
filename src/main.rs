@@ -114,6 +114,8 @@ async fn start_http(
             .app_data(Data::new(pool.clone()))
             .wrap(middleware::Logger::default())
             .route("/api/hey", web_get().to(manual_hello))
+            .service(sync_all_deploy_configs)
+            .service(sync_repo_deploy_configs)
             .route("/deploy", web_get().to(deploy_configs))
             .route("/", web_get().to(index))
             .route("/branch-grid-fragment", web_get().to(branch_grid_fragment))
