@@ -21,7 +21,7 @@ pub struct Repository {
 }
 
 /// Represents a defining repo for a DeployConfig
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct DefiningRepo {
     /// GitHub username or organization
     pub owner: String,
@@ -72,8 +72,10 @@ pub struct DeployConfigStatus {
 /// DeployConfig spec fields represent the desired state for a deployment
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct DeployConfigSpecFields {
-    /// Kind of deployable
-    /// Typed as a string to allow for future flexibility
+    /// Team
+    pub team: String,
+    /// Kind of deployable.
+    /// Typed as a string to allow for future flexibility.
     /// Right now valid values are "service", "worker", "job", "meta", etc.
     pub kind: String,
     /// Repository information
@@ -84,8 +86,6 @@ pub struct DeployConfigSpecFields {
     /// Array of Kubernetes resource manifests
     #[serde(default)]
     pub specs: Vec<serde_json::Value>,
-    /// Team
-    pub team: String,
 }
 
 /// The DeployConfig CustomResource

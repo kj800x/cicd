@@ -1,6 +1,7 @@
 use futures_util::StreamExt;
+use itertools::Itertools;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
-use kube::api::{DeleteParams, GroupVersionKind, TypeMeta};
+use kube::api::{DeleteParams, GroupVersionKind, PostParams, TypeMeta};
 use kube::discovery::pinned_kind;
 use kube::Resource;
 use kube::{
@@ -15,7 +16,7 @@ use std::{sync::Arc, time::Duration};
 
 use super::DeployConfig;
 use crate::db::{insert_deploy_event, DeployEvent};
-use crate::kubernetes::deployconfig::DEPLOY_CONFIG_KIND;
+use crate::kubernetes::deployconfig::{DefiningRepo, DEPLOY_CONFIG_KIND};
 use crate::prelude::*;
 
 pub async fn apply(
@@ -635,6 +636,140 @@ pub async fn handle_build_completed(
                 &conn,
             )?;
             update_deploy_config_status_wanted(client, &ns, &name, sha).await?;
+        }
+    }
+
+    Ok(())
+}
+
+// MARK: - update_deploy_configs_by_defining_repo
+
+async fn update_deploy_config(
+    client: &Client,
+    existing_config: &DeployConfig,
+    final_config: &DeployConfig,
+) -> Result<(), Error> {
+    let ns = existing_config
+        .namespace()
+        .unwrap_or_else(|| "default".to_string());
+    let name = existing_config.name_any();
+
+    let api: Api<DeployConfig> = Api::namespaced(client.clone(), &ns);
+    api.patch(&name, &PatchParams::default(), &Patch::Merge(&final_config))
+        .await?;
+    api.patch_status(
+        &name,
+        &PatchParams::default(),
+        &Patch::Merge(&serde_json::json!({
+            "status": {
+                "defining_repo": final_config.status.as_ref().and_then(|s| s.defining_repo.clone()),
+            }
+        })),
+    )
+    .await?;
+
+    log::info!("Updated DeployConfig {}/{}", ns, name);
+
+    Ok(())
+}
+
+async fn create_deploy_config(client: &Client, final_config: &DeployConfig) -> Result<(), Error> {
+    let ns = final_config
+        .namespace()
+        .unwrap_or_else(|| "default".to_string());
+    let name = final_config.name_any();
+
+    let api: Api<DeployConfig> = Api::namespaced(client.clone(), &ns);
+
+    api.create(&PostParams::default(), final_config).await?;
+    api.replace_status(
+        &name,
+        &PostParams::default(),
+        serde_json::to_vec(&serde_json::json!({
+            "status": {
+                "defining_repo": final_config.status.as_ref().and_then(|s| s.defining_repo.clone()),
+            }
+        }))
+        .unwrap(),
+    )
+    .await?;
+
+    log::info!("Created DeployConfig {}/{}", ns, name);
+
+    Ok(())
+}
+
+async fn delete_deploy_config(
+    client: &Client,
+    existing_config: &DeployConfig,
+) -> Result<(), Error> {
+    let ns = existing_config
+        .namespace()
+        .unwrap_or_else(|| "default".to_string());
+    let name = existing_config.name_any();
+
+    let api: Api<DeployConfig> = Api::namespaced(client.clone(), &ns);
+    api.delete(&name, &DeleteParams::default()).await?;
+
+    log::info!("Deleted DeployConfig {}/{}", ns, name);
+
+    Ok(())
+}
+
+pub async fn update_deploy_configs_by_defining_repo(
+    client: &Client,
+    final_deploy_configs: &[DeployConfig],
+    __defining_repo: &DefiningRepo,
+) -> Result<(), Error> {
+    // Find all existing deploy configs for the defining repo
+    let deploy_configs_api: Api<DeployConfig> = Api::all(client.clone());
+    let deploy_configs = match deploy_configs_api.list(&Default::default()).await {
+        Ok(list) => list.items,
+        Err(e) => {
+            log::error!("Failed to list DeployConfigs: {}", e);
+            return Err(Error::Kube(e));
+        }
+    };
+
+    let new_deploy_config_names = final_deploy_configs
+        .iter()
+        .map(|dc| dc.name_any())
+        .collect::<Vec<String>>();
+
+    // FIXME: We should do the check based on the defining_repo,
+    // that way deploy configs get removed properly
+    // But I'm having trouble with `status` right now.
+    // ChatGPT says we should stop using status and use labels or annotations instead.
+    let matching_configs = deploy_configs
+        .iter()
+        .filter(|dc| new_deploy_config_names.contains(&dc.name_any()))
+        .collect::<Vec<&DeployConfig>>();
+
+    let all_names = matching_configs
+        .iter()
+        .map(|dc| dc.name_any())
+        .chain(final_deploy_configs.iter().map(|dc| dc.name_any()))
+        .unique()
+        .collect::<Vec<String>>();
+
+    for name in all_names {
+        log::info!("Updating DeployConfig {}", name);
+        let existing_config = matching_configs.iter().find(|dc| dc.name_any() == name);
+        let final_config = final_deploy_configs.iter().find(|dc| dc.name_any() == name);
+
+        match (existing_config, final_config) {
+            (Some(existing_config), Some(final_config)) => {
+                update_deploy_config(client, existing_config, final_config).await?;
+            }
+            (None, Some(final_config)) => {
+                create_deploy_config(client, final_config).await?;
+            }
+            (Some(existing_config), None) => {
+                delete_deploy_config(client, existing_config).await?;
+            }
+            (None, None) => {
+                // Do nothing
+            }
         }
     }
 

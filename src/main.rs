@@ -56,6 +56,7 @@ pub mod prelude {
     pub use crate::discord::{setup_discord, DiscordNotifier};
 }
 
+mod crab_ext;
 mod db;
 mod discord;
 mod graphql;
@@ -65,9 +66,11 @@ mod web;
 mod webhooks;
 
 use futures_util::future;
+use octocrab::Octocrab;
 use prometheus::Registry;
 use web::{all_recent_builds, deploy_config, index, watchdog};
 
+use crate::crab_ext::{initialize_octocrabs, Octocrabs};
 use crate::discord::setup_discord;
 use crate::prelude::*;
 
@@ -75,6 +78,7 @@ async fn start_http(
     registry: Registry,
     pool: Pool<SqliteConnectionManager>,
     discord_notifier: Option<DiscordNotifier>,
+    octocrabs: Octocrabs,
 ) -> Result<(), std::io::Error> {
     log::info!("Starting HTTP server at http://localhost:8080/api");
 
@@ -111,6 +115,7 @@ async fn start_http(
                     .cookie_secure(false)
                     .build(),
             )
+            .app_data(Data::new(octocrabs.clone()))
             .app_data(Data::new(pool.clone()))
             .wrap(middleware::Logger::default())
             .route("/api/hey", web_get().to(manual_hello))
@@ -181,6 +186,8 @@ async fn start_kubernetes_controller(
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    let octocrabs: Octocrabs = initialize_octocrabs();
+
     // Configure logger with custom filter to prioritize Discord logs
     env_logger::builder()
         .filter_level(log::LevelFilter::Info) // Set default level to Info for most modules
@@ -236,13 +243,19 @@ async fn main() -> std::io::Result<()> {
     if run_k8s_controller {
         log::info!("Kubernetes controller enabled - will start controller");
         // Start all three services: HTTP server, websockets, and K8s controller
-        let http_server = start_http(registry, pool.clone(), discord_notifier.clone());
-        // let websocket_server = start_websockets(
-        //     websocket_url,
-        //     client_secret,
-        //     pool.clone(),
-        //     discord_notifier.clone(),
-        // );
+        let http_server = start_http(
+            registry,
+            pool.clone(),
+            discord_notifier.clone(),
+            octocrabs.clone(),
+        );
+        let websocket_server = start_websockets(
+            websocket_url,
+            client_secret,
+            pool.clone(),
+            discord_notifier.clone(),
+            octocrabs.clone(),
+        );
         let k8s_controller = start_kubernetes_controller(pool.clone(), discord_notifier);
 
         // Run all services concurrently
@@ -252,9 +265,9 @@ async fn main() -> std::io::Result<()> {
                     log::error!("HTTP server error: {:?}", e);
                 }
             }
-            // _ = websocket_server => {
-            //     log::error!("WebSocket server stopped");
-            // }
+            _ = websocket_server => {
+                log::error!("WebSocket server stopped");
+            }
             result = k8s_controller => {
                 if let Err(e) = result {
                     log::error!("Kubernetes controller error: {:?}", e);
@@ -265,12 +278,18 @@ async fn main() -> std::io::Result<()> {
         log::info!("Kubernetes controller disabled - will not start controller");
         // Just start HTTP and websocket services
         future::select(
-            Box::pin(start_http(registry, pool.clone(), discord_notifier.clone())),
+            Box::pin(start_http(
+                registry,
+                pool.clone(),
+                discord_notifier.clone(),
+                octocrabs.clone(),
+            )),
             Box::pin(start_websockets(
                 websocket_url,
                 client_secret,
                 pool.clone(),
                 discord_notifier,
+                octocrabs.clone(),
             )),
         )
         .await;

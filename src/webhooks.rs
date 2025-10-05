@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::sync::RwLock;
 
+use crate::crab_ext::Octocrabs;
 use crate::kubernetes;
 use crate::prelude::*;
 use futures_util::SinkExt;
@@ -153,7 +154,22 @@ async fn handle_new_commit(
     parent_shas: Option<Vec<String>>,
     conn: &PooledConnection<SqliteConnectionManager>,
     __discord_notifier: &Option<DiscordNotifier>,
+    kube_client: &Option<KubeClient>,
+    octocrabs: &Octocrabs,
 ) -> Result<(), String> {
+    if let Some(kube_client) = kube_client {
+        sync_repo_deploy_configs_impl(
+            octocrabs,
+            kube_client,
+            repo.owner.login.clone(),
+            repo.name.clone(),
+        )
+        .await
+        .map_err(|e| format!("Error syncing deploy configs: {}", e))?;
+    } else {
+        log::warn!("Kubernetes client not available, skipping DeployConfig updates");
+    }
+
     match upsert_repo(repo, conn) {
         Ok(repo_id) => {
             // Store the commit info but don't set any build status
@@ -327,6 +343,7 @@ async fn process_event(
     pool: &Pool<SqliteConnectionManager>,
     discord_notifier: &Option<DiscordNotifier>,
     kube_client: &Option<KubeClient>,
+    octocrabs: &Octocrabs,
 ) {
     let conn = match pool.get() {
         Ok(conn) => conn,
@@ -364,6 +381,8 @@ async fn process_event(
                             .map(|parents| parents.iter().map(|p| p.sha.clone()).collect()),
                         &conn,
                         discord_notifier,
+                        kube_client,
+                        octocrabs,
                     )
                     .await
                     {
@@ -457,6 +476,7 @@ pub async fn start_websockets(
     client_secret: String,
     pool: Pool<SqliteConnectionManager>,
     discord_notifier: Option<DiscordNotifier>,
+    octocrabs: Octocrabs,
 ) {
     // Initialize Kubernetes client for DeployConfig updates
     let kube_client = match KubeClient::try_default().await {
@@ -513,6 +533,7 @@ pub async fn start_websockets(
                 let notifier_ref = &discord_notifier;
                 let pool_ref = &pool;
                 let kube_client_ref = &kube_client;
+                let octocrabs_ref = &octocrabs;
 
                 let last_pong = Arc::new(RwLock::new(Box::new(std::time::Instant::now())));
                 let last_pong_clone = last_pong.clone();
@@ -544,6 +565,7 @@ pub async fn start_websockets(
                                             pool_ref,
                                             notifier_ref,
                                             kube_client_ref,
+                                            octocrabs_ref,
                                         )
                                         .await
                                     }
