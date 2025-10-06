@@ -306,23 +306,21 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
     let wanted_sha = dc.wanted_sha();
     let current_sha = dc.current_sha();
 
-    if wanted_sha == current_sha {
-        log::debug!(
-            "DeployConfig {}/{} is already in the desired state",
-            ns,
-            name
-        );
-
-        return Ok(Action::requeue(Duration::from_secs(5)));
-    }
-
     match (wanted_sha, current_sha) {
-        (Some(wanted_sha), Some(_)) => {
-            log::info!(
-                "DeployConfig {}/{} current SHA differs from wanted SHA, updating resources",
-                ns,
-                name
-            );
+        (Some(wanted_sha), Some(current_sha)) => {
+            if wanted_sha == current_sha {
+                log::debug!(
+                    "DeployConfig {}/{} is already in the desired state. Updating in case DeployConfig specs itself has changed.",
+                    ns,
+                    name
+                );
+            } else {
+                log::info!(
+                    "DeployConfig {}/{} current SHA differs from wanted SHA, updating resources",
+                    ns,
+                    name
+                );
+            }
 
             // Create or update resources as needed
             let resources = dc.spec.spec.specs.clone();
@@ -356,11 +354,13 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
             log::debug!("Pruning stale resources complete");
 
             update_deploy_config_status_current(client, &ns, &name, wanted_sha).await?;
-            log::info!(
-                "Resources for DeployConfig {}/{} have been synced",
-                ns,
-                name
-            );
+            if wanted_sha != current_sha {
+                log::info!(
+                    "Resources for DeployConfig {}/{} have been synced",
+                    ns,
+                    name
+                );
+            }
         }
         (Some(wanted_sha), None) => {
             log::info!(
@@ -415,7 +415,9 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
             );
         }
         (None, None) => {
-            panic!("Unreachable, we already checked for None == None");
+            log::debug!("DeployConfig {}/{} is already undeployed", ns, name);
+
+            return Ok(Action::requeue(Duration::from_secs(5)));
         }
     }
 

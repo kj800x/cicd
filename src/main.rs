@@ -66,7 +66,6 @@ mod web;
 mod webhooks;
 
 use futures_util::future;
-use octocrab::Octocrab;
 use prometheus::Registry;
 use web::{all_recent_builds, deploy_config, index, watchdog};
 
