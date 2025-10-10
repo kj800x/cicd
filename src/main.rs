@@ -102,8 +102,28 @@ async fn start_http(
             .data(pool.clone())
             .finish();
 
-        let mut app = App::new()
-            .wrap(RequestTracing::new())
+        let graphql_api = resource("/api/graphql")
+            .guard(guard::Post())
+            .to(GraphQL::new(schema));
+        let graphiql_page = resource("/api/graphql")
+            .guard(guard::Get())
+            .to(index_graphiql);
+
+        let mut app = App::new();
+
+        // Add Kubernetes client data if available
+        if let Some(client) = &kube_client {
+            app = app
+                .app_data(Data::new(client.clone()))
+                .service(deploy_config)
+        }
+
+        // Add Discord notifier to app data if available
+        if let Some(notifier) = discord_notifier.clone() {
+            app = app.app_data(Data::new(notifier));
+        }
+
+        app.wrap(RequestTracing::new())
             .wrap(RequestMetrics::default())
             .route(
                 "/api/metrics",
@@ -117,10 +137,10 @@ async fn start_http(
             .app_data(Data::new(octocrabs.clone()))
             .app_data(Data::new(pool.clone()))
             .wrap(middleware::Logger::default())
-            .route("/api/hey", web_get().to(manual_hello))
+            .service(manual_hello)
             .service(sync_all_deploy_configs)
             .service(sync_repo_deploy_configs)
-            .route("/deploy", web_get().to(deploy_configs))
+            .service(deploy_configs)
             .route("/", web_get().to(index))
             .route("/branch-grid-fragment", web_get().to(branch_grid_fragment))
             .route("/build-grid-fragment", web_get().to(build_grid_fragment))
@@ -135,33 +155,9 @@ async fn start_http(
             .route(
                 "/fragments/deploy-preview/{namespace}/{name}",
                 web_get().to(deploy_preview),
-            );
-
-        // Add Kubernetes client data if available
-        if let Some(client) = &kube_client {
-            app = app
-                .app_data(Data::new(client.clone()))
-                .service(deploy_config)
-        }
-
-        app = app
-            .service(
-                resource("/api/graphql")
-                    .guard(guard::Post())
-                    .to(GraphQL::new(schema)),
             )
-            .service(
-                resource("/api/graphql")
-                    .guard(guard::Get())
-                    .to(index_graphiql),
-            );
-
-        // Add Discord notifier to app data if available
-        if let Some(notifier) = discord_notifier.clone() {
-            app = app.app_data(Data::new(notifier));
-        }
-
-        app
+            .service(graphql_api)
+            .service(graphiql_page)
     })
     .bind(("0.0.0.0", 8080))?
     .run()
@@ -170,8 +166,13 @@ async fn start_http(
 
 async fn start_kubernetes_controller(
     pool: Pool<SqliteConnectionManager>,
+    enable_k8s_controller: bool,
     discord_notifier: Option<DiscordNotifier>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if (!enable_k8s_controller) {
+        // FIXME: Hold this future open?
+    }
+
     log::info!("Starting Kubernetes controller");
 
     // Initialize Kubernetes client
@@ -207,17 +208,6 @@ async fn main() -> std::io::Result<()> {
     let provider = MeterProvider::builder().with_reader(exporter).build();
     global::set_meter_provider(provider);
 
-    // Get environment variables with defaults for development
-    let websocket_url = std::env::var("WEBSOCKET_URL").unwrap_or_else(|_| {
-        log::warn!("WEBSOCKET_URL not set, using default for development");
-        "wss://example.com/ws".to_string()
-    });
-
-    let client_secret = std::env::var("CLIENT_SECRET").unwrap_or_else(|_| {
-        log::warn!("CLIENT_SECRET not set, using default for development");
-        "development_secret".to_string()
-    });
-
     // connect to SQLite DB
     let manager = SqliteConnectionManager::file(
         std::env::var("DATABASE_PATH").unwrap_or("db.db".to_string()),
@@ -235,64 +225,29 @@ async fn main() -> std::io::Result<()> {
     }
 
     // Determine if we should run the Kubernetes controller
-    let run_k8s_controller = std::env::var("ENABLE_K8S_CONTROLLER")
+    let enable_k8s_controller = std::env::var("ENABLE_K8S_CONTROLLER")
         .map(|v| v.to_lowercase() == "true")
         .unwrap_or(false);
 
-    if run_k8s_controller {
-        log::info!("Kubernetes controller enabled - will start controller");
-        // Start all three services: HTTP server, websockets, and K8s controller
-        let http_server = start_http(
+    future::select(
+        Box::pin(start_http(
             registry,
             pool.clone(),
             discord_notifier.clone(),
             octocrabs.clone(),
-        );
-        let websocket_server = start_websockets(
-            websocket_url,
-            client_secret,
+        )),
+        Box::pin(start_websockets(
             pool.clone(),
             discord_notifier.clone(),
             octocrabs.clone(),
-        );
-        let k8s_controller = start_kubernetes_controller(pool.clone(), discord_notifier);
-
-        // Run all services concurrently
-        tokio::select! {
-            result = http_server => {
-                if let Err(e) = result {
-                    log::error!("HTTP server error: {:?}", e);
-                }
-            }
-            _ = websocket_server => {
-                log::error!("WebSocket server stopped");
-            }
-            result = k8s_controller => {
-                if let Err(e) = result {
-                    log::error!("Kubernetes controller error: {:?}", e);
-                }
-            }
-        }
-    } else {
-        log::info!("Kubernetes controller disabled - will not start controller");
-        // Just start HTTP and websocket services
-        future::select(
-            Box::pin(start_http(
-                registry,
-                pool.clone(),
-                discord_notifier.clone(),
-                octocrabs.clone(),
-            )),
-            Box::pin(start_websockets(
-                websocket_url,
-                client_secret,
-                pool.clone(),
-                discord_notifier,
-                octocrabs.clone(),
-            )),
-        )
-        .await;
-    }
+        )),
+        Box::pin(start_kubernetes_controller(
+            pool.clone(),
+            enable_k8s_controller,
+            discord_notifier,
+        )),
+    )
+    .await;
 
     Ok(())
 }

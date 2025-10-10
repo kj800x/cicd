@@ -472,12 +472,21 @@ async fn process_event(
 }
 
 pub async fn start_websockets(
-    websocket_url: String,
-    client_secret: String,
     pool: Pool<SqliteConnectionManager>,
     discord_notifier: Option<DiscordNotifier>,
     octocrabs: Octocrabs,
 ) {
+    // Get environment variables with defaults for development
+    let websocket_url = std::env::var("WEBSOCKET_URL").unwrap_or_else(|_| {
+        log::warn!("WEBSOCKET_URL not set, using default for development");
+        "wss://example.com/ws".to_string()
+    });
+
+    let client_secret = std::env::var("CLIENT_SECRET").unwrap_or_else(|_| {
+        log::warn!("CLIENT_SECRET not set, using default for development");
+        "development_secret".to_string()
+    });
+
     // Initialize Kubernetes client for DeployConfig updates
     let kube_client = match KubeClient::try_default().await {
         Ok(client) => {

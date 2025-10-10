@@ -643,6 +643,7 @@ impl Action {
 }
 
 /// Handler for the deploy configs page
+#[get("/deploy")]
 pub async fn deploy_configs(
     pool: web::Data<Pool<SqliteConnectionManager>>,
     query: web::Query<std::collections::HashMap<String, String>>,

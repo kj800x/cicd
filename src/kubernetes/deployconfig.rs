@@ -31,7 +31,6 @@ pub struct RepositoryBranch {
     pub branch: String,
 }
 
-
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct DeployConfigArtifactStatus {
     /// The currently deployed Git commit SHA
@@ -51,61 +50,38 @@ pub struct DeployConfigArtifactStatus {
     pub latest_sha: Option<String>,
 
     /// The currently active branch
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "branch"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "branch")]
     pub branch: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct DeployConfigConfigStatus {
     /// GitHub username or organization containing this deploy config
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
 
     /// Repository name containing this deploy config
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
 
     /// The SHA for the current version of the config (specs and metadata)
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha: Option<String>,
 }
-
 
 /// DeployConfig status information
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct DeployConfigStatus {
     /// Information about the current state of the artifact.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact: Option<DeployConfigArtifactStatus>,
 
     /// Information about the current state of the config.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<DeployConfigConfigStatus>,
 
     /// The current state of autodeploy.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autodeploy: Option<bool>,
 }
 
