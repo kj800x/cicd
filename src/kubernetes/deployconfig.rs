@@ -8,38 +8,32 @@ pub const DEPLOY_CONFIG_KIND: &str = if cfg!(feature = "test-crd") {
     "DeployConfig"
 };
 
-/// Represents repository information for a DeployConfig
-#[derive(Clone, Debug, Deserialize, Serialize)]
+/// Represents repository information (without branch) for a DeployConfig
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Repository {
     /// GitHub username or organization
     pub owner: String,
+
     /// Repository name
     pub repo: String,
-    /// Default Git branch to track
-    #[serde(rename = "defaultBranch")]
-    pub default_branch: String,
 }
 
-/// Represents a defining repo for a DeployConfig
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct DefiningRepo {
+/// Represents repository information (including branch) for a DeployConfig
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RepositoryBranch {
     /// GitHub username or organization
     pub owner: String,
+
     /// Repository name
     pub repo: String,
+
+    /// Default Git branch to track
+    pub branch: String,
 }
 
-/// DeployConfig status information
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct DeployConfigStatus {
-    /// The repo that contains the definition for this deploy config.
-    /// May not be the artifact repo that this config is tracking.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "definingRepo"
-    )]
-    pub defining_repo: Option<DefiningRepo>,
+pub struct DeployConfigArtifactStatus {
     /// The currently deployed Git commit SHA
     #[serde(
         default,
@@ -47,24 +41,70 @@ pub struct DeployConfigStatus {
         rename = "currentSha"
     )]
     pub current_sha: Option<String>,
-    /// The latest Git commit SHA for the configured branch
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "latestSha")]
-    pub latest_sha: Option<String>,
+
     /// The Git commit SHA that should be deployed
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "wantedSha")]
     pub wanted_sha: Option<String>,
+
+    /// The latest Git commit SHA for the configured branch
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "latestSha")]
+    pub latest_sha: Option<String>,
+
     /// The currently active branch
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        rename = "currentBranch"
+        rename = "branch"
     )]
-    pub current_branch: Option<String>,
-    /// The current state of autodeploy
+    pub branch: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct DeployConfigConfigStatus {
+    /// GitHub username or organization containing this deploy config
     #[serde(
         default,
-        skip_serializing_if = "Option::is_none",
-        rename = "autodeploy"
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub owner: Option<String>,
+
+    /// Repository name containing this deploy config
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub repo: Option<String>,
+
+    /// The SHA for the current version of the config (specs and metadata)
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub sha: Option<String>,
+}
+
+
+/// DeployConfig status information
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct DeployConfigStatus {
+    /// Information about the current state of the artifact.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub artifact: Option<DeployConfigArtifactStatus>,
+
+    /// Information about the current state of the config.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub config: Option<DeployConfigConfigStatus>,
+
+    /// The current state of autodeploy.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none"
     )]
     pub autodeploy: Option<bool>,
 }
@@ -74,17 +114,21 @@ pub struct DeployConfigStatus {
 pub struct DeployConfigSpecFields {
     /// Team
     pub team: String,
+
     /// Kind of deployable.
     /// Typed as a string to allow for future flexibility.
     /// Right now valid values are "service", "worker", "job", "meta", etc.
     pub kind: String,
+
     /// Repository information
-    pub repo: Repository,
+    pub artifact: RepositoryBranch,
+
     /// Autodeploy flag
     #[serde(default)]
     pub autodeploy: bool,
+
     /// Array of Kubernetes resource manifests
-    #[serde(default)]
+    #[serde(default)] // FIXME: Should this be (default)?
     pub specs: Vec<serde_json::Value>,
 }
 
@@ -106,11 +150,11 @@ pub struct DeployConfigSpecFields {
     status = "DeployConfigStatus",
     printcolumn = r#"{"name":"Team", "jsonPath":".spec.team", "type": "string"}"#,
     printcolumn = r#"{"name":"Kind", "jsonPath":".spec.kind", "type": "string"}"#,
-    printcolumn = r#"{"name":"Repo", "jsonPath":".spec.repo.repo", "type":"string"}"#,
-    printcolumn = r#"{"name":"Branch", "jsonPath":".spec.repo.default_branch", "type":"string"}"#,
-    printcolumn = r#"{"name":"Current SHA", "jsonPath":".status.currentSha", "type":"string"}"#,
-    printcolumn = r#"{"name":"Latest SHA", "jsonPath":".status.latestSha", "type":"string"}"#,
-    printcolumn = r#"{"name":"Wanted SHA", "jsonPath":".status.wantedSha", "type":"string"}"#,
+    printcolumn = r#"{"name":"Repo", "jsonPath":".spec.artifact.repo", "type":"string"}"#,
+    printcolumn = r#"{"name":"Branch", "jsonPath":".spec.artifact.branch", "type":"string"}"#,
+    printcolumn = r#"{"name":"Current SHA", "jsonPath":".status.artifact.currentSha", "type":"string"}"#,
+    printcolumn = r#"{"name":"Latest SHA", "jsonPath":".status.artifact.latestSha", "type":"string"}"#,
+    printcolumn = r#"{"name":"Wanted SHA", "jsonPath":".status.artifact.wantedSha", "type":"string"}"#,
     printcolumn = r#"{"name":"Autodeploy", "jsonPath":".spec.autodeploy", "type":"boolean"}"#
 )]
 pub struct DeployConfigSpec {
@@ -134,32 +178,32 @@ impl DeployConfig {
     pub fn wanted_sha(&self) -> Option<&str> {
         self.status
             .as_ref()
-            .and_then(|s| s.wanted_sha.as_ref().map(|s| s.as_str()))
+            .and_then(|s| s.artifact.wanted_sha.as_ref().map(|s| s.as_str()))
     }
 
     pub fn latest_sha(&self) -> Option<&str> {
         self.status
             .as_ref()
-            .and_then(|s| s.latest_sha.as_ref().map(|s| s.as_str()))
+            .and_then(|s| s.artifact.latest_sha.as_ref().map(|s| s.as_str()))
     }
 
     pub fn current_sha(&self) -> Option<&str> {
         self.status
             .as_ref()
-            .and_then(|s| s.current_sha.as_ref().map(|s| s.as_str()))
+            .and_then(|s| s.artifact.current_sha.as_ref().map(|s| s.as_str()))
     }
 
     pub fn current_branch(&self) -> Option<&str> {
         self.status
             .as_ref()
-            .and_then(|s| s.current_branch.as_ref().map(|s| s.as_str()))
+            .and_then(|s| s.artifact.branch.as_ref().map(|s| s.as_str()))
     }
 
     pub fn tracking_branch(&self) -> &str {
         self.status
             .as_ref()
-            .and_then(|s| s.current_branch.as_ref().map(|s| s.as_str()))
-            .unwrap_or(&self.spec.spec.repo.default_branch)
+            .and_then(|s| s.artifact.branch.as_ref().map(|s| s.as_str()))
+            .unwrap_or(&self.spec.spec.artifact.branch)
     }
 
     /// Returns the owner reference to be applied to child resources

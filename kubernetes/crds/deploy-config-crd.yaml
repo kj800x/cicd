@@ -15,18 +15,18 @@ spec:
             spec:
               type: object
               properties:
-                repo:
+                artifact:
                   type: object
                   required:
                     - owner
                     - repo
-                    - defaultBranch
+                    - branch
                   properties:
                     owner:
                       type: string
                     repo:
                       type: string
-                    defaultBranch:
+                    branch:
                       type: string
                 autodeploy:
                   type: boolean
@@ -42,30 +42,37 @@ spec:
                     type: object
                     x-kubernetes-preserve-unknown-fields: true
               required:
-                - repo
+                - artifact
                 - autodeploy
                 - team
                 - specs
+                - kind
             status:
               type: object
               properties:
-                definingRepo:
+                autodeploy:
+                  type: boolean
+                artifact:
+                  type: object
+                  properties:
+                    currentSha:
+                      type: string
+                    wantedSha:
+                      type: string
+                    latestSha:
+                      type: string
+                    branch:
+                      type: string
+                config:
                   type: object
                   properties:
                     owner:
                       type: string
                     repo:
                       type: string
-                currentSha:
-                  type: string
-                wantedSha:
-                  type: string
-                latestSha:
-                  type: string
-                currentBranch:
-                  type: string
-                autodeploy:
-                  type: boolean
+                    sha:
+                      type: string
+
       additionalPrinterColumns:
         - name: Team
           jsonPath: .spec.team
@@ -74,19 +81,19 @@ spec:
           jsonPath: .spec.kind
           type: string
         - name: Repo
-          jsonPath: .spec.repo.repo
+          jsonPath: .spec.artifact.repo
           type: string
         - name: Default Branch
-          jsonPath: .spec.repo.defaultBranch
+          jsonPath: .spec.artifact.branch
           type: string
         - name: Current Branch
-          jsonPath: .status.currentBranch
+          jsonPath: .status.artifact.branch
           type: string
         - name: Current SHA
-          jsonPath: .status.currentSha
+          jsonPath: .status.artifact.currentSha
           type: string
         - name: Wanted SHA
-          jsonPath: .status.wantedSha
+          jsonPath: .status.artifact.wantedSha
           type: string
         - name: Autodeploy
           jsonPath: .status.autodeploy
