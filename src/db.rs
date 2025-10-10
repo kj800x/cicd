@@ -200,6 +200,15 @@ pub fn migrate(mut conn: PooledConnection<SqliteConnectionManager>) -> Result<()
             CREATE INDEX idx_deploy_event_deploy_config ON deploy_event(deploy_config, timestamp);
             ",
         ),
+        M::up(
+            "CREATE TABLE deploy_config_version (
+                deploy_config TEXT NOT NULL,
+                commit_sha TEXT NOT NULL,
+                repo_id INTEGER NOT NULL,
+                config_hash TEXT NOT NULL
+            );
+            ",
+        )
         // In the future, add more migrations here:
         //M::up("ALTER TABLE friend ADD COLUMN email TEXT;"),
     ]);
