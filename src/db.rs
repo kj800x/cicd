@@ -885,6 +885,7 @@ pub fn get_branches_for_commit(
     Ok(branches)
 }
 
+#[allow(dead_code)]
 pub fn get_deploy_events_by_deploy_config_name(
     deploy_config_name: &str,
     conn: &PooledConnection<SqliteConnectionManager>,
@@ -920,6 +921,7 @@ pub fn get_deploy_events_by_deploy_config_name(
     Ok(deploy_events)
 }
 
+#[allow(dead_code)]
 pub fn get_deploy_events_by_team(
     team: &str,
     conn: &PooledConnection<SqliteConnectionManager>,
@@ -955,6 +957,7 @@ pub fn get_deploy_events_by_team(
     Ok(deploy_events)
 }
 
+#[allow(dead_code)]
 pub fn get_recent_deploy_events(
     conn: &PooledConnection<SqliteConnectionManager>,
 ) -> Result<Vec<DeployEvent>, Error> {

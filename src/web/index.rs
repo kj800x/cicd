@@ -4,6 +4,7 @@ use crate::web::header;
 use chrono::{Local, TimeZone};
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct BranchData {
     pub branch_id: i64,
     pub branch_name: String,
@@ -19,6 +20,7 @@ pub struct BranchData {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct CommitData {
     pub id: i64,
     pub sha: String,
@@ -256,6 +258,7 @@ pub fn render_branch_grid_fragment(pool: &Pool<SqliteConnectionManager>) -> Mark
 }
 
 /// Handler for the branch grid fragment endpoint
+#[get("/branch-grid-fragment")]
 pub async fn branch_grid_fragment(
     pool: web::Data<Pool<SqliteConnectionManager>>,
 ) -> impl Responder {
@@ -267,6 +270,7 @@ pub async fn branch_grid_fragment(
 }
 
 /// Generate HTML for the dashboard homepage that displays recent branches and their commits
+#[get("/")]
 pub async fn index(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Responder {
     // Render the HTML template using Maud
     let markup = html! {

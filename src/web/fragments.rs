@@ -1,4 +1,9 @@
-use crate::prelude::*;
+use crate::{
+    prelude::*,
+    web::{
+        get_commit_by_sha, render_preview_content, Action, BuildFilter, HumanTime, ResolvedVersion,
+    },
+};
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::Pod;
 use kube::{Api, Client, ResourceExt};
@@ -239,7 +244,7 @@ pub async fn build_status(
             div class="alert-content" {
               div class="details" {
                 div {
-                  (resolved_version.format(None, &selected_config.spec.spec.repo.owner, &selected_config.spec.spec.repo.repo))
+                  (resolved_version.format(None, &selected_config.spec.spec.artifact.owner, &selected_config.spec.spec.artifact.repo))
                   @match commit.build_status {
                     BuildStatus::Pending => " is actively being built.",
                     BuildStatus::Failure => " failed to build.",
@@ -291,6 +296,7 @@ pub async fn get_deploy_config(namespace: &str, name: &str) -> Option<DeployConf
     })
 }
 
+#[get("/fragments/deploy-preview/{namespace}/{name}")]
 pub async fn deploy_preview(
     path: web::Path<(String, String)>,
     query: web::Query<std::collections::HashMap<String, String>>,

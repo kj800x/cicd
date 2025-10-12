@@ -8,8 +8,7 @@ use crate::{
     crab_ext::{OctocrabExt, Octocrabs},
     kubernetes::{
         controller::update_deploy_configs_by_defining_repo,
-        deployconfig::{DefiningRepo, DeployConfigSpec, DeployConfigSpecFields},
-        Repository,
+        deployconfig::{DeployConfigSpec, DeployConfigSpecFields, Repository, RepositoryBranch},
     },
     prelude::*,
 };
@@ -53,7 +52,7 @@ pub async fn sync_repo_deploy_configs_impl(
     repo: String,
 ) -> Result<(), anyhow::Error> {
     let result = octocrabs
-        .crab_for(&DefiningRepo {
+        .crab_for(&Repository {
             owner: owner.clone(),
             repo: repo.clone(),
         })
@@ -172,10 +171,10 @@ pub async fn sync_repo_deploy_configs_impl(
         let dc = DeployConfig {
             spec: DeployConfigSpec {
                 spec: DeployConfigSpecFields {
-                    repo: Repository {
+                    artifact: RepositoryBranch {
                         owner: config.artifact_repo.owner,
                         repo: config.artifact_repo.repo,
-                        default_branch: config.artifact_repo.branch,
+                        branch: config.artifact_repo.branch,
                     },
                     autodeploy: config.autodeploy,
                     kind: config.kind,
@@ -189,11 +188,12 @@ pub async fn sync_repo_deploy_configs_impl(
                 ..ObjectMeta::default()
             },
             status: Some(DeployConfigStatus {
-                defining_repo: Some(DefiningRepo {
-                    owner: owner.clone(),
-                    repo: repo.clone(),
-                }),
-                ..DeployConfigStatus::default()
+                // FIXME: This should be set
+                // config: Some(Repository {
+                //     owner: owner.clone(),
+                //     repo: repo.clone(),
+                // }),
+                ..Default::default()
             }),
         };
 
@@ -203,7 +203,7 @@ pub async fn sync_repo_deploy_configs_impl(
     update_deploy_configs_by_defining_repo(
         &client,
         &final_deploy_configs,
-        &DefiningRepo {
+        &Repository {
             owner: owner.clone(),
             repo: repo.clone(),
         },

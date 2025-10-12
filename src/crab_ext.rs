@@ -1,23 +1,20 @@
-use crate::kubernetes::deployconfig::DefiningRepo;
+use crate::kubernetes::deployconfig::IRepo;
 use octocrab::Octocrab;
 
 pub type Octocrabs = Vec<Octocrab>;
 
 pub trait OctocrabExt {
-    async fn crab_for(&self, repo: &DefiningRepo) -> Option<&Octocrab>;
+    async fn crab_for<T: IRepo>(&self, repo: &T) -> Option<&Octocrab>;
 }
 
 impl OctocrabExt for Octocrabs {
-    async fn crab_for(&self, repo: &DefiningRepo) -> Option<&Octocrab> {
+    async fn crab_for<T: IRepo>(&self, repo: &T) -> Option<&Octocrab> {
         if self.len() == 1 {
             return Some(&self[0]);
         }
 
         for crab in self {
-            let result = crab
-                .repos(repo.owner.clone(), repo.repo.clone())
-                .get()
-                .await;
+            let result = crab.repos(repo.owner(), repo.repo()).get().await;
 
             if let Ok(_) = result {
                 return Some(crab);

@@ -115,6 +115,7 @@ pub fn render_build_grid_fragment(pool: &Pool<SqliteConnectionManager>) -> Marku
 }
 
 /// Handler for the build grid fragment endpoint
+#[get("/build-grid-fragment")]
 pub async fn build_grid_fragment(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Responder {
     let fragment = render_build_grid_fragment(&pool);
 
@@ -124,6 +125,7 @@ pub async fn build_grid_fragment(pool: web::Data<Pool<SqliteConnectionManager>>)
 }
 
 /// Generate HTML for the all recent builds page that displays recent builds
+#[get("/all-recent-builds")]
 pub async fn all_recent_builds(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Responder {
     // Render the HTML template using Maud
     let markup = html! {

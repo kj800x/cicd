@@ -13,7 +13,6 @@ pub mod prelude {
     };
 
     pub use crate::resource::*;
-    pub use crate::web::*;
 
     pub use crate::webhooks::{
         start_websockets, GhCommit, RepoOwner, Repository as WebhookRepository,
@@ -65,13 +64,15 @@ mod resource;
 mod web;
 mod webhooks;
 
-use futures_util::future;
 use prometheus::Registry;
 use web::{all_recent_builds, deploy_config, index, watchdog};
 
 use crate::crab_ext::{initialize_octocrabs, Octocrabs};
 use crate::discord::setup_discord;
 use crate::prelude::*;
+use crate::web::{
+    assets, branch_grid_fragment, build_grid_fragment, deploy_configs, deploy_preview,
+};
 
 async fn start_http(
     registry: Registry,
@@ -141,23 +142,15 @@ async fn start_http(
             .service(sync_all_deploy_configs)
             .service(sync_repo_deploy_configs)
             .service(deploy_configs)
-            .route("/", web_get().to(index))
-            .route("/branch-grid-fragment", web_get().to(branch_grid_fragment))
-            .route("/build-grid-fragment", web_get().to(build_grid_fragment))
-            .route("/all-recent-builds", web_get().to(all_recent_builds))
-            .route("/watchdog", web_get().to(watchdog))
-            .route("/assets/htmx.min.js", web_get().to(htmx_js))
-            .route("/assets/idiomorph.min.js", web_get().to(idiomorph_js))
-            .route(
-                "/assets/idiomorph-ext.min.js",
-                web_get().to(idiomorph_ext_js),
-            )
-            .route(
-                "/fragments/deploy-preview/{namespace}/{name}",
-                web_get().to(deploy_preview),
-            )
+            .service(index)
+            .service(branch_grid_fragment)
+            .service(build_grid_fragment)
+            .service(all_recent_builds)
+            .service(watchdog)
+            .service(deploy_preview)
             .service(graphql_api)
             .service(graphiql_page)
+            .service(assets())
     })
     .bind(("0.0.0.0", 8080))?
     .run()
@@ -169,7 +162,7 @@ async fn start_kubernetes_controller(
     enable_k8s_controller: bool,
     discord_notifier: Option<DiscordNotifier>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if (!enable_k8s_controller) {
+    if !enable_k8s_controller {
         // FIXME: Hold this future open?
     }
 
@@ -229,25 +222,24 @@ async fn main() -> std::io::Result<()> {
         .map(|v| v.to_lowercase() == "true")
         .unwrap_or(false);
 
-    future::select(
-        Box::pin(start_http(
-            registry,
-            pool.clone(),
-            discord_notifier.clone(),
-            octocrabs.clone(),
-        )),
-        Box::pin(start_websockets(
-            pool.clone(),
-            discord_notifier.clone(),
-            octocrabs.clone(),
-        )),
-        Box::pin(start_kubernetes_controller(
-            pool.clone(),
-            enable_k8s_controller,
-            discord_notifier,
-        )),
-    )
-    .await;
+    tokio::select! {
+    _ = Box::pin(start_http(
+    registry,
+    pool.clone(),
+    discord_notifier.clone(),
+    octocrabs.clone(),
+    )) =>  {},
+    _ = Box::pin(start_websockets(
+    pool.clone(),
+    discord_notifier.clone(),
+    octocrabs.clone(),
+    )) => {},
+    _ = Box::pin(start_kubernetes_controller(
+    pool.clone(),
+    enable_k8s_controller,
+    discord_notifier,
+    )) => {}
+        };
 
     Ok(())
 }

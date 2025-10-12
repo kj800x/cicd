@@ -15,8 +15,9 @@ use std::collections::BTreeMap;
 use std::{sync::Arc, time::Duration};
 
 use super::DeployConfig;
+use super::Repository;
 use crate::db::{insert_deploy_event, DeployEvent};
-use crate::kubernetes::deployconfig::{DefiningRepo, DEPLOY_CONFIG_KIND};
+use crate::kubernetes::deployconfig::DEPLOY_CONFIG_KIND;
 use crate::prelude::*;
 
 pub async fn apply(
@@ -246,6 +247,7 @@ pub struct ControllerContext {
     /// Kubernetes client
     client: Client,
     /// Discord notifier (if enabled)
+    #[allow(dead_code)]
     discord_notifier: Option<DiscordNotifier>,
 }
 
@@ -593,13 +595,13 @@ pub async fn handle_build_completed(
     };
 
     let matching_configs = deploy_configs.iter().filter(|dc| {
-        dc.spec.spec.repo.owner == owner
-            && dc.spec.spec.repo.repo == repo
+        dc.spec.spec.artifact.owner == owner
+            && dc.spec.spec.artifact.repo == repo
             && dc
                 .status
                 .as_ref()
-                .and_then(|s| s.current_branch.clone())
-                .unwrap_or_else(|| dc.spec.spec.repo.default_branch.clone())
+                .and_then(|s| s.artifact.as_ref().and_then(|a| a.branch.clone()))
+                .unwrap_or_else(|| dc.spec.spec.artifact.branch.clone())
                 == branch
     });
 
@@ -664,7 +666,17 @@ async fn update_deploy_config(
         &PatchParams::default(),
         &Patch::Merge(&serde_json::json!({
             "status": {
-                "defining_repo": final_config.status.as_ref().and_then(|s| s.defining_repo.clone()),
+                "config": {
+                    "repo": final_config.status.as_ref().and_then(|s| s.config.as_ref().and_then(|c| c.repo.clone())),
+                    "sha": final_config.status.as_ref().and_then(|s| s.config.as_ref().and_then(|c| c.sha.clone())),
+                    "owner": final_config.status.as_ref().and_then(|s| s.config.as_ref().and_then(|c| c.owner.clone())),
+                },
+                "artifact": {
+                    "branch": final_config.status.as_ref().and_then(|s| s.artifact.as_ref().and_then(|a| a.branch.clone())),
+                    "currentSha": final_config.status.as_ref().and_then(|s| s.artifact.as_ref().and_then(|a| a.current_sha.clone())),
+                    "latestSha": final_config.status.as_ref().and_then(|s| s.artifact.as_ref().and_then(|a| a.latest_sha.clone())),
+                    "wantedSha": final_config.status.as_ref().and_then(|s| s.artifact.as_ref().and_then(|a| a.wanted_sha.clone())),
+                },
             }
         })),
     )
@@ -689,7 +701,17 @@ async fn create_deploy_config(client: &Client, final_config: &DeployConfig) -> R
         &PostParams::default(),
         serde_json::to_vec(&serde_json::json!({
             "status": {
-                "defining_repo": final_config.status.as_ref().and_then(|s| s.defining_repo.clone()),
+                "config": {
+                    "repo": final_config.status.as_ref().and_then(|s| s.config.as_ref().and_then(|c| c.repo.clone())),
+                    "sha": final_config.status.as_ref().and_then(|s| s.config.as_ref().and_then(|c| c.sha.clone())),
+                    "owner": final_config.status.as_ref().and_then(|s| s.config.as_ref().and_then(|c| c.owner.clone())),
+                },
+                "artifact": {
+                    "branch": final_config.status.as_ref().and_then(|s| s.artifact.as_ref().and_then(|a| a.branch.clone())),
+                    "currentSha": final_config.status.as_ref().and_then(|s| s.artifact.as_ref().and_then(|a| a.current_sha.clone())),
+                    "latestSha": final_config.status.as_ref().and_then(|s| s.artifact.as_ref().and_then(|a| a.latest_sha.clone())),
+                    "wantedSha": final_config.status.as_ref().and_then(|s| s.artifact.as_ref().and_then(|a| a.wanted_sha.clone())),
+                },
             }
         }))
         .unwrap(),
@@ -721,7 +743,7 @@ async fn delete_deploy_config(
 pub async fn update_deploy_configs_by_defining_repo(
     client: &Client,
     final_deploy_configs: &[DeployConfig],
-    __defining_repo: &DefiningRepo,
+    __defining_repo: &Repository,
 ) -> Result<(), Error> {
     // Find all existing deploy configs for the defining repo
     let deploy_configs_api: Api<DeployConfig> = Api::all(client.clone());

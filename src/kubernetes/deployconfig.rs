@@ -8,6 +8,29 @@ pub const DEPLOY_CONFIG_KIND: &str = if cfg!(feature = "test-crd") {
     "DeployConfig"
 };
 
+pub trait IRepo {
+    fn owner(&self) -> &str;
+    fn repo(&self) -> &str;
+}
+
+impl IRepo for Repository {
+    fn owner(&self) -> &str {
+        &self.owner
+    }
+    fn repo(&self) -> &str {
+        &self.repo
+    }
+}
+
+impl IRepo for RepositoryBranch {
+    fn owner(&self) -> &str {
+        &self.owner
+    }
+    fn repo(&self) -> &str {
+        &self.repo
+    }
+}
+
 /// Represents repository information (without branch) for a DeployConfig
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Repository {
@@ -152,33 +175,45 @@ impl DeployConfig {
     }
 
     pub fn wanted_sha(&self) -> Option<&str> {
-        self.status
-            .as_ref()
-            .and_then(|s| s.artifact.wanted_sha.as_ref().map(|s| s.as_str()))
+        self.status.as_ref().and_then(|s| {
+            s.artifact
+                .as_ref()
+                .and_then(|a| a.wanted_sha.as_ref().map(|s| s.as_str()))
+        })
     }
 
     pub fn latest_sha(&self) -> Option<&str> {
-        self.status
-            .as_ref()
-            .and_then(|s| s.artifact.latest_sha.as_ref().map(|s| s.as_str()))
+        self.status.as_ref().and_then(|s| {
+            s.artifact
+                .as_ref()
+                .and_then(|a| a.latest_sha.as_ref().map(|s| s.as_str()))
+        })
     }
 
     pub fn current_sha(&self) -> Option<&str> {
-        self.status
-            .as_ref()
-            .and_then(|s| s.artifact.current_sha.as_ref().map(|s| s.as_str()))
+        self.status.as_ref().and_then(|s| {
+            s.artifact
+                .as_ref()
+                .and_then(|a| a.current_sha.as_ref().map(|s| s.as_str()))
+        })
     }
 
     pub fn current_branch(&self) -> Option<&str> {
-        self.status
-            .as_ref()
-            .and_then(|s| s.artifact.branch.as_ref().map(|s| s.as_str()))
+        self.status.as_ref().and_then(|s| {
+            s.artifact
+                .as_ref()
+                .and_then(|a| a.branch.as_ref().map(|s| s.as_str()))
+        })
     }
 
     pub fn tracking_branch(&self) -> &str {
         self.status
             .as_ref()
-            .and_then(|s| s.artifact.branch.as_ref().map(|s| s.as_str()))
+            .and_then(|s| {
+                s.artifact
+                    .as_ref()
+                    .and_then(|a| a.branch.as_ref().map(|s| s.as_str()))
+            })
             .unwrap_or(&self.spec.spec.artifact.branch)
     }
 

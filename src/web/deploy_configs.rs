@@ -2,7 +2,7 @@ use crate::db::{
     get_latest_build, get_latest_completed_build, insert_deploy_event, Commit, DeployEvent,
 };
 use crate::prelude::*;
-use crate::web::header;
+use crate::web::{build_status, deploy_status, header};
 use kube::{
     api::{Api, Patch, PatchParams},
     client::Client,
@@ -150,6 +150,7 @@ pub fn get_commit_by_sha(
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum BuildFilter {
     Any,
     Completed,
@@ -189,17 +190,15 @@ impl ResolvedVersion {
     ) -> Self {
         match &config.status {
             None => ResolvedVersion::Undeployed,
-            Some(status) => match &status.wanted_sha {
+            Some(status) => match &status.artifact.as_ref().and_then(|a| a.wanted_sha.as_ref()) {
                 Some(sha) => {
                     let commit = get_commit_by_sha(sha, conn);
 
+                    // FIXME: Technically we don't know if the commit was selected as part of a tracking branch or not
                     match commit {
                         Some(commit) => ResolvedVersion::BranchTracked {
                             sha: sha.to_string(),
-                            branch: status
-                                .current_branch
-                                .clone()
-                                .unwrap_or_else(|| config.spec.spec.repo.default_branch.clone()),
+                            branch: config.tracking_branch().to_string(),
                             build_time: commit.timestamp as u64,
                         },
                         None => ResolvedVersion::UnknownSha {
@@ -220,28 +219,23 @@ impl ResolvedVersion {
     ) -> Self {
         match action {
             Action::DeployLatest => {
-                let branch = config
-                    .status
-                    .as_ref()
-                    .and_then(|s| s.current_branch.clone())
-                    .unwrap_or(config.spec.spec.repo.default_branch.clone());
-
+                let branch = config.tracking_branch();
                 let commit = match build_filter {
                     BuildFilter::Any => get_latest_build(
-                        &config.spec.spec.repo.owner,
-                        &config.spec.spec.repo.repo,
+                        &config.spec.spec.artifact.owner,
+                        &config.spec.spec.artifact.repo,
                         &branch,
                         conn,
                     ),
                     BuildFilter::Completed => get_latest_completed_build(
-                        &config.spec.spec.repo.owner,
-                        &config.spec.spec.repo.repo,
+                        &config.spec.spec.artifact.owner,
+                        &config.spec.spec.artifact.repo,
                         &branch,
                         conn,
                     ),
                     BuildFilter::Successful => get_latest_successful_build(
-                        &config.spec.spec.repo.owner,
-                        &config.spec.spec.repo.repo,
+                        &config.spec.spec.artifact.owner,
+                        &config.spec.spec.artifact.repo,
                         &branch,
                         conn,
                     ),
@@ -250,7 +244,7 @@ impl ResolvedVersion {
                 match commit {
                     Some(commit) => ResolvedVersion::BranchTracked {
                         sha: commit.sha,
-                        branch: branch.clone(),
+                        branch: branch.to_string(),
                         build_time: commit.timestamp as u64,
                     },
                     None => ResolvedVersion::ResolutionFailed,
@@ -259,20 +253,20 @@ impl ResolvedVersion {
             Action::DeployBranch { branch } => {
                 let commit = match build_filter {
                     BuildFilter::Any => get_latest_build(
-                        &config.spec.spec.repo.owner,
-                        &config.spec.spec.repo.repo,
+                        &config.spec.spec.artifact.owner,
+                        &config.spec.spec.artifact.repo,
                         &branch,
                         conn,
                     ),
                     BuildFilter::Completed => get_latest_completed_build(
-                        &config.spec.spec.repo.owner,
-                        &config.spec.spec.repo.repo,
+                        &config.spec.spec.artifact.owner,
+                        &config.spec.spec.artifact.repo,
                         &branch,
                         conn,
                     ),
                     BuildFilter::Successful => get_latest_successful_build(
-                        &config.spec.spec.repo.owner,
-                        &config.spec.spec.repo.repo,
+                        &config.spec.spec.artifact.owner,
+                        &config.spec.spec.artifact.repo,
                         &branch,
                         conn,
                     ),
@@ -448,18 +442,10 @@ impl DeployTransition {
 
 /// Generate the status header showing current branch and autodeploy status
 fn generate_status_header(config: &DeployConfig, owner: &str, repo: &str) -> Markup {
-    let default_branch = config.spec.spec.repo.default_branch.clone();
+    let default_branch = config.spec.spec.artifact.branch.clone();
     let default_autodeploy = config.spec.spec.autodeploy;
-    let current_autodeploy = config
-        .status
-        .as_ref()
-        .and_then(|s| s.autodeploy)
-        .unwrap_or(default_autodeploy);
-    let current_branch = config
-        .status
-        .as_ref()
-        .and_then(|s| s.current_branch.clone())
-        .unwrap_or(default_branch.clone());
+    let current_autodeploy = config.current_autodeploy();
+    let current_branch = config.tracking_branch();
 
     html! {
         div class="status-header" {
@@ -467,7 +453,7 @@ fn generate_status_header(config: &DeployConfig, owner: &str, repo: &str) -> Mar
                 "Tracking branch: "
                 strong {
                     (GitRef(
-                        current_branch.clone(),
+                        current_branch.to_string(),
                         owner.to_string(),
                         repo.to_string(),
                         true,
@@ -503,8 +489,8 @@ pub async fn render_preview_content(
     action: &Action,
     conn: &PooledConnection<SqliteConnectionManager>,
 ) -> Markup {
-    let owner = selected_config.spec.spec.repo.owner.clone();
-    let repo = selected_config.spec.spec.repo.repo.clone();
+    let owner = selected_config.spec.spec.artifact.owner.clone();
+    let repo = selected_config.spec.spec.artifact.repo.clone();
 
     let preview_content = match action {
         Action::DeployLatest
@@ -567,8 +553,8 @@ async fn generate_preview(
     action: &Action,
     conn: &PooledConnection<SqliteConnectionManager>,
 ) -> Markup {
-    let owner = selected_config.spec.spec.repo.owner.clone();
-    let repo = selected_config.spec.spec.repo.repo.clone();
+    let owner = selected_config.spec.spec.artifact.owner.clone();
+    let repo = selected_config.spec.spec.artifact.repo.clone();
 
     // Wrap the preview content in the container markup
     html! {
@@ -1075,7 +1061,7 @@ pub async fn deploy_configs(
                                 }
 
                                 @if let Some(selected_config) = selected_config {
-                                    @let current_branch = selected_config.status.as_ref().and_then(|status| status.current_branch.clone()).unwrap_or(selected_config.spec.spec.repo.default_branch.clone());
+                                    @let current_branch = selected_config.tracking_branch();
                                     form action="/deploy" method="get" {
                                         input type="hidden" name="selected" value=(format!("{}/{}", selected_config.namespace().unwrap_or_default(), selected_config.name_any()));
 
@@ -1102,7 +1088,7 @@ pub async fn deploy_configs(
                                         @if action.is_deploy() {
                                             div class="action-input" {
                                                 label for="branch" { "Branch" }
-                                                input id="branch" type="text" name="branch" placeholder="Enter branch name" value=(query.get("branch").unwrap_or(&current_branch)) onblur="this.form.submit()";
+                                                input id="branch" type="text" name="branch" placeholder="Enter branch name" value=(query.get("branch").unwrap_or(&current_branch.to_string())) onblur="this.form.submit()";
                                             }
                                             div class="action-input" {
                                                 label for="sha" { "SHA override" }

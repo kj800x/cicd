@@ -124,7 +124,7 @@ fn render_issue(issue: &WatchdogIssue) -> Markup {
             // Link to deploy with default branch to fix the non-default branch issue
             format!(
                 "{}&action=deploy&branch={}",
-                base_url, issue.config.spec.spec.repo.default_branch
+                base_url, issue.config.spec.spec.artifact.branch
             )
         }
         WatchdogIssueType::AutodeployMismatch => {
@@ -134,7 +134,7 @@ fn render_issue(issue: &WatchdogIssue) -> Markup {
             // Link to deploy with default branch since we want to deploy the standard version
             format!(
                 "{}&action=deploy&branch={}",
-                base_url, issue.config.spec.spec.repo.default_branch
+                base_url, issue.config.spec.spec.artifact.branch
             )
         }
         // For out of sync and failing builds, just link to the deploy page
@@ -163,6 +163,7 @@ fn render_issue(issue: &WatchdogIssue) -> Markup {
     }
 }
 
+#[get("/watchdog")]
 pub async fn watchdog(
     pool: web::Data<Pool<SqliteConnectionManager>>,
     client: Option<web::Data<Client>>,
@@ -195,94 +196,88 @@ pub async fn watchdog(
     // Check each deploy config for issues
     for config in deploy_configs {
         // Check for non-default branch
-        if let Some(status) = &config.status {
-            if let Some(current_branch) = &status.current_branch {
-                if current_branch != &config.spec.spec.repo.default_branch {
-                    issues.push(WatchdogIssue::new(
-                        WatchdogIssueType::NonDefaultBranch,
-                        config.clone(),
-                        format!(
-                            "Tracking '{}' instead of default branch '{}'",
-                            current_branch, config.spec.spec.repo.default_branch
-                        ),
-                    ));
-                }
-            }
+        let tracking_branch = &config.tracking_branch();
+        if tracking_branch != &config.spec.spec.artifact.branch {
+            issues.push(WatchdogIssue::new(
+                WatchdogIssueType::NonDefaultBranch,
+                config.clone(),
+                format!(
+                    "Tracking '{}' instead of default branch '{}'",
+                    tracking_branch, config.spec.spec.artifact.branch
+                ),
+            ));
+        }
 
-            // Check for autodeploy mismatch
-            let current_autodeploy = status.autodeploy.unwrap_or(config.spec.spec.autodeploy);
-            if current_autodeploy != config.spec.spec.autodeploy {
+        // Check for autodeploy mismatch
+        let current_autodeploy = config.current_autodeploy();
+        if current_autodeploy != config.spec.spec.autodeploy {
+            issues.push(WatchdogIssue::new(
+                WatchdogIssueType::AutodeployMismatch,
+                config.clone(),
+                format!(
+                    "State: {}, Spec: {}",
+                    current_autodeploy, config.spec.spec.autodeploy
+                ),
+            ));
+        }
+
+        // Check for failing builds
+        let tracking_branch = config.tracking_branch();
+
+        let commit = get_latest_completed_build(
+            &config.spec.spec.artifact.owner,
+            &config.spec.spec.artifact.repo,
+            tracking_branch,
+            &conn,
+        );
+
+        if let Some(commit) = commit {
+            if commit.build_status == BuildStatus::Failure {
                 issues.push(WatchdogIssue::new(
-                    WatchdogIssueType::AutodeployMismatch,
+                    WatchdogIssueType::FailingBuild,
                     config.clone(),
                     format!(
-                        "State: {}, Spec: {}",
-                        current_autodeploy, config.spec.spec.autodeploy
+                        "Branch '{}' HEAD ({}) has a failing build",
+                        tracking_branch,
+                        if commit.sha.len() >= 7 {
+                            &commit.sha[..7]
+                        } else {
+                            &commit.sha
+                        }
                     ),
                 ));
             }
+        }
 
-            // Check for failing builds
-            let current_branch = status
-                .current_branch
-                .as_ref()
-                .unwrap_or(&config.spec.spec.repo.default_branch);
+        // Check for undeployed with autodeploy
+        if config.current_autodeploy() == true && config.wanted_sha().is_none() {
+            issues.push(WatchdogIssue::new(
+                WatchdogIssueType::UndeployedWithAutodeploy,
+                config.clone(),
+                "Config is undeployed but has autodeploy enabled".to_string(),
+            ));
+        }
 
-            let commit = get_latest_completed_build(
-                &config.spec.spec.repo.owner,
-                &config.spec.spec.repo.repo,
-                current_branch,
-                &conn,
-            );
-
-            if let Some(commit) = commit {
-                if commit.build_status == BuildStatus::Failure {
-                    issues.push(WatchdogIssue::new(
-                        WatchdogIssueType::FailingBuild,
-                        config.clone(),
-                        format!(
-                            "Branch '{}' HEAD ({}) has a failing build",
-                            current_branch,
-                            if commit.sha.len() >= 7 {
-                                &commit.sha[..7]
-                            } else {
-                                &commit.sha
-                            }
-                        ),
-                    ));
-                }
-            }
-
-            // Check for undeployed with autodeploy
-            if status.autodeploy == Some(true) && status.wanted_sha.is_none() {
+        // Check for out of sync
+        if let (Some(latest), Some(wanted)) = (&config.latest_sha(), &config.wanted_sha()) {
+            if latest != wanted {
                 issues.push(WatchdogIssue::new(
-                    WatchdogIssueType::UndeployedWithAutodeploy,
+                    WatchdogIssueType::OutOfSync,
                     config.clone(),
-                    "Config is undeployed but has autodeploy enabled".to_string(),
+                    format!(
+                        "Latest: {}, Wanted: {}",
+                        if latest.len() >= 7 {
+                            &latest[..7]
+                        } else {
+                            latest
+                        },
+                        if wanted.len() >= 7 {
+                            &wanted[..7]
+                        } else {
+                            wanted
+                        }
+                    ),
                 ));
-            }
-
-            // Check for out of sync
-            if let (Some(latest), Some(wanted)) = (&status.latest_sha, &status.wanted_sha) {
-                if latest != wanted {
-                    issues.push(WatchdogIssue::new(
-                        WatchdogIssueType::OutOfSync,
-                        config.clone(),
-                        format!(
-                            "Latest: {}, Wanted: {}",
-                            if latest.len() >= 7 {
-                                &latest[..7]
-                            } else {
-                                latest
-                            },
-                            if wanted.len() >= 7 {
-                                &wanted[..7]
-                            } else {
-                                wanted
-                            }
-                        ),
-                    ));
-                }
             }
         }
     }
