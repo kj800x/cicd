@@ -51,6 +51,7 @@ pub async fn deploy_status(selected_config: &DeployConfig) -> Vec<Markup> {
                         .unwrap_or(0);
 
                     // only show if transition_time is within the last 5 minutes
+                    #[allow(clippy::expect_used)]
                     if transition_time
                         > SystemTime::now()
                             .duration_since(UNIX_EPOCH)
@@ -115,12 +116,10 @@ pub async fn deploy_status(selected_config: &DeployConfig) -> Vec<Markup> {
     let deployment_pods: Vec<&Pod> = pods
         .iter()
         .filter(|pod| {
-            pod.metadata
-                .owner_references
-                .as_ref().is_some_and(|refs| {
-                    refs.iter()
-                        .any(|ref_| ref_.kind == "ReplicaSet" && ref_.name.starts_with(&name))
-                })
+            pod.metadata.owner_references.as_ref().is_some_and(|refs| {
+                refs.iter()
+                    .any(|ref_| ref_.kind == "ReplicaSet" && ref_.name.starts_with(&name))
+            })
         })
         .collect();
 
@@ -225,8 +224,6 @@ pub async fn build_status(
         Some(commit) => commit,
         None => return vec![],
     };
-
-    
 
     match commit.build_status {
         BuildStatus::Success => vec![],

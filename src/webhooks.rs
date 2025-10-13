@@ -135,6 +135,7 @@ pub struct WorkflowRun {
 // Pushes can be for reasons other than branches, such as tags
 fn extract_branch_name(r#ref: &str) -> Option<String> {
     // This regex is a compile-time constant pattern, so expect is appropriate
+    #[allow(clippy::expect_used)]
     let branch_regex =
         Regex::new(r"^refs/heads/(.+)$").expect("Branch regex pattern should be valid");
     if let Some(captures) = branch_regex.captures(r#ref) {
@@ -145,6 +146,7 @@ fn extract_branch_name(r#ref: &str) -> Option<String> {
 }
 
 /// Helper function to handle a new commit with no build status yet
+#[allow(clippy::too_many_arguments)]
 async fn handle_new_commit(
     repo: &Repository,
     r#ref: &str,
@@ -249,6 +251,7 @@ async fn handle_build_started(
 }
 
 /// Helper function to mark a build as completed
+#[allow(clippy::too_many_arguments)]
 async fn handle_build_completed(
     repo: &Repository,
     commit_sha: &str,
@@ -397,90 +400,94 @@ async fn process_event(
             }
         }
         "check_run" => match serde_json::from_value::<CheckRunEvent>(event.payload) {
-            Ok(payload) => if payload.action.as_str() == "created" {
-                let repo_id = match upsert_repo(&payload.repository, &conn) {
-                    Ok(id) => id,
-                    Err(e) => {
-                        log::error!("Failed to upsert repository: {}", e);
-                        return;
-                    }
-                };
+            Ok(payload) => {
+                if payload.action.as_str() == "created" {
+                    let repo_id = match upsert_repo(&payload.repository, &conn) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            log::error!("Failed to upsert repository: {}", e);
+                            return;
+                        }
+                    };
 
-                let head_commit = match get_commit(
-                    &conn,
-                    repo_id as i64,
-                    payload.check_run.check_suite.head_sha.clone(),
-                ) {
-                    Ok(Some(commit)) => commit,
-                    Ok(None) => {
-                        log::error!(
-                            "Commit not found: {}",
-                            payload.check_run.check_suite.head_sha
-                        );
-                        return;
-                    }
-                    Err(e) => {
-                        log::error!("Failed to get commit: {}", e);
-                        return;
-                    }
-                };
+                    let head_commit = match get_commit(
+                        &conn,
+                        repo_id as i64,
+                        payload.check_run.check_suite.head_sha.clone(),
+                    ) {
+                        Ok(Some(commit)) => commit,
+                        Ok(None) => {
+                            log::error!(
+                                "Commit not found: {}",
+                                payload.check_run.check_suite.head_sha
+                            );
+                            return;
+                        }
+                        Err(e) => {
+                            log::error!("Failed to get commit: {}", e);
+                            return;
+                        }
+                    };
 
-                if let Err(e) = handle_build_started(
-                    &payload.repository,
-                    &head_commit.sha,
-                    &head_commit.message,
-                    &format!(
-                        "https://github.com/{}/{}/commit/{}/checks",
-                        payload.repository.owner.login,
-                        payload.repository.name,
-                        head_commit.sha
-                    ),
-                    &conn,
-                    discord_notifier,
-                )
-                .await
-                {
-                    log::error!("Error handling build start: {}", e);
+                    if let Err(e) = handle_build_started(
+                        &payload.repository,
+                        &head_commit.sha,
+                        &head_commit.message,
+                        &format!(
+                            "https://github.com/{}/{}/commit/{}/checks",
+                            payload.repository.owner.login,
+                            payload.repository.name,
+                            head_commit.sha
+                        ),
+                        &conn,
+                        discord_notifier,
+                    )
+                    .await
+                    {
+                        log::error!("Error handling build start: {}", e);
+                    }
                 }
-            },
+            }
             Err(e) => {
                 log::error!("Failed to parse check run event: {}", e);
             }
         },
         "check_suite" => match serde_json::from_value::<CheckSuiteEvent>(event.payload) {
-            Ok(payload) => if payload.action.as_str() == "completed" {
-                let build_status = BuildStatus::of(
-                    &payload.check_suite.status,
-                    &payload.check_suite.conclusion.as_deref(),
-                );
+            Ok(payload) => {
+                if payload.action.as_str() == "completed" {
+                    let build_status = BuildStatus::of(
+                        &payload.check_suite.status,
+                        &payload.check_suite.conclusion.as_deref(),
+                    );
 
-                let head_commit_message = payload
-                    .check_suite
-                    .head_commit
-                    .as_ref()
-                    .map(|c| c.message.as_str())
-                    .unwrap_or("No commit message");
+                    let head_commit_message = payload
+                        .check_suite
+                        .head_commit
+                        .as_ref()
+                        .map(|c| c.message.as_str())
+                        .unwrap_or("No commit message");
 
-                if let Err(e) = handle_build_completed(
-                    &payload.repository,
-                    &payload.check_suite.head_sha,
-                    head_commit_message,
-                    build_status,
-                    &format!(
-                        "https://github.com/{}/{}/commit/{}/checks",
-                        payload.repository.owner.login,
-                        payload.repository.name,
-                        payload.check_suite.head_sha
-                    ),
-                    &conn,
-                    discord_notifier,
-                    kube_client,
-                )
-                .await
-                {
-                    log::error!("Error handling build completion: {}", e);
+                    if let Err(e) = handle_build_completed(
+                        &payload.repository,
+                        &payload.check_suite.head_sha,
+                        head_commit_message,
+                        build_status,
+                        &format!(
+                            "https://github.com/{}/{}/commit/{}/checks",
+                            payload.repository.owner.login,
+                            payload.repository.name,
+                            payload.check_suite.head_sha
+                        ),
+                        &conn,
+                        discord_notifier,
+                        kube_client,
+                    )
+                    .await
+                    {
+                        log::error!("Error handling build completion: {}", e);
+                    }
                 }
-            },
+            }
             Err(e) => {
                 log::error!("Failed to parse check suite event: {}", e);
             }

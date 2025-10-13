@@ -202,6 +202,7 @@ async fn main() -> std::io::Result<()> {
         .init();
 
     let registry = prometheus::Registry::new();
+    #[allow(clippy::expect_used)]
     let exporter = opentelemetry_prometheus::exporter()
         .with_registry(registry.clone())
         .build()
@@ -213,8 +214,11 @@ async fn main() -> std::io::Result<()> {
     let manager = SqliteConnectionManager::file(
         std::env::var("DATABASE_PATH").unwrap_or("db.db".to_string()),
     );
+    #[allow(clippy::expect_used)]
     let pool = Pool::new(manager).expect("Failed to create database pool");
+    #[allow(clippy::expect_used)]
     migrate(
+        #[allow(clippy::expect_used)]
         pool.get()
             .expect("Failed to get database connection from pool"),
     )

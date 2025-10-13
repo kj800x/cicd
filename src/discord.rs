@@ -320,6 +320,7 @@ impl DiscordNotifier {
     }
 
     /// Send a notification when a Kubernetes deployment is created or updated
+    #[allow(clippy::too_many_arguments)]
     pub async fn notify_k8s_deployment(
         &self,
         owner: &str,

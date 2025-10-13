@@ -16,7 +16,7 @@ impl OctocrabExt for Octocrabs {
         for crab in self {
             let result = crab.repos(repo.owner(), repo.repo()).get().await;
 
-            if let Ok(_) = result {
+            if result.is_ok() {
                 return Some(crab);
             }
         }
@@ -34,6 +34,7 @@ pub fn initialize_octocrabs() -> Octocrabs {
     github_pats
         .split(',')
         .map(|pat| {
+            #[allow(clippy::expect_used)]
             Octocrab::builder()
                 .personal_token(pat)
                 .build()

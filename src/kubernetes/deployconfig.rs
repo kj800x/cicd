@@ -223,6 +223,7 @@ impl DeployConfig {
             api_version: String::from("cicd.coolkev.com/v1"),
             kind: String::from(DEPLOY_CONFIG_KIND),
             name: self.name_any(),
+            #[allow(clippy::expect_used)]
             uid: self.uid().expect("DeployConfig should have a UID"),
             controller: Some(true),
             block_owner_deletion: Some(true),

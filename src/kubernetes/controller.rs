@@ -200,6 +200,7 @@ impl WithInterpolatedVersion for serde_json::Value {
 
 impl WithInterpolatedVersion for serde_json::Map<String, serde_json::Value> {
     fn with_interpolated_version(&self, version: &str) -> Self {
+        #[allow(clippy::expect_used)]
         serde_json::Value::Object(self.clone())
             .with_interpolated_version(version)
             .as_object()
@@ -222,6 +223,7 @@ impl WithVersion for DynamicObject {
             obj.meta_mut().annotations = Some(BTreeMap::new());
         }
 
+        #[allow(clippy::expect_used)]
         obj.meta_mut()
             .annotations
             .as_mut()
