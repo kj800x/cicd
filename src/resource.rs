@@ -1,14 +1,20 @@
 use std::collections::HashMap;
 
 use kube::{api::ObjectMeta, Client};
-use octocrab::models::repos::Content;
+use octocrab::{
+    models::repos::{Content, Object},
+    params::repos::Reference,
+};
 use serde_json::Value;
 
 use crate::{
     crab_ext::{OctocrabExt, Octocrabs},
     kubernetes::{
         controller::update_deploy_configs_by_defining_repo,
-        deployconfig::{DeployConfigSpec, DeployConfigSpecFields, Repository, RepositoryBranch},
+        deployconfig::{
+            DeployConfigConfigStatus, DeployConfigSpec, DeployConfigSpecFields, Repository,
+            RepositoryBranch,
+        },
     },
     prelude::*,
 };
@@ -62,9 +68,34 @@ pub async fn sync_repo_deploy_configs_impl(
         return Err(anyhow::anyhow!("No octocrab found for this repo"));
     };
 
+    let default_branch = match crab
+        .repos(&owner, &repo)
+        .get()
+        .await
+        .map(|r| r.default_branch)
+    {
+        Ok(Some(default_branch)) => default_branch,
+        Ok(None) => return Ok(()),
+        Err(_) => return Ok(()),
+    };
+
+    let sha = match crab
+        .repos(&owner, &repo)
+        .get_ref(&Reference::Branch(default_branch))
+        .await
+    {
+        Ok(r) => match r.object {
+            Object::Commit { sha, .. } => sha,
+            Object::Tag { .. } => return Ok(()),
+            _ => return Ok(()),
+        },
+        Err(_) => return Ok(()),
+    };
+
     let content = match crab
         .repos(&owner, &repo)
         .get_content()
+        .r#ref(&sha)
         .path(".deploy")
         .send()
         .await
@@ -188,11 +219,15 @@ pub async fn sync_repo_deploy_configs_impl(
                 ..ObjectMeta::default()
             },
             status: Some(DeployConfigStatus {
-                // FIXME: This should be set
-                // config: Some(Repository {
-                //     owner: owner.clone(),
-                //     repo: repo.clone(),
-                // }),
+                // TODO: Semantically this is correct today (since we overwrite the
+                // live config spec as soon as we get the webhook). In the future,
+                // we will want to defer the update until the user actually does
+                // a deploy.
+                config: Some(DeployConfigConfigStatus {
+                    owner: Some(owner.clone()),
+                    repo: Some(repo.clone()),
+                    sha: Some(sha.clone()),
+                }),
                 ..Default::default()
             }),
         };

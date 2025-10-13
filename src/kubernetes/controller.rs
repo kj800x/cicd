@@ -622,12 +622,6 @@ async fn update_deploy_config(
                     "sha": final_config.status.as_ref().and_then(|s| s.config.as_ref().and_then(|c| c.sha.clone())),
                     "owner": final_config.status.as_ref().and_then(|s| s.config.as_ref().and_then(|c| c.owner.clone())),
                 },
-                "artifact": {
-                    "branch": final_config.status.as_ref().and_then(|s| s.artifact.as_ref().and_then(|a| a.branch.clone())),
-                    "currentSha": final_config.status.as_ref().and_then(|s| s.artifact.as_ref().and_then(|a| a.current_sha.clone())),
-                    "latestSha": final_config.status.as_ref().and_then(|s| s.artifact.as_ref().and_then(|a| a.latest_sha.clone())),
-                    "wantedSha": final_config.status.as_ref().and_then(|s| s.artifact.as_ref().and_then(|a| a.wanted_sha.clone())),
-                },
             }
         })),
     )
@@ -659,12 +653,6 @@ async fn create_deploy_config(client: &Client, final_config: &DeployConfig) -> R
                     "repo": final_config.status.as_ref().and_then(|s| s.config.as_ref().and_then(|c| c.repo.clone())),
                     "sha": final_config.status.as_ref().and_then(|s| s.config.as_ref().and_then(|c| c.sha.clone())),
                     "owner": final_config.status.as_ref().and_then(|s| s.config.as_ref().and_then(|c| c.owner.clone())),
-                },
-                "artifact": {
-                    "branch": final_config.status.as_ref().and_then(|s| s.artifact.as_ref().and_then(|a| a.branch.clone())),
-                    "currentSha": final_config.status.as_ref().and_then(|s| s.artifact.as_ref().and_then(|a| a.current_sha.clone())),
-                    "latestSha": final_config.status.as_ref().and_then(|s| s.artifact.as_ref().and_then(|a| a.latest_sha.clone())),
-                    "wantedSha": final_config.status.as_ref().and_then(|s| s.artifact.as_ref().and_then(|a| a.wanted_sha.clone())),
                 },
             }
         }))
