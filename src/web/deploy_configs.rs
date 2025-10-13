@@ -954,7 +954,7 @@ pub async fn deploy_config(
 
     // Apply the status update
     let patch: Patch<&Value> = Patch::Merge(&status.into());
-    log::info!("Patching DeployConfig status: {:#?}", patch);
+    log::debug!("Patching DeployConfig status: {:#?}", patch);
     let params = PatchParams::default();
     match deploy_configs_api
         .patch_status(&name, &params, &patch)
