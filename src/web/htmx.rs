@@ -26,9 +26,18 @@ pub async fn idiomorph_ext_js() -> impl Responder {
         .body(include_str!("idiomorph-ext.min.js"))
 }
 
+#[get("/styles.css")]
+pub async fn styles_css() -> impl Responder {
+    HttpResponse::Ok()
+        .content_type("text/css; charset=utf-8")
+        .insert_header(("Cache-Control", "public, max-age=31536000"))
+        .body(include_str!("styles.css"))
+}
+
 pub fn assets() -> Scope {
     web::scope("/assets")
         .service(htmx_js)
         .service(idiomorph_js)
         .service(idiomorph_ext_js)
+        .service(styles_css)
 }

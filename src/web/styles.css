@@ -1,0 +1,249 @@
+/* CSS Variables */
+:root {
+    --success-color: #2ecc71;
+    --failure-color: #e74c3c;
+    --pending-color: #f39c12;
+    --none-color: #7f8c8d;
+    --bg-color: #f7f9fc;
+    --card-bg: #ffffff;
+    --text-color: #3a485a;
+    --primary-blue: #0969da;
+    --border-color: #d0d7de;
+    --header-bg: #24292e;
+    --secondary-text: #57606a;
+    --bg-light: #f6f8fa;
+    --green: #2da44e;
+    --danger-color: #cf222e;
+    --warning-color: #9a6700;
+    --info-color: #0969da;
+    --hubspot-orange: #ff7a59;
+    --disabled-color: #e5e7eb;
+}
+
+/* Base Styles */
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background-color: white;
+    color: var(--text-color);
+    margin: 0;
+    padding: 0;
+    line-height: 1.5;
+}
+
+.content {
+    padding: 24px;
+}
+
+/* Header Styles */
+.header {
+    background-color: var(--header-bg);
+    color: white;
+    padding: 8px 16px;
+    display: flex;
+    align-items: center;
+}
+
+.header-logo {
+    margin-right: 12px;
+}
+
+.header-nav {
+    display: flex;
+    gap: 16px;
+    margin-left: 24px;
+}
+
+.header-nav-item {
+    color: rgba(255, 255, 255, 0.7);
+    text-decoration: none;
+    font-size: 14px;
+    font-weight: 600;
+    padding: 8px 8px;
+}
+
+.header-nav-item:hover,
+.header-nav-item.active {
+    color: white;
+}
+
+.subheader {
+    border-bottom: 1px solid var(--border-color);
+    display: flex;
+    padding: 0 16px;
+}
+
+.subheader-brand {
+    display: flex;
+    align-items: center;
+    padding: 12px 0;
+    margin-right: 24px;
+    color: var(--text-color);
+    font-weight: 600;
+    text-decoration: none;
+}
+
+.subheader-brand img {
+    margin-right: 8px;
+}
+
+.subheader-nav {
+    display: flex;
+}
+
+.subheader-nav-item {
+    color: var(--text-color);
+    text-decoration: none;
+    padding: 12px 16px;
+    font-size: 14px;
+    border-bottom: 2px solid transparent;
+}
+
+.subheader-nav-item:hover {
+    border-bottom-color: #d0d7de;
+}
+
+.subheader-nav-item.active {
+    border-bottom-color: var(--primary-blue);
+    font-weight: 500;
+}
+
+/* Alert Styles (for fragments) */
+.alert {
+    padding: 16px;
+    border: 2px solid grey;
+    margin: 16px 0;
+    width: 100%;
+    box-sizing: border-box;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+}
+
+.alert-header {
+    font-size: 1.4em;
+    margin-bottom: 4px;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+}
+
+.alert-danger {
+    background-color: #fdedee;
+    border-color: #f8a9ad;
+}
+
+.alert-warning {
+    background-color: #fef8f0;
+    border-color: #fae0b5;
+}
+
+.alert-success {
+    background-color: #e5f8f6;
+    border-color: #7fded2;
+}
+
+.alert-content .details {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+    font-size: 12px;
+}
+
+.alert-content .details a {
+    color: inherit !important;
+}
+
+.alert-content .commit-message {
+    font-size: 12px;
+    padding-left: 16px;
+    border-left: 4px solid #dfe3eb;
+}
+
+.alert-content pre.commit-message {
+    white-space: pre-wrap;
+    white-space: -moz-pre-wrap;
+    white-space: -pre-wrap;
+    white-space: -o-pre-wrap;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+    max-width: 100%;
+    box-sizing: border-box;
+}
+
+/* Common Typography */
+h1 {
+    color: var(--primary-blue);
+    margin-bottom: 5px;
+}
+
+header {
+    text-align: center;
+    margin-bottom: 30px;
+}
+
+.subtitle {
+    color: #666;
+    font-size: 1.1rem;
+}
+
+/* Navigation Links */
+.nav-links {
+    display: flex;
+    justify-content: center;
+    margin-bottom: 20px;
+}
+
+.nav-links a {
+    margin: 0 10px;
+    padding: 8px 16px;
+    color: var(--primary-blue);
+    text-decoration: none;
+    border-radius: 4px;
+    transition: background-color 0.2s;
+}
+
+.nav-links a:hover {
+    background-color: rgba(9, 105, 218, 0.1);
+}
+
+.nav-links a.active {
+    background-color: var(--primary-blue);
+    color: white;
+}
+
+/* Empty State */
+.empty-state {
+    text-align: center;
+    padding: 40px;
+    color: #888;
+}
+
+.refresh {
+    display: inline-block;
+    margin-top: 20px;
+    padding: 8px 16px;
+    background-color: var(--primary-blue);
+    color: white;
+    border-radius: 4px;
+    text-decoration: none;
+    font-size: 0.9rem;
+    transition: background-color 0.2s;
+}
+
+.refresh:hover {
+    background-color: #2980b9;
+}
+
+/* Git Reference Styles */
+.git-ref {
+    color: inherit;
+}
+
+/* Common Layout Styles */
+.content-container {
+    display: flex;
+    gap: 40px;
+    max-width: 1200px;
+    margin: 0 auto;
+}
+

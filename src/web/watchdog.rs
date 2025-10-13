@@ -290,28 +290,9 @@ pub async fn watchdog(
                 meta charset="UTF-8";
                 meta name="viewport" content="width=device-width, initial-scale=1.0";
                 title { "Watchdog Dashboard" }
+                (header::stylesheet_link())
                 style {
                     r#"
-                    :root {
-                        --primary-blue: #0969da;
-                        --text-color: #3a485a;
-                        --secondary-text: #57606a;
-                        --border-color: #d0d7de;
-                        --bg-light: #f6f8fa;
-                        --green: #2da44e;
-                        --header-bg: #24292e;
-                        --danger-color: #cf222e;
-                        --warning-color: #9a6700;
-                        --info-color: #0969da;
-                    }
-                    body {
-                        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                        background-color: white;
-                        color: var(--text-color);
-                        margin: 0;
-                        padding: 0;
-                        line-height: 1.5;
-                    }
                     .content {
                         max-width: 1200px;
                         margin: 0 auto;
@@ -425,7 +406,6 @@ pub async fn watchdog(
                         color: var(--secondary-text);
                     }
                     "#
-                    (header::styles())
                 }
                 (header::scripts())
             }

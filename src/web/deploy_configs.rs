@@ -684,99 +684,9 @@ pub async fn deploy_configs(
                 meta charset="UTF-8";
                 meta name="viewport" content="width=device-width, initial-scale=1.0";
                 title { "DeployConfig Dashboard" }
+                (header::stylesheet_link())
                 style {
                     r#"
-                    :root {
-                        --primary-blue: #0969da;
-                        --text-color: #3a485a;
-                        --secondary-text: #57606a;
-                        --border-color: #d0d7de;
-                        --bg-light: #f6f8fa;
-                        --green: #2da44e;
-                        --header-bg: #24292e;
-                        --danger-color: #f2545b;
-                        --hubspot-orange: #ff7a59;
-                        --disabled-color: #e5e7eb;
-                    }
-                    body {
-                        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                        background-color: white;
-                        color: var(--text-color);
-                        margin: 0;
-                        padding: 0;
-                        line-height: 1.5;
-                    }
-                    // .commit-sha, .git-ref {
-                    //     font-family: monospace;
-                    //     font-size: 0.85rem;
-                    //     width: 65px;
-                    //     color: #555;
-                    // }
-                    .git-ref {
-                        color: inherit;
-                    }
-                    .header {
-                        background-color: var(--header-bg);
-                        color: white;
-                        padding: 8px 16px;
-                        display: flex;
-                        align-items: center;
-                    }
-                    .header-logo {
-                        margin-right: 12px;
-                    }
-                    .header-nav {
-                        display: flex;
-                        gap: 16px;
-                        margin-left: 24px;
-                    }
-                    .header-nav-item {
-                        color: rgba(255, 255, 255, 0.7);
-                        text-decoration: none;
-                        font-size: 14px;
-                        font-weight: 600;
-                        padding: 8px 8px;
-                    }
-                    .header-nav-item:hover, .header-nav-item.active {
-                        color: white;
-                    }
-                    .subheader {
-                        border-bottom: 1px solid var(--border-color);
-                        display: flex;
-                        padding: 0 16px;
-                    }
-                    .subheader-brand {
-                        display: flex;
-                        align-items: center;
-                        padding: 12px 0;
-                        margin-right: 24px;
-                        color: var(--text-color);
-                        font-weight: 600;
-                        text-decoration: none;
-                    }
-                    .subheader-brand img {
-                        margin-right: 8px;
-                    }
-                    .subheader-nav {
-                        display: flex;
-                    }
-                    .subheader-nav-item {
-                        color: var(--text-color);
-                        text-decoration: none;
-                        padding: 12px 16px;
-                        font-size: 14px;
-                        border-bottom: 2px solid transparent;
-                    }
-                    .subheader-nav-item:hover {
-                        border-bottom-color: #d0d7de;
-                    }
-                    .subheader-nav-item.active {
-                        border-bottom-color: var(--primary-blue);
-                        font-weight: 500;
-                    }
-                    .content {
-                        padding: 24px;
-                    }
                     .content-container {
                         display: flex;
                         gap: 40px;
@@ -987,12 +897,6 @@ pub async fn deploy_configs(
                         background-color: #ffeaeb;
                         padding: 4px;
                         border-radius: 10px;
-                    }
-                    "#
-                    (header::styles())
-                    r#"
-                    .content {
-                        padding: 24px;
                     }
                     "#
                 }

@@ -97,66 +97,9 @@ pub async fn all_recent_builds(pool: web::Data<Pool<SqliteConnectionManager>>) -
                 meta charset="UTF-8";
                 meta name="viewport" content="width=device-width, initial-scale=1.0";
                 title { "CI/CD Build Status Dashboard - All Recent Builds" }
+                (header::stylesheet_link())
                 style {
                     r#"
-                    :root {
-                        --success-color: #2ecc71;
-                        --failure-color: #e74c3c;
-                        --pending-color: #f39c12;
-                        --none-color: #7f8c8d;
-                        --bg-color: #f7f9fc;
-                        --card-bg: #ffffff;
-                        --text-color: #3a485a;
-                        --primary-blue: #0969da;
-                        --border-color: #d0d7de;
-                        --header-bg: #24292e;
-                    }
-                    body {
-                        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                        background-color: white;
-                        color: var(--text-color);
-                        margin: 0;
-                        padding: 0;
-                        line-height: 1.5;
-                    }
-                    "#
-                    (header::styles())
-                    r#"
-                    .content {
-                        padding: 24px;
-                    }
-                    header {
-                        text-align: center;
-                        margin-bottom: 30px;
-                    }
-                    h1 {
-                        color: var(--primary-blue);
-                        margin-bottom: 5px;
-                    }
-                    .subtitle {
-                        color: #666;
-                        font-size: 1.1rem;
-                    }
-                    .nav-links {
-                        display: flex;
-                        justify-content: center;
-                        margin-bottom: 20px;
-                    }
-                    .nav-links a {
-                        margin: 0 10px;
-                        padding: 8px 16px;
-                        color: var(--primary-blue);
-                        text-decoration: none;
-                        border-radius: 4px;
-                        transition: background-color 0.2s;
-                    }
-                    .nav-links a:hover {
-                        background-color: rgba(9, 105, 218, 0.1);
-                    }
-                    .nav-links a.active {
-                        background-color: var(--primary-blue);
-                        color: white;
-                    }
                     .build-grid {
                         display: grid;
                         grid-template-columns: 1fr;
@@ -312,25 +255,6 @@ pub async fn all_recent_builds(pool: web::Data<Pool<SqliteConnectionManager>>) -
                     }
                     .links a:hover {
                         text-decoration: underline;
-                    }
-                    .empty-state {
-                        text-align: center;
-                        padding: 40px;
-                        color: #888;
-                    }
-                    .refresh {
-                        display: inline-block;
-                        margin-top: 20px;
-                        padding: 8px 16px;
-                        background-color: var(--primary-blue);
-                        color: white;
-                        border-radius: 4px;
-                        text-decoration: none;
-                        font-size: 0.9rem;
-                        transition: background-color 0.2s;
-                    }
-                    .refresh:hover {
-                        background-color: #05509d;
                     }
                     "#
                 }
