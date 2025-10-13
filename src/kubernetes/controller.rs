@@ -355,7 +355,13 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
             }
             log::debug!("Pruning stale resources complete");
 
-            update_deploy_config_status(client, &ns, &name, StatusUpdate::CurrentSha(wanted_sha.to_string())).await?;
+            update_deploy_config_status(
+                client,
+                &ns,
+                &name,
+                StatusUpdate::CurrentSha(wanted_sha.to_string()),
+            )
+            .await?;
             if wanted_sha != current_sha {
                 log::info!(
                     "Resources for DeployConfig {}/{} have been synced",
@@ -387,7 +393,13 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
                 apply(client, &ns, obj).await?;
             }
 
-            update_deploy_config_status(client, &ns, &name, StatusUpdate::CurrentSha(wanted_sha.to_string())).await?;
+            update_deploy_config_status(
+                client,
+                &ns,
+                &name,
+                StatusUpdate::CurrentSha(wanted_sha.to_string()),
+            )
+            .await?;
             log::info!("DeployConfig {}/{} has created its resources", ns, name);
         }
         (None, Some(_)) => {
@@ -554,7 +566,8 @@ pub async fn handle_build_completed(
         );
 
         // RULE: When a build completes, update latestSha for all matching DeployConfigs
-        update_deploy_config_status(client, &ns, &name, StatusUpdate::LatestSha(sha.to_string())).await?;
+        update_deploy_config_status(client, &ns, &name, StatusUpdate::LatestSha(sha.to_string()))
+            .await?;
 
         // RULE: If autodeploy is enabled, also update wantedSha
         if config.current_autodeploy() {
@@ -576,7 +589,13 @@ pub async fn handle_build_completed(
                 },
                 &conn,
             )?;
-            update_deploy_config_status(client, &ns, &name, StatusUpdate::WantedSha(sha.to_string())).await?;
+            update_deploy_config_status(
+                client,
+                &ns,
+                &name,
+                StatusUpdate::WantedSha(sha.to_string()),
+            )
+            .await?;
         }
     }
 

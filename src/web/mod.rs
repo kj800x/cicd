@@ -1,4 +1,5 @@
 mod all_recent_builds;
+mod build_status_helpers;
 mod deploy_configs;
 mod formatting;
 mod fragments;

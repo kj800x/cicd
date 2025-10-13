@@ -1,5 +1,5 @@
 use crate::prelude::*;
-use crate::web::{formatting, header};
+use crate::web::{build_status_helpers, formatting, header};
 
 /// Generate the HTML fragment for the build grid content
 pub fn render_build_grid_fragment(pool: &Pool<SqliteConnectionManager>) -> Markup {
@@ -34,20 +34,9 @@ pub fn render_build_grid_fragment(pool: &Pool<SqliteConnectionManager>) -> Marku
         } @else {
             div class="build-grid" {
                 @for (commit, repo, branches, _) in builds {
-                    @let status_class = match commit.build_status {
-                        BuildStatus::Success => "card-status-success",
-                        BuildStatus::Failure => "card-status-failure",
-                        BuildStatus::Pending => "card-status-pending",
-                        BuildStatus::None => "card-status-none",
-                    };
-                    div class=(format!("build-card {}", status_class)) {
+                    div class=(format!("build-card {}", build_status_helpers::build_card_status_class(&commit.build_status))) {
                         div class="build-header" {
-                            div class=(format!("status-indicator status-{}", match commit.build_status {
-                                BuildStatus::Success => "success",
-                                BuildStatus::Failure => "failure",
-                                BuildStatus::Pending => "pending",
-                                BuildStatus::None => "none",
-                            })) {}
+                            div class=(format!("status-indicator {}", build_status_helpers::build_status_class(&commit.build_status))) {}
                             div class="build-info" {
                                 div class="repo-name" { (format!("{}/{}", repo.owner_name, repo.name)) }
                                 div class="branch-name" {

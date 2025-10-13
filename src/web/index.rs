@@ -1,6 +1,6 @@
 use crate::db::BuildStatus;
 use crate::prelude::*;
-use crate::web::{formatting, header};
+use crate::web::{build_status_helpers, formatting, header};
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -180,18 +180,8 @@ pub fn render_branch_grid_fragment(pool: &Pool<SqliteConnectionManager>) -> Mark
 
                         div class="commit-list" {
                             @for commit in &data.commits {
-                                div class=(format!("commit-row bg-{}", match commit.build_status {
-                                    BuildStatus::Success => "success",
-                                    BuildStatus::Failure => "failure",
-                                    BuildStatus::Pending => "pending",
-                                    BuildStatus::None => "none",
-                                })) {
-                                    div class=(format!("commit-status status-{}", match commit.build_status {
-                                        BuildStatus::Success => "success",
-                                        BuildStatus::Failure => "failure",
-                                        BuildStatus::Pending => "pending",
-                                        BuildStatus::None => "none",
-                                    })) {}
+                                div class=(format!("commit-row {}", build_status_helpers::build_status_bg_class(&commit.build_status))) {
+                                    div class=(format!("commit-status {}", build_status_helpers::build_status_class(&commit.build_status))) {}
 
                                     div class="commit-sha" { (formatting::format_short_sha(&commit.sha)) }
 
