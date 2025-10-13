@@ -29,4 +29,3 @@ pub fn build_card_status_class(status: &BuildStatus) -> &'static str {
         BuildStatus::None => "card-status-none",
     }
 }
-

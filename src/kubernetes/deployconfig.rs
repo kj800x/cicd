@@ -175,45 +175,33 @@ impl DeployConfig {
     }
 
     pub fn wanted_sha(&self) -> Option<&str> {
-        self.status.as_ref().and_then(|s| {
-            s.artifact
-                .as_ref()
-                .and_then(|a| a.wanted_sha.as_deref())
-        })
+        self.status
+            .as_ref()
+            .and_then(|s| s.artifact.as_ref().and_then(|a| a.wanted_sha.as_deref()))
     }
 
     pub fn latest_sha(&self) -> Option<&str> {
-        self.status.as_ref().and_then(|s| {
-            s.artifact
-                .as_ref()
-                .and_then(|a| a.latest_sha.as_deref())
-        })
+        self.status
+            .as_ref()
+            .and_then(|s| s.artifact.as_ref().and_then(|a| a.latest_sha.as_deref()))
     }
 
     pub fn current_sha(&self) -> Option<&str> {
-        self.status.as_ref().and_then(|s| {
-            s.artifact
-                .as_ref()
-                .and_then(|a| a.current_sha.as_deref())
-        })
+        self.status
+            .as_ref()
+            .and_then(|s| s.artifact.as_ref().and_then(|a| a.current_sha.as_deref()))
     }
 
     pub fn current_branch(&self) -> Option<&str> {
-        self.status.as_ref().and_then(|s| {
-            s.artifact
-                .as_ref()
-                .and_then(|a| a.branch.as_deref())
-        })
+        self.status
+            .as_ref()
+            .and_then(|s| s.artifact.as_ref().and_then(|a| a.branch.as_deref()))
     }
 
     pub fn tracking_branch(&self) -> &str {
         self.status
             .as_ref()
-            .and_then(|s| {
-                s.artifact
-                    .as_ref()
-                    .and_then(|a| a.branch.as_deref())
-            })
+            .and_then(|s| s.artifact.as_ref().and_then(|a| a.branch.as_deref()))
             .unwrap_or(&self.spec.spec.artifact.branch)
     }
 

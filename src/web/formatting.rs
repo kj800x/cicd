@@ -37,4 +37,3 @@ pub fn truncate_message(message: &str, max_length: usize) -> String {
         format!("{}...", &message[0..max_length])
     }
 }
-

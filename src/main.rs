@@ -186,6 +186,7 @@ async fn start_kubernetes_controller(
 }
 
 #[actix_web::main]
+#[allow(clippy::expect_used)]
 async fn main() -> std::io::Result<()> {
     let octocrabs: Octocrabs = initialize_octocrabs();
 
@@ -202,7 +203,6 @@ async fn main() -> std::io::Result<()> {
         .init();
 
     let registry = prometheus::Registry::new();
-    #[allow(clippy::expect_used)]
     let exporter = opentelemetry_prometheus::exporter()
         .with_registry(registry.clone())
         .build()
@@ -214,11 +214,8 @@ async fn main() -> std::io::Result<()> {
     let manager = SqliteConnectionManager::file(
         std::env::var("DATABASE_PATH").unwrap_or("db.db".to_string()),
     );
-    #[allow(clippy::expect_used)]
     let pool = Pool::new(manager).expect("Failed to create database pool");
-    #[allow(clippy::expect_used)]
     migrate(
-        #[allow(clippy::expect_used)]
         pool.get()
             .expect("Failed to get database connection from pool"),
     )
@@ -239,23 +236,23 @@ async fn main() -> std::io::Result<()> {
         .unwrap_or(false);
 
     tokio::select! {
-    _ = Box::pin(start_http(
-    registry,
-    pool.clone(),
-    discord_notifier.clone(),
-    octocrabs.clone(),
-    )) =>  {},
-    _ = Box::pin(start_websockets(
-    pool.clone(),
-    discord_notifier.clone(),
-    octocrabs.clone(),
-    )) => {},
-    _ = Box::pin(start_kubernetes_controller(
-    pool.clone(),
-    enable_k8s_controller,
-    discord_notifier,
-    )) => {}
-        };
+        _ = Box::pin(start_http(
+            registry,
+            pool.clone(),
+            discord_notifier.clone(),
+            octocrabs.clone(),
+        )) =>  {},
+        _ = Box::pin(start_websockets(
+            pool.clone(),
+            discord_notifier.clone(),
+            octocrabs.clone(),
+        )) => {},
+        _ = Box::pin(start_kubernetes_controller(
+            pool.clone(),
+            enable_k8s_controller,
+            discord_notifier,
+        )) => {}
+    };
 
     Ok(())
 }

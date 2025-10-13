@@ -1,3 +1,27 @@
 {
-  "rust-analyzer.check.command": "clippy"
+  "rust-analyzer.check.command": "clippy",
+  "cSpell.words": [
+    "actix",
+    "apimachinery",
+    "autodeploy",
+    "chrono",
+    "cicd",
+    "clippy",
+    "coolkev",
+    "deployconfig",
+    "itertools",
+    "octocrab",
+    "octocrabs",
+    "pwhash",
+    "reqwest",
+    "rusqlite",
+    "rustls",
+    "schemars",
+    "serde",
+    "subresources",
+    "thiserror",
+    "tungstenite",
+    "undeployed",
+    "upserting"
+  ]
 }

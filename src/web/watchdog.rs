@@ -233,7 +233,9 @@ pub async fn watchdog(
             config.artifact_repo(),
             tracking_branch,
             &conn,
-        ).ok().flatten();
+        )
+        .ok()
+        .flatten();
 
         if let Some(commit) = commit {
             if commit.build_status == BuildStatus::Failure {
