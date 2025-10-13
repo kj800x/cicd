@@ -1,8 +1,6 @@
 use crate::{
     prelude::*,
-    web::{
-        get_commit_by_sha, render_preview_content, Action, BuildFilter, HumanTime, ResolvedVersion,
-    },
+    web::{render_preview_content, Action, BuildFilter, HumanTime, ResolvedVersion},
 };
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::Pod;

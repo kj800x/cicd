@@ -1,10 +1,14 @@
 pub mod prelude {
     pub use crate::db::{
-        add_commit_parent, add_commit_to_branch, get_branch_by_name, get_branches_for_commit,
-        get_commit, get_commit_parents, get_commit_with_branches, get_commit_with_repo_branches,
-        get_commits_since, get_parent_commits, get_repo, migrate, set_commit_status, upsert_branch,
-        upsert_commit, upsert_repo, Branch as DbBranch, BuildStatus, Commit as DbCommit,
-        CommitParent, CommitWithBranches, CommitWithRepo, CommitWithRepoBranches, Repo as DbRepo,
+        add_commit_parent, add_commit_to_branch, get_all_repos, get_branch_by_name,
+        get_branches_by_repo_id, get_branches_for_commit, get_branches_with_commits,
+        get_child_commits, get_commit, get_commit_by_sha, get_commit_parents,
+        get_commit_with_branches, get_commit_with_repo_branches, get_commits_since,
+        get_latest_successful_build, get_parent_commits, get_repo, get_repo_by_commit_sha,
+        get_repo_by_id, migrate, set_commit_status, upsert_branch, upsert_commit, upsert_repo,
+        Branch as DbBranch, BranchWithCommits, BuildStatus, Commit as DbCommit, CommitParent,
+        CommitWithBranches, CommitWithParents, CommitWithRepo, CommitWithRepoBranches,
+        Repo as DbRepo,
     };
 
     pub use crate::graphql::{

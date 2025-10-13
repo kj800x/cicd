@@ -153,26 +153,7 @@ impl QueryRoot {
 
         let conn = pool.get().unwrap();
 
-        let commit_repo = conn
-            .prepare(
-                "SELECT r.id, r.name, r.owner_name, r.default_branch, r.private, r.language
-                 FROM git_commit c
-                 JOIN git_repo r ON c.repo_id = r.id
-                 WHERE c.sha = ?1",
-            )
-            .unwrap()
-            .query_row([&sha], |row| {
-                Ok(DbRepo {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    owner_name: row.get(2)?,
-                    default_branch: row.get(3)?,
-                    private: row.get(4)?,
-                    language: row.get(5)?,
-                })
-            })
-            .optional()
-            .unwrap();
+        let commit_repo = get_repo_by_commit_sha(&sha, &conn).unwrap();
 
         if let Some(repo) = commit_repo {
             let max_depth = max_depth.unwrap_or(10).clamp(1, 20) as usize;
@@ -228,69 +209,41 @@ impl QueryRoot {
 
         let conn = pool.get().unwrap();
 
-        // Find all commits that have this commit as a parent
-        let query =
-            "SELECT c.id, c.sha, c.message, c.timestamp, c.build_status, c.build_url, c.repo_id
-                     FROM git_commit c
-                     JOIN git_commit_parent p ON c.sha = p.commit_sha
-                     WHERE p.parent_sha = ?1";
-
-        let results = conn
-            .prepare(query)
-            .unwrap()
-            .query_map([&sha], |row| {
-                let build_status_str: Option<String> = row.get(4)?;
-                let status = match &build_status_str {
-                    Some(s) => s.clone(),
-                    None => "None".to_string(),
-                };
-
-                Ok((
-                    Commit {
-                        id: row.get(0)?,
-                        sha: row.get(1)?,
-                        message: row.get(2)?,
-                        timestamp: row.get(3)?,
-                        author: "Unknown".to_string(), // Need to extend DB model to store author
-                        parent_shas: Vec::new(),       // Will populate later
-                    },
-                    status,
-                    row.get::<_, Option<String>>(5)?, // build_url
-                    row.get::<_, i64>(6)?,            // repo_id
-                ))
-            })
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+        // Get child commits
+        let child_commits = get_child_commits(&sha, &conn).unwrap();
 
         let mut builds = Vec::new();
 
-        for (commit, status, build_url, repo_id) in results {
-            // Get the repo info
-            let repo = conn
-                .prepare(
-                    "SELECT id, name, owner_name, default_branch, private, language
-                     FROM git_repo
-                     WHERE id = ?1",
-                )
+        for db_commit in child_commits {
+            // Get the repo info for this commit
+            let repo_id = get_commit(&conn, db_commit.id, db_commit.sha.clone())
                 .unwrap()
-                .query_row([repo_id], |row| {
-                    Ok(Repository {
-                        id: row.get(0)?,
-                        name: row.get(1)?,
-                        owner: row.get(2)?,
-                        default_branch: row.get(3)?,
-                        is_private: row.get(4)?,
-                        language: row.get(5)?,
-                    })
+                .map(|_| {
+                    // Get repo_id from the commit - we need to query it
+                    get_repo_by_commit_sha(&db_commit.sha, &conn)
+                        .unwrap()
+                        .map(|r| r.id)
+                })
+                .flatten()
+                .unwrap_or(0);
+
+            let repo = get_repo_by_id(repo_id, &conn)
+                .unwrap()
+                .map(|r| Repository {
+                    id: r.id,
+                    name: r.name,
+                    owner: r.owner_name,
+                    default_branch: r.default_branch,
+                    is_private: r.private,
+                    language: r.language,
                 })
                 .unwrap();
 
             // Get the parent SHAs
-            let parent_shas = get_commit_parents(&commit.sha, &conn).unwrap();
+            let parent_shas = get_commit_parents(&db_commit.sha, &conn).unwrap();
 
             // Get branches
-            let branches = get_branches_for_commit(&commit.sha, &conn)
+            let branches = get_branches_for_commit(&db_commit.sha, &conn)
                 .unwrap()
                 .into_iter()
                 .map(|b| Branch {
@@ -302,16 +255,19 @@ impl QueryRoot {
 
             builds.push(Build {
                 commit: Commit {
-                    id: commit.id,
-                    sha: commit.sha,
-                    message: commit.message,
-                    timestamp: commit.timestamp,
-                    author: commit.author,
+                    id: db_commit.id,
+                    sha: db_commit.sha,
+                    message: db_commit.message,
+                    timestamp: db_commit.timestamp,
+                    // FIXME: Need to extend DB model to store author
+                    author: "Unknown".to_string(),
                     parent_shas,
                 },
                 repository: repo,
-                status,
-                url: build_url,
+                status: to_variant_name(&db_commit.build_status)
+                    .unwrap()
+                    .to_string(),
+                url: db_commit.build_url,
                 branches,
             });
         }
@@ -327,24 +283,18 @@ impl QueryRoot {
 
         let conn = pool.get().unwrap();
 
-        let mut stmt = conn
-            .prepare("SELECT id, name, owner_name, default_branch, private, language FROM git_repo")
-            .unwrap();
-
-        let repos = stmt
-            .query_map([], |row| {
-                Ok(Repository {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    owner: row.get(2)?,
-                    default_branch: row.get(3)?,
-                    is_private: row.get(4)?,
-                    language: row.get(5)?,
-                })
-            })
+        let repos = get_all_repos(&conn)
             .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+            .into_iter()
+            .map(|r| Repository {
+                id: r.id,
+                name: r.name,
+                owner: r.owner_name,
+                default_branch: r.default_branch,
+                is_private: r.private,
+                language: r.language,
+            })
+            .collect();
 
         Ok(repos)
     }
@@ -357,21 +307,15 @@ impl QueryRoot {
 
         let conn = pool.get().unwrap();
 
-        let mut stmt = conn
-            .prepare("SELECT id, name, head_commit_sha, repo_id FROM git_branch WHERE repo_id = ?")
-            .unwrap();
-
-        let branches = stmt
-            .query_map([repo_id], |row| {
-                Ok(Branch {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    head_commit_sha: row.get(2)?,
-                })
-            })
+        let branches = get_branches_by_repo_id(repo_id, &conn)
             .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+            .into_iter()
+            .map(|b| Branch {
+                id: b.id,
+                name: b.name,
+                head_commit_sha: b.head_commit_sha,
+            })
+            .collect();
 
         Ok(branches)
     }

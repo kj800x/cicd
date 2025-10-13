@@ -1,6 +1,4 @@
-use crate::db::{
-    get_latest_build, get_latest_completed_build, insert_deploy_event, Commit, DeployEvent,
-};
+use crate::db::{get_latest_build, get_latest_completed_build, insert_deploy_event, DeployEvent};
 use crate::prelude::*;
 use crate::web::{build_status, deploy_status, header};
 use kube::{
@@ -77,58 +75,6 @@ impl Render for AutodeployStatus {
             )
         }
     }
-}
-
-/// Get the latest successful build for a branch
-fn get_latest_successful_build(
-    owner: &str,
-    repo: &str,
-    branch: &str,
-    conn: &PooledConnection<SqliteConnectionManager>,
-) -> Option<Commit> {
-    // Get the repository ID
-    let repo_id = match get_repo(conn, owner, repo).unwrap() {
-        Some(repo) => repo.id,
-        None => return None,
-    };
-
-    // Get the branch ID
-    let branch_id = match get_branch_by_name(&branch, repo_id as u64, conn).unwrap() {
-        Some(branch) => branch.id,
-        None => return None,
-    };
-
-    // Get the latest successful build for this branch
-    let commit = conn
-        .prepare(
-            r#"
-            SELECT c.id, c.sha, c.message, c.timestamp, c.build_status, c.build_url
-            FROM git_commit c
-            JOIN git_commit_branch cb ON c.sha = cb.commit_sha
-            WHERE cb.branch_id = ?1
-            AND c.build_status = 'Success'
-            ORDER BY c.timestamp DESC
-            LIMIT 1
-            "#,
-        )
-        .unwrap()
-        .query_row([branch_id], |row| Commit::from_row(row))
-        .optional()
-        .unwrap();
-
-    commit
-}
-
-/// Get the commit by SHA
-pub fn get_commit_by_sha(
-    sha: &str,
-    conn: &PooledConnection<SqliteConnectionManager>,
-) -> Option<Commit> {
-    conn.prepare(r#"SELECT id, sha, message, timestamp, build_status, build_url FROM git_commit WHERE sha = ?"#)
-        .unwrap()
-        .query_row([sha], |row| Commit::from_row(row))
-        .optional()
-        .unwrap()
 }
 
 #[derive(Debug, Clone, PartialEq)]
