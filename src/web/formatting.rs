@@ -3,7 +3,10 @@ use chrono::{Local, TimeZone};
 /// Format a timestamp as a human-readable relative time
 pub fn format_relative_time(timestamp: i64) -> String {
     let now = Local::now();
-    let dt = Local.timestamp_millis_opt(timestamp).unwrap();
+    let dt = match Local.timestamp_millis_opt(timestamp).single() {
+        Some(dt) => dt,
+        None => return format!("Invalid timestamp: {}", timestamp),
+    };
     let duration = now.signed_duration_since(dt);
 
     if duration.num_days() > 0 {

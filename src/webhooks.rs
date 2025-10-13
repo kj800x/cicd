@@ -134,7 +134,9 @@ pub struct WorkflowRun {
 
 // Pushes can be for reasons other than branches, such as tags
 fn extract_branch_name(r#ref: &str) -> Option<String> {
-    let branch_regex = Regex::new(r"^refs/heads/(.+)$").unwrap();
+    // This regex is a compile-time constant pattern, so expect is appropriate
+    let branch_regex =
+        Regex::new(r"^refs/heads/(.+)$").expect("Branch regex pattern should be valid");
     if let Some(captures) = branch_regex.captures(r#ref) {
         captures.get(1).map(|m| m.as_str().to_string())
     } else {
@@ -397,15 +399,32 @@ async fn process_event(
         "check_run" => match serde_json::from_value::<CheckRunEvent>(event.payload) {
             Ok(payload) => match payload.action.as_str() {
                 "created" => {
-                    let repo_id = upsert_repo(&payload.repository, &conn);
+                    let repo_id = match upsert_repo(&payload.repository, &conn) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            log::error!("Failed to upsert repository: {}", e);
+                            return;
+                        }
+                    };
 
-                    let head_commit = get_commit(
+                    let head_commit = match get_commit(
                         &conn,
-                        repo_id.unwrap() as i64,
-                        payload.check_run.check_suite.head_sha,
-                    )
-                    .unwrap()
-                    .unwrap();
+                        repo_id as i64,
+                        payload.check_run.check_suite.head_sha.clone(),
+                    ) {
+                        Ok(Some(commit)) => commit,
+                        Ok(None) => {
+                            log::error!(
+                                "Commit not found: {}",
+                                payload.check_run.check_suite.head_sha
+                            );
+                            return;
+                        }
+                        Err(e) => {
+                            log::error!("Failed to get commit: {}", e);
+                            return;
+                        }
+                    };
 
                     if let Err(e) = handle_build_started(
                         &payload.repository,
@@ -439,10 +458,17 @@ async fn process_event(
                         &payload.check_suite.conclusion.as_deref(),
                     );
 
+                    let head_commit_message = payload
+                        .check_suite
+                        .head_commit
+                        .as_ref()
+                        .map(|c| c.message.as_str())
+                        .unwrap_or("No commit message");
+
                     if let Err(e) = handle_build_completed(
                         &payload.repository,
                         &payload.check_suite.head_sha,
-                        &payload.check_suite.head_commit.as_ref().unwrap().message,
+                        head_commit_message,
                         build_status,
                         &format!(
                             "https://github.com/{}/{}/commit/{}/checks",
@@ -550,20 +576,31 @@ pub async fn start_websockets(
                 let mut ping_closure = async || loop {
                     tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
                     log::debug!("Sending ping message");
-                    write
+                    if let Err(e) = write
                         .send(Message::Text(
                             "{\"event_type\":\"conn_ping\",\"payload\":{}}".to_string(),
                         ))
                         .await
-                        .unwrap();
+                    {
+                        log::error!("Failed to send ping message: {}", e);
+                        break;
+                    }
                 };
 
                 let mut message_closure = async || loop {
-                    let message = read.next().await.unwrap();
+                    let message = match read.next().await {
+                        Some(msg) => msg,
+                        None => {
+                            log::warn!("WebSocket stream ended");
+                            break;
+                        }
+                    };
                     match message {
                         Ok(msg) => {
                             let data = msg.into_data();
-                            *last_pong_clone.write().unwrap().as_mut() = std::time::Instant::now();
+                            if let Ok(mut last_pong) = last_pong_clone.write() {
+                                *last_pong.as_mut() = std::time::Instant::now();
+                            }
                             match serde_json::from_slice::<WebhookEvent>(&data) {
                                 Ok(event) => {
                                     if event.event_type == "conn_ping" {
@@ -588,7 +625,13 @@ pub async fn start_websockets(
 
                 let watchdog_closure = async || loop {
                     tokio::time::sleep(tokio::time::Duration::from_secs(20)).await;
-                    let last_pong = last_pong_clone.read().unwrap();
+                    let last_pong = match last_pong_clone.read() {
+                        Ok(pong) => pong,
+                        Err(e) => {
+                            log::error!("Failed to read last_pong: {}", e);
+                            break;
+                        }
+                    };
                     if last_pong.elapsed() > tokio::time::Duration::from_secs(10) {
                         log::debug!("Watchdog failed");
                         break;

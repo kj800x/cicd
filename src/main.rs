@@ -57,11 +57,15 @@ pub mod prelude {
     pub use maud::{html, Markup, DOCTYPE};
 
     pub use crate::discord::{setup_discord, DiscordNotifier};
+
+    // Error handling
+    pub use crate::error::{AppError, AppResult};
 }
 
 mod crab_ext;
 mod db;
 mod discord;
+mod error;
 mod graphql;
 mod kubernetes;
 mod resource;
@@ -201,7 +205,7 @@ async fn main() -> std::io::Result<()> {
     let exporter = opentelemetry_prometheus::exporter()
         .with_registry(registry.clone())
         .build()
-        .unwrap();
+        .expect("Failed to build OpenTelemetry Prometheus exporter");
     let provider = MeterProvider::builder().with_reader(exporter).build();
     global::set_meter_provider(provider);
 
@@ -209,8 +213,12 @@ async fn main() -> std::io::Result<()> {
     let manager = SqliteConnectionManager::file(
         std::env::var("DATABASE_PATH").unwrap_or("db.db".to_string()),
     );
-    let pool = Pool::new(manager).unwrap();
-    migrate(pool.get().unwrap()).unwrap();
+    let pool = Pool::new(manager).expect("Failed to create database pool");
+    migrate(
+        pool.get()
+            .expect("Failed to get database connection from pool"),
+    )
+    .expect("Failed to run database migrations");
 
     // Setup Discord notifier
     log::info!("Setting up Discord notifier...");

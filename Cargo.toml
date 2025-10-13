@@ -69,3 +69,9 @@ itertools = "0.14.0"
 [features]
 test-crd = []
 default = []
+
+[lints.clippy]
+# Deny unwrap - should always use proper Result types and error handling
+unwrap_used = "deny"
+# Warn on expect - it's okay for truly fatal cases but we want to be aware of them
+expect_used = "warn"

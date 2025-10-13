@@ -54,7 +54,7 @@ pub async fn deploy_status(selected_config: &DeployConfig) -> Vec<Markup> {
                     if transition_time
                         > SystemTime::now()
                             .duration_since(UNIX_EPOCH)
-                            .unwrap()
+                            .expect("System time should be after UNIX_EPOCH")
                             .as_millis()
                             - 300000
                     {
@@ -216,8 +216,8 @@ pub async fn build_status(
         ResolvedVersion::UnknownSha { .. } => {
             panic!("unreachable")
         }
-        ResolvedVersion::TrackedSha { sha, .. } => get_commit_by_sha(&sha, &conn),
-        ResolvedVersion::BranchTracked { sha, .. } => get_commit_by_sha(&sha, &conn),
+        ResolvedVersion::TrackedSha { sha, .. } => get_commit_by_sha(&sha, &conn).ok().flatten(),
+        ResolvedVersion::BranchTracked { sha, .. } => get_commit_by_sha(&sha, &conn).ok().flatten(),
         ResolvedVersion::Undeployed => None,
         ResolvedVersion::ResolutionFailed => None,
     };
@@ -302,8 +302,24 @@ pub async fn deploy_preview(
 ) -> impl Responder {
     let (namespace, name) = path.into_inner();
     let action_params = query.into_inner();
-    let conn = pool.get().unwrap();
-    let selected_config = get_deploy_config(&namespace, &name).await.unwrap();
+
+    let conn = match pool.get() {
+        Ok(c) => c,
+        Err(e) => {
+            log::error!("Failed to get database connection: {}", e);
+            return HttpResponse::InternalServerError().body("Failed to connect to database");
+        }
+    };
+
+    let selected_config = match get_deploy_config(&namespace, &name).await {
+        Some(config) => config,
+        None => {
+            log::error!("Deploy config not found: {}/{}", namespace, name);
+            return HttpResponse::NotFound()
+                .body(format!("Deploy config not found: {}/{}", namespace, name));
+        }
+    };
+
     let action = Action::from_query(&action_params);
     let markup = render_preview_content(&selected_config, &action, &conn).await;
 

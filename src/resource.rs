@@ -89,7 +89,7 @@ pub async fn sync_repo_deploy_configs_impl(
     let configs: Vec<&str> = entries
         .keys()
         .filter(|name| name.ends_with(".yaml"))
-        .map(|name| name.strip_suffix(".yaml").unwrap())
+        .filter_map(|name| name.strip_suffix(".yaml"))
         .collect();
 
     let mut final_deploy_configs: Vec<DeployConfig> = vec![];
@@ -258,16 +258,37 @@ pub async fn sync_all_deploy_configs(
     log::info!("Request to sync all deploy configs...");
 
     for octocrab in octocrabs.get_ref().clone() {
-        let username = octocrab.current().user().await.unwrap().login;
-        let first_page = octocrab
+        let username = match octocrab.current().user().await {
+            Ok(user) => user.login,
+            Err(e) => {
+                log::error!("Failed to get current user: {}", e);
+                continue;
+            }
+        };
+
+        let first_page = match octocrab
             .current()
             .list_repos_for_authenticated_user()
             .visibility("all")
             .affiliation("owner")
             .send()
             .await
-            .unwrap();
-        let user_repos = octocrab.all_pages(first_page).await.unwrap();
+        {
+            Ok(page) => page,
+            Err(e) => {
+                log::error!("Failed to list repos for user {}: {}", username, e);
+                continue;
+            }
+        };
+
+        let user_repos = match octocrab.all_pages(first_page).await {
+            Ok(repos) => repos,
+            Err(e) => {
+                log::error!("Failed to get all pages for user {}: {}", username, e);
+                continue;
+            }
+        };
+
         let short_crabs = vec![octocrab];
 
         for repo in user_repos {

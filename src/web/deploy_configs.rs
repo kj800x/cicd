@@ -46,7 +46,10 @@ pub struct HumanTime(pub u64);
 
 impl Render for HumanTime {
     fn render(&self) -> Markup {
-        let time = Utc.timestamp_millis_opt(self.0 as i64).unwrap();
+        let time = match Utc.timestamp_millis_opt(self.0 as i64).single() {
+            Some(t) => t,
+            None => return html! { "Invalid timestamp" },
+        };
         let eastern = chrono_tz::America::New_York;
         let local = time.with_timezone(&eastern);
 
@@ -120,7 +123,7 @@ impl ResolvedVersion {
             None => ResolvedVersion::Undeployed,
             Some(status) => match &status.artifact.as_ref().and_then(|a| a.wanted_sha.as_ref()) {
                 Some(sha) => {
-                    let commit = get_commit_by_sha(sha, conn);
+                    let commit = get_commit_by_sha(sha, conn).ok().flatten();
 
                     // FIXME: Technically we don't know if the commit was selected as part of a tracking branch or not
                     match commit {
@@ -154,19 +157,19 @@ impl ResolvedVersion {
                         config.artifact_repo(),
                         &branch,
                         conn,
-                    ),
+                    ).ok().flatten(),
                     BuildFilter::Completed => get_latest_completed_build(
                         config.artifact_owner(),
                         config.artifact_repo(),
                         &branch,
                         conn,
-                    ),
+                    ).ok().flatten(),
                     BuildFilter::Successful => get_latest_successful_build(
                         config.artifact_owner(),
                         config.artifact_repo(),
                         &branch,
                         conn,
-                    ),
+                    ).ok().flatten(),
                 };
 
                 match commit {
@@ -185,19 +188,19 @@ impl ResolvedVersion {
                         config.artifact_repo(),
                         &branch,
                         conn,
-                    ),
+                    ).ok().flatten(),
                     BuildFilter::Completed => get_latest_completed_build(
                         config.artifact_owner(),
                         config.artifact_repo(),
                         &branch,
                         conn,
-                    ),
+                    ).ok().flatten(),
                     BuildFilter::Successful => get_latest_successful_build(
                         config.artifact_owner(),
                         config.artifact_repo(),
                         &branch,
                         conn,
-                    ),
+                    ).ok().flatten(),
                 };
 
                 match commit {
@@ -210,7 +213,7 @@ impl ResolvedVersion {
                 }
             }
             Action::DeployCommit { sha } => {
-                let commit = get_commit_by_sha(&sha, conn);
+                let commit = get_commit_by_sha(&sha, conn).ok().flatten();
 
                 match commit {
                     Some(commit) => ResolvedVersion::TrackedSha {
@@ -562,7 +565,13 @@ pub async fn deploy_configs(
     pool: web::Data<Pool<SqliteConnectionManager>>,
     query: web::Query<std::collections::HashMap<String, String>>,
 ) -> impl Responder {
-    let conn = pool.get().unwrap();
+    let conn = match pool.get() {
+        Ok(c) => c,
+        Err(e) => {
+            log::error!("Failed to get database connection: {}", e);
+            return HttpResponse::InternalServerError().body("Failed to connect to database");
+        }
+    };
 
     // Initialize Kubernetes client
     let client = match Client::try_default().await {
@@ -790,7 +799,13 @@ pub async fn deploy_config(
     pool: web::Data<Pool<SqliteConnectionManager>>,
     form: web::Form<HashMap<String, String>>,
 ) -> impl Responder {
-    let conn = pool.get().unwrap();
+    let conn = match pool.get() {
+        Ok(c) => c,
+        Err(e) => {
+            log::error!("Failed to get database connection: {}", e);
+            return HttpResponse::InternalServerError().body("Failed to connect to database");
+        }
+    };
     let action = Action::from_query(&form);
     let (namespace, name) = path.into_inner();
 
@@ -900,7 +915,7 @@ pub async fn deploy_config(
                 .and_then(|s| s.get("wantedSha"))
                 .map(|s| s.to_string());
 
-            insert_deploy_event(
+            match insert_deploy_event(
                 &DeployEvent {
                     deploy_config: name.to_string(),
                     team: config.team().to_string(),
@@ -911,11 +926,15 @@ pub async fn deploy_config(
                     sha,
                 },
                 &conn,
-            )
-            .unwrap();
+            ) {
+                Ok(_) => {},
+                Err(e) => {
+                    log::error!("Failed to insert deploy event: {}", e);
+                }
+            }
         }
         Action::Undeploy => {
-            insert_deploy_event(
+            if let Err(e) = insert_deploy_event(
                 &DeployEvent {
                     deploy_config: name.to_string(),
                     team: config.team().to_string(),
@@ -926,8 +945,9 @@ pub async fn deploy_config(
                     sha: None,
                 },
                 &conn,
-            )
-            .unwrap();
+            ) {
+                log::error!("Failed to insert deploy event: {}", e);
+            }
         }
         Action::ToggleAutodeploy => {
             // No event

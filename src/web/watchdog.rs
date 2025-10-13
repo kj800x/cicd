@@ -166,7 +166,13 @@ pub async fn watchdog(
     pool: web::Data<Pool<SqliteConnectionManager>>,
     client: Option<web::Data<Client>>,
 ) -> impl Responder {
-    let conn = pool.get().unwrap();
+    let conn = match pool.get() {
+        Ok(c) => c,
+        Err(e) => {
+            log::error!("Failed to get database connection: {}", e);
+            return HttpResponse::InternalServerError().body("Failed to connect to database");
+        }
+    };
 
     // Get all DeployConfigs
     let client = match client {
@@ -227,7 +233,7 @@ pub async fn watchdog(
             config.artifact_repo(),
             tracking_branch,
             &conn,
-        );
+        ).ok().flatten();
 
         if let Some(commit) = commit {
             if commit.build_status == BuildStatus::Failure {

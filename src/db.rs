@@ -1,5 +1,4 @@
 use crate::prelude::*;
-use rusqlite::Error;
 use serde_variant::to_variant_name;
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -140,7 +139,7 @@ pub struct CommitWithParents {
     pub parent_shas: Vec<String>,
 }
 
-pub fn migrate(mut conn: PooledConnection<SqliteConnectionManager>) -> Result<(), rusqlite::Error> {
+pub fn migrate(mut conn: PooledConnection<SqliteConnectionManager>) -> AppResult<()> {
     let migrations: Migrations = Migrations::new(vec![
         M::up(
             "CREATE TABLE git_repo (
@@ -241,9 +240,10 @@ pub fn migrate(mut conn: PooledConnection<SqliteConnectionManager>) -> Result<()
         //M::up("ALTER TABLE friend ADD COLUMN email TEXT;"),
     ]);
 
-    conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))
-        .unwrap();
-    migrations.to_latest(&mut conn).unwrap();
+    conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))?;
+    migrations
+        .to_latest(&mut conn)
+        .map_err(|e| AppError::DatabaseMigration(e.to_string()))?;
     Ok(())
 }
 
@@ -254,21 +254,19 @@ struct ExistenceResult {
 pub fn upsert_repo(
     repo: &crate::webhooks::Repository,
     conn: &PooledConnection<SqliteConnectionManager>,
-) -> Result<u64, Error> {
+) -> AppResult<u64> {
     let repo = repo.clone();
 
     let existing = conn
-        .prepare("SELECT id FROM git_repo WHERE id = ?1")
-        .unwrap()
+        .prepare("SELECT id FROM git_repo WHERE id = ?1")?
         .query_row([repo.id], |row| Ok(ExistenceResult { id: row.get(0)? }))
-        .optional()
-        .unwrap();
+        .optional()?;
 
     match existing {
         Some(_) => {
             conn.prepare(
                     "UPDATE git_repo SET name = ?2, owner_name = ?3, default_branch = ?4, private = ?5, language = ?6 WHERE id = ?1",
-                ).unwrap()
+                )?
                 .execute(params![
                     repo.id,
                     repo.name,
@@ -276,14 +274,14 @@ pub fn upsert_repo(
                     repo.default_branch,
                     repo.private,
                     repo.language,
-                ]).unwrap();
+                ])?;
 
             Ok(repo.id)
         }
         None => {
             conn.prepare(
                     "INSERT INTO git_repo (id, name, owner_name, default_branch, private, language) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                ).unwrap()
+                )?
                 .execute(params![
                     repo.id,
                     repo.name,
@@ -291,7 +289,7 @@ pub fn upsert_repo(
                     repo.default_branch,
                     repo.private,
                     repo.language,
-                ]).unwrap();
+                ])?;
 
             Ok(repo.id)
         }
@@ -302,33 +300,31 @@ pub fn upsert_commit(
     commit: &crate::webhooks::GhCommit,
     repo_id: u64,
     conn: &PooledConnection<SqliteConnectionManager>,
-) -> Result<u64, Error> {
+) -> AppResult<u64> {
     let commit = commit.clone();
 
     let existing = conn
-        .prepare("SELECT id FROM git_commit WHERE sha = ?1 AND repo_id = ?2")
-        .unwrap()
+        .prepare("SELECT id FROM git_commit WHERE sha = ?1 AND repo_id = ?2")?
         .query_row(params![commit.id, repo_id], |row| {
             Ok(ExistenceResult { id: row.get(0)? })
         })
-        .optional()
-        .unwrap();
+        .optional()?;
 
     match existing {
         Some(ExistenceResult { id }) => {
+            let timestamp = DateTime::parse_from_rfc3339(&commit.timestamp)
+                .map_err(|e| AppError::Parse(format!("Invalid timestamp '{}': {}", commit.timestamp, e)))?
+                .timestamp_millis();
+
             conn.prepare(
                 "UPDATE git_commit SET message = ?3, timestamp = ?4 WHERE sha = ?1 AND repo_id = ?2",
-            )
-            .unwrap()
+            )?
             .execute(params![
                 commit.id,
                 repo_id,
                 commit.message,
-                DateTime::parse_from_rfc3339(&commit.timestamp)
-                    .unwrap()
-                    .timestamp_millis()
-            ])
-            .unwrap();
+                timestamp
+            ])?;
 
             // Add parent commits
             if let Some(parents) = &commit.parent_shas {
@@ -340,19 +336,19 @@ pub fn upsert_commit(
             Ok(id)
         }
         None => {
+            let timestamp = DateTime::parse_from_rfc3339(&commit.timestamp)
+                .map_err(|e| AppError::Parse(format!("Invalid timestamp '{}': {}", commit.timestamp, e)))?
+                .timestamp_millis();
+
             conn.prepare(
                 "INSERT INTO git_commit (sha, message, timestamp, repo_id) VALUES (?1, ?2, ?3, ?4)",
-            )
-            .unwrap()
+            )?
             .execute(params![
                 commit.id,
                 commit.message,
-                DateTime::parse_from_rfc3339(&commit.timestamp)
-                    .unwrap()
-                    .timestamp_millis(),
+                timestamp,
                 repo_id,
-            ])
-            .unwrap();
+            ])?;
 
             let commit_id = conn.last_insert_rowid() as u64;
 
@@ -373,22 +369,19 @@ pub fn add_commit_parent(
     parent_sha: &str,
     repo_id: u64,
     conn: &PooledConnection<SqliteConnectionManager>,
-) -> Result<(), Error> {
+) -> AppResult<()> {
     // Check if this relationship already exists
     let existing = conn
-        .prepare("SELECT 1 FROM git_commit_parent WHERE commit_sha = ?1 AND parent_sha = ?2")
-        .unwrap()
+        .prepare("SELECT 1 FROM git_commit_parent WHERE commit_sha = ?1 AND parent_sha = ?2")?
         .query_row(params![commit_sha, parent_sha], |_| Ok(()))
-        .optional();
+        .optional()?;
 
     // If it doesn't exist, insert it
-    if existing.unwrap().is_none() {
+    if existing.is_none() {
         conn.prepare(
             "INSERT INTO git_commit_parent (commit_sha, parent_sha, repo_id) VALUES (?1, ?2, ?3)",
-        )
-        .unwrap()
-        .execute(params![commit_sha, parent_sha, repo_id])
-        .unwrap();
+        )?
+        .execute(params![commit_sha, parent_sha, repo_id])?;
     }
 
     Ok(())
@@ -397,14 +390,12 @@ pub fn add_commit_parent(
 pub fn get_commit_parents(
     commit_sha: &str,
     conn: &PooledConnection<SqliteConnectionManager>,
-) -> Result<Vec<String>, Error> {
+) -> AppResult<Vec<String>> {
     let mut stmt = conn
-        .prepare("SELECT parent_sha FROM git_commit_parent WHERE commit_sha = ?1")
-        .unwrap();
+        .prepare("SELECT parent_sha FROM git_commit_parent WHERE commit_sha = ?1")?;
 
     let parents_iter = stmt
-        .query_map([commit_sha], |row| row.get::<_, String>(0))
-        .unwrap();
+        .query_map([commit_sha], |row| row.get::<_, String>(0))?;
 
     let mut parents = Vec::new();
     for parent in parents_iter {
@@ -417,17 +408,15 @@ pub fn get_commit_parents(
 pub fn get_commit_with_branches(
     commit_sha: &str,
     conn: &PooledConnection<SqliteConnectionManager>,
-) -> Result<Option<CommitWithBranches>, Error> {
+) -> AppResult<Option<CommitWithBranches>> {
     let commit_result = conn
         .prepare(
             "SELECT c.id, c.sha, c.message, c.timestamp, c.build_status, c.build_url
              FROM git_commit c
              WHERE c.sha = ?1",
-        )
-        .unwrap()
+        )?
         .query_row([commit_sha], |row| Commit::from_row(row))
-        .optional()
-        .unwrap();
+        .optional()?;
 
     match commit_result {
         Some(commit) => {
@@ -446,7 +435,7 @@ pub fn get_commit_with_branches(
 pub fn get_commit_with_repo_branches(
     commit_sha: &str,
     conn: &PooledConnection<SqliteConnectionManager>,
-) -> Result<Option<CommitWithRepoBranches>, Error> {
+) -> AppResult<Option<CommitWithRepoBranches>> {
     let commit_with_repo_result = conn
         .prepare(
             "SELECT c.id, c.sha, c.message, c.timestamp, c.build_status, c.build_url,
@@ -454,8 +443,7 @@ pub fn get_commit_with_repo_branches(
              FROM git_commit c
              JOIN git_repo r ON c.repo_id = r.id
              WHERE c.sha = ?1",
-        )
-        .unwrap()
+        )?
         .query_row([commit_sha], |row| {
             Ok((
                 Commit {
@@ -476,8 +464,7 @@ pub fn get_commit_with_repo_branches(
                 },
             ))
         })
-        .optional()
-        .unwrap();
+        .optional()?;
 
     match commit_with_repo_result {
         Some((commit, repo)) => {
@@ -498,7 +485,7 @@ pub fn get_parent_commits(
     commit_sha: &str,
     conn: &PooledConnection<SqliteConnectionManager>,
     max_depth: usize,
-) -> Result<Vec<Commit>, Error> {
+) -> AppResult<Vec<Commit>> {
     let mut result = Vec::new();
     let mut to_process = vec![commit_sha.to_string()];
     let mut processed = std::collections::HashSet::new();
@@ -523,11 +510,9 @@ pub fn get_parent_commits(
                         "SELECT id, sha, message, timestamp, build_status, build_url
                          FROM git_commit
                          WHERE sha = ?1",
-                    )
-                    .unwrap()
+                    )?
                     .query_row([&parent_sha], |row| Commit::from_row(row))
-                    .optional()
-                    .unwrap();
+                    .optional()?;
 
                 if let Some(commit) = parent_commit {
                     result.push(commit);
@@ -547,11 +532,10 @@ pub fn get_repo(
     conn: &PooledConnection<SqliteConnectionManager>,
     owner_name: &str,
     repo_name: &str,
-) -> Result<Option<Repo>, Error> {
-    Ok(conn.prepare(
+) -> AppResult<Option<Repo>> {
+    conn.prepare(
         "SELECT id, name, owner_name, default_branch, private, language FROM git_repo WHERE owner_name = ?1 AND name = ?2 LIMIT 1",
-    )
-    .unwrap()
+    )?
     .query_row([owner_name, repo_name], |row| {
         Ok(Repo {
             id: row.get(0)?,
@@ -563,7 +547,7 @@ pub fn get_repo(
         })
     })
     .optional()
-    .unwrap())
+    .map_err(AppError::from)
 }
 
 #[allow(dead_code)]
@@ -571,11 +555,10 @@ pub fn get_branch(
     conn: &PooledConnection<SqliteConnectionManager>,
     repo_id: i64,
     branch_name: String,
-) -> Result<Option<Branch>, Error> {
-    Ok(conn.prepare(
+) -> AppResult<Option<Branch>> {
+    conn.prepare(
         "SELECT id, name, head_commit_sha, repo_id FROM git_branch WHERE name = ?1 AND repo_id = ?2 LIMIT 1",
-    )
-    .unwrap()
+    )?
     .query_row(params![branch_name, repo_id], |row| {
         Ok(Branch {
             id: row.get(0)?,
@@ -584,46 +567,48 @@ pub fn get_branch(
             repo_id: row.get(3)?,
         })
     })
-    .optional().unwrap())
+    .optional()
+    .map_err(AppError::from)
 }
 
 pub fn get_commit(
     conn: &PooledConnection<SqliteConnectionManager>,
     repo_id: i64,
     commit_sha: String,
-) -> Result<Option<Commit>, Error> {
-    Ok(conn.prepare(
+) -> AppResult<Option<Commit>> {
+    conn.prepare(
         "SELECT id, sha, message, timestamp, build_status, build_url FROM git_commit WHERE sha = ?1 AND repo_id = ?2 LIMIT 1",
-    ).unwrap()
+    )?
     .query_row(params![commit_sha, repo_id], |row| {
         Ok(Commit {
-            id: row.get_unwrap(0),
-            sha: row.get_unwrap(1),
-            message: row.get_unwrap(2),
-            timestamp: row.get_unwrap(3),
-            build_status: row.get_unwrap::<usize, Option<String>>(4).into(),
-            build_url: row.get_unwrap::<usize, Option<String>>(5),
+            id: row.get(0)?,
+            sha: row.get(1)?,
+            message: row.get(2)?,
+            timestamp: row.get(3)?,
+            build_status: row.get::<_, Option<String>>(4)?.into(),
+            build_url: row.get::<_, Option<String>>(5)?,
         })
     })
-    .optional().unwrap())
+    .optional()
+    .map_err(AppError::from)
 }
 
 pub fn get_commits_since(
     conn: &PooledConnection<SqliteConnectionManager>,
     since: i64,
-) -> Result<Vec<CommitWithRepo>, Error> {
+) -> AppResult<Vec<CommitWithRepo>> {
     let mut stmt = conn.prepare(
             "SELECT id, sha, message, timestamp, build_status, build_url, repo_id FROM git_commit WHERE timestamp > ?1 ORDER BY timestamp DESC",
-        ).unwrap();
-    let mut rows = stmt.query(params![since]).unwrap();
+        )?;
+    let mut rows = stmt.query(params![since])?;
     let mut commits = Vec::new();
 
-    while let Some(row) = rows.next().unwrap() {
-        let repo_id = row.get::<usize, i64>(6).unwrap();
+    while let Some(row) = rows.next()? {
+        let repo_id = row.get::<usize, i64>(6)?;
 
         let repo = conn.prepare(
                 "SELECT id, name, owner_name, default_branch, private, language FROM git_repo WHERE id = ?1 LIMIT 1",
-            ).unwrap()
+            )?
             .query_row(params![repo_id], |row| {
                 Ok(Repo {
                     id: row.get(0)?,
@@ -634,15 +619,16 @@ pub fn get_commits_since(
                     language: row.get(5)?,
                 })
             })
-            .optional().unwrap().unwrap();
+            .optional()?
+            .ok_or_else(|| AppError::NotFound(format!("Repo with id {} not found", repo_id)))?;
 
         let commit = Commit {
-            id: row.get_unwrap(0),
-            sha: row.get_unwrap(1),
-            message: row.get_unwrap(2),
-            timestamp: row.get_unwrap(3),
-            build_status: row.get_unwrap::<usize, Option<String>>(4).into(),
-            build_url: row.get_unwrap::<usize, Option<String>>(5),
+            id: row.get(0)?,
+            sha: row.get(1)?,
+            message: row.get(2)?,
+            timestamp: row.get(3)?,
+            build_status: row.get::<_, Option<String>>(4)?.into(),
+            build_url: row.get::<_, Option<String>>(5)?,
         };
 
         commits.push(CommitWithRepo { repo, commit });
@@ -656,15 +642,15 @@ pub fn get_latest_build(
     repo: &str,
     branch: &str,
     conn: &PooledConnection<SqliteConnectionManager>,
-) -> Option<Commit> {
-    let repo_id = match get_repo(conn, owner, repo).unwrap() {
+) -> AppResult<Option<Commit>> {
+    let repo_id = match get_repo(conn, owner, repo)? {
         Some(repo) => repo.id,
-        None => return None,
+        None => return Ok(None),
     };
 
-    let branch_id = match get_branch_by_name(&branch, repo_id as u64, conn).unwrap() {
+    let branch_id = match get_branch_by_name(&branch, repo_id as u64, conn)? {
         Some(branch) => branch.id,
-        None => return None,
+        None => return Ok(None),
     };
 
     let commit = conn
@@ -677,13 +663,11 @@ pub fn get_latest_build(
             ORDER BY c.timestamp DESC
             LIMIT 1
             "#,
-        )
-        .unwrap()
+        )?
         .query_row([branch_id], |row| Commit::from_row(row))
-        .optional()
-        .unwrap();
+        .optional()?;
 
-    commit
+    Ok(commit)
 }
 
 pub fn get_latest_completed_build(
@@ -691,17 +675,17 @@ pub fn get_latest_completed_build(
     repo: &str,
     branch: &str,
     conn: &PooledConnection<SqliteConnectionManager>,
-) -> Option<Commit> {
+) -> AppResult<Option<Commit>> {
     // Get the repository ID
-    let repo_id = match get_repo(conn, owner, repo).unwrap() {
+    let repo_id = match get_repo(conn, owner, repo)? {
         Some(repo) => repo.id,
-        None => return None,
+        None => return Ok(None),
     };
 
     // Get the branch ID
-    let branch_id = match get_branch_by_name(&branch, repo_id as u64, conn).unwrap() {
+    let branch_id = match get_branch_by_name(&branch, repo_id as u64, conn)? {
         Some(branch) => branch.id,
-        None => return None,
+        None => return Ok(None),
     };
 
     // Get the latest successful build for this branch
@@ -716,13 +700,11 @@ pub fn get_latest_completed_build(
             ORDER BY c.timestamp DESC
             LIMIT 1
             "#,
-        )
-        .unwrap()
+        )?
         .query_row([branch_id], |row| Commit::from_row(row))
-        .optional()
-        .unwrap();
+        .optional()?;
 
-    commit
+    Ok(commit)
 }
 
 pub fn upsert_branch(
@@ -730,45 +712,39 @@ pub fn upsert_branch(
     sha: &str,
     repo_id: u64,
     conn: &PooledConnection<SqliteConnectionManager>,
-) -> Result<u64, Error> {
+) -> AppResult<u64> {
     let name = name.to_string();
     let sha = sha.to_string();
 
     let existing = conn
-        .prepare("SELECT id FROM git_branch WHERE name = ?1 AND repo_id = ?2")
-        .unwrap()
+        .prepare("SELECT id FROM git_branch WHERE name = ?1 AND repo_id = ?2")?
         .query_row(params![name, repo_id], |row| {
             Ok(ExistenceResult { id: row.get(0)? })
         })
-        .optional()
-        .unwrap();
+        .optional()?;
 
     match existing {
         Some(ExistenceResult { id }) => {
             conn.prepare(
                 "UPDATE git_branch SET head_commit_sha = ?3 WHERE name = ?1 AND repo_id = ?2",
-            )
-            .unwrap()
-            .execute(params![name, repo_id, sha])
-            .unwrap();
+            )?
+            .execute(params![name, repo_id, sha])?;
 
             // Add this commit to the branch in the commit-branch relationship table
-            add_commit_to_branch(&sha, id, repo_id, conn).unwrap();
+            add_commit_to_branch(&sha, id, repo_id, conn)?;
 
             Ok(id)
         }
         None => {
             conn.prepare(
                 "INSERT INTO git_branch (name, repo_id, head_commit_sha) VALUES (?1, ?2, ?3)",
-            )
-            .unwrap()
-            .execute(params![name, repo_id, sha])
-            .unwrap();
+            )?
+            .execute(params![name, repo_id, sha])?;
 
             let branch_id = conn.last_insert_rowid() as u64;
 
             // Add this commit to the branch in the commit-branch relationship table
-            add_commit_to_branch(&sha, branch_id, repo_id, conn).unwrap();
+            add_commit_to_branch(&sha, branch_id, repo_id, conn)?;
 
             Ok(branch_id)
         }
@@ -781,20 +757,20 @@ pub fn set_commit_status(
     build_url: String,
     repo_id: u64,
     conn: &PooledConnection<SqliteConnectionManager>,
-) -> Result<(), Error> {
+) -> AppResult<()> {
     let sha = sha.to_string();
+    let status_str = to_variant_name(&build_status)
+        .map_err(|e| AppError::Parse(e.to_string()))?;
 
     conn.prepare(
         "UPDATE git_commit SET build_status = ?1, build_url = ?2 WHERE sha = ?3 AND repo_id = ?4",
-    )
-    .unwrap()
+    )?
     .execute(params![
-        to_variant_name(&build_status).unwrap(),
+        status_str,
         build_url,
         sha,
         repo_id
-    ])
-    .unwrap();
+    ])?;
 
     Ok(())
 }
@@ -804,22 +780,19 @@ pub fn add_commit_to_branch(
     branch_id: u64,
     repo_id: u64,
     conn: &PooledConnection<SqliteConnectionManager>,
-) -> Result<(), Error> {
+) -> AppResult<()> {
     // Check if this relationship already exists
     let existing = conn
-        .prepare("SELECT 1 FROM git_commit_branch WHERE commit_sha = ?1 AND branch_id = ?2")
-        .unwrap()
+        .prepare("SELECT 1 FROM git_commit_branch WHERE commit_sha = ?1 AND branch_id = ?2")?
         .query_row(params![commit_sha, branch_id], |_| Ok(()))
-        .optional();
+        .optional()?;
 
     // If it doesn't exist, insert it
-    if existing.unwrap().is_none() {
+    if existing.is_none() {
         conn.prepare(
             "INSERT INTO git_commit_branch (commit_sha, branch_id, repo_id) VALUES (?1, ?2, ?3)",
-        )
-        .unwrap()
-        .execute(params![commit_sha, branch_id, repo_id])
-        .unwrap();
+        )?
+        .execute(params![commit_sha, branch_id, repo_id])?;
     }
 
     Ok(())
@@ -829,11 +802,10 @@ pub fn get_branch_by_name(
     branch_name: &str,
     repo_id: u64,
     conn: &PooledConnection<SqliteConnectionManager>,
-) -> Result<Option<Branch>, Error> {
+) -> AppResult<Option<Branch>> {
     conn.prepare(
         "SELECT id, name, head_commit_sha, repo_id FROM git_branch WHERE name = ?1 AND repo_id = ?2",
-    )
-    .unwrap()
+    )?
     .query_row(params![branch_name, repo_id], |row| {
         Ok(Branch {
             id: row.get(0)?,
@@ -843,20 +815,20 @@ pub fn get_branch_by_name(
         })
     })
     .optional()
+    .map_err(AppError::from)
 }
 
 pub fn get_branches_for_commit(
     commit_sha: &str,
     conn: &PooledConnection<SqliteConnectionManager>,
-) -> Result<Vec<Branch>, Error> {
+) -> AppResult<Vec<Branch>> {
     let mut stmt = conn
         .prepare(
             "SELECT b.id, b.name, b.head_commit_sha, b.repo_id
              FROM git_branch b
              JOIN git_commit_branch cb ON b.id = cb.branch_id
              WHERE cb.commit_sha = ?1",
-        )
-        .unwrap();
+        )?;
 
     let branches_iter = stmt
         .query_map([commit_sha], |row| {
@@ -866,8 +838,7 @@ pub fn get_branches_for_commit(
                 head_commit_sha: row.get(2)?,
                 repo_id: row.get(3)?,
             })
-        })
-        .unwrap();
+        })?;
 
     let mut branches = Vec::new();
     for branch in branches_iter {
@@ -881,15 +852,14 @@ pub fn get_branches_for_commit(
 pub fn get_deploy_events_by_deploy_config_name(
     deploy_config_name: &str,
     conn: &PooledConnection<SqliteConnectionManager>,
-) -> Result<Vec<DeployEvent>, Error> {
+) -> AppResult<Vec<DeployEvent>> {
     let mut stmt = conn
         .prepare(
             "SELECT deploy_config, team, timestamp, initiator, status, sha, branch
              FROM deploy_event
              WHERE deploy_config = ?1
              ORDER BY timestamp DESC",
-        )
-        .unwrap();
+        )?;
 
     let deploy_events_iter = stmt
         .query_map([deploy_config_name], |row| {
@@ -902,8 +872,7 @@ pub fn get_deploy_events_by_deploy_config_name(
                 sha: row.get(5)?,
                 branch: row.get(6)?,
             })
-        })
-        .unwrap();
+        })?;
 
     let mut deploy_events = Vec::new();
     for event in deploy_events_iter {
@@ -917,15 +886,14 @@ pub fn get_deploy_events_by_deploy_config_name(
 pub fn get_deploy_events_by_team(
     team: &str,
     conn: &PooledConnection<SqliteConnectionManager>,
-) -> Result<Vec<DeployEvent>, Error> {
+) -> AppResult<Vec<DeployEvent>> {
     let mut stmt = conn
         .prepare(
             "SELECT deploy_config, team, timestamp, initiator, status, sha, branch
              FROM deploy_event
              WHERE team = ?1
              ORDER BY timestamp DESC",
-        )
-        .unwrap();
+        )?;
 
     let deploy_events_iter = stmt
         .query_map([team], |row| {
@@ -938,8 +906,7 @@ pub fn get_deploy_events_by_team(
                 sha: row.get(5)?,
                 branch: row.get(6)?,
             })
-        })
-        .unwrap();
+        })?;
 
     let mut deploy_events = Vec::new();
     for event in deploy_events_iter {
@@ -952,15 +919,14 @@ pub fn get_deploy_events_by_team(
 #[allow(dead_code)]
 pub fn get_recent_deploy_events(
     conn: &PooledConnection<SqliteConnectionManager>,
-) -> Result<Vec<DeployEvent>, Error> {
+) -> AppResult<Vec<DeployEvent>> {
     let mut stmt = conn
         .prepare(
             "SELECT deploy_config, team, timestamp, initiator, status, sha, branch
              FROM deploy_event
              ORDER BY timestamp DESC
              LIMIT 100",
-        )
-        .unwrap();
+        )?;
 
     let deploy_events_iter = stmt
         .query_map([], |row| {
@@ -973,8 +939,7 @@ pub fn get_recent_deploy_events(
                 sha: row.get(5)?,
                 branch: row.get(6)?,
             })
-        })
-        .unwrap();
+        })?;
 
     let mut deploy_events = Vec::new();
     for event in deploy_events_iter {
@@ -987,12 +952,11 @@ pub fn get_recent_deploy_events(
 pub fn insert_deploy_event(
     deploy_event: &DeployEvent,
     conn: &PooledConnection<SqliteConnectionManager>,
-) -> Result<(), Error> {
+) -> AppResult<()> {
     conn.prepare(
         "INSERT INTO deploy_event (deploy_config, team, timestamp, initiator, status, sha, branch)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-    )
-    .unwrap()
+    )?
     .execute(params![
         &deploy_event.deploy_config,
         &deploy_event.team,
@@ -1001,8 +965,7 @@ pub fn insert_deploy_event(
         &deploy_event.status,
         &deploy_event.sha,
         &deploy_event.branch,
-    ])
-    .unwrap();
+    ])?;
 
     Ok(())
 }
@@ -1013,17 +976,17 @@ pub fn get_latest_successful_build(
     repo: &str,
     branch: &str,
     conn: &PooledConnection<SqliteConnectionManager>,
-) -> Option<Commit> {
+) -> AppResult<Option<Commit>> {
     // Get the repository ID
-    let repo_id = match get_repo(conn, owner, repo).unwrap() {
+    let repo_id = match get_repo(conn, owner, repo)? {
         Some(repo) => repo.id,
-        None => return None,
+        None => return Ok(None),
     };
 
     // Get the branch ID
-    let branch_id = match get_branch_by_name(&branch, repo_id as u64, conn).unwrap() {
+    let branch_id = match get_branch_by_name(&branch, repo_id as u64, conn)? {
         Some(branch) => branch.id,
-        None => return None,
+        None => return Ok(None),
     };
 
     // Get the latest successful build for this branch
@@ -1038,32 +1001,29 @@ pub fn get_latest_successful_build(
             ORDER BY c.timestamp DESC
             LIMIT 1
             "#,
-        )
-        .unwrap()
+        )?
         .query_row([branch_id], |row| Commit::from_row(row))
-        .optional()
-        .unwrap();
+        .optional()?;
 
-    commit
+    Ok(commit)
 }
 
 /// Get the commit by SHA
 pub fn get_commit_by_sha(
     sha: &str,
     conn: &PooledConnection<SqliteConnectionManager>,
-) -> Option<Commit> {
-    conn.prepare(r#"SELECT id, sha, message, timestamp, build_status, build_url FROM git_commit WHERE sha = ?"#)
-        .unwrap()
+) -> AppResult<Option<Commit>> {
+    conn.prepare(r#"SELECT id, sha, message, timestamp, build_status, build_url FROM git_commit WHERE sha = ?"#)?
         .query_row([sha], |row| Commit::from_row(row))
         .optional()
-        .unwrap()
+        .map_err(AppError::from)
 }
 
 /// Get all branches with their recent commits (up to limit per branch)
 pub fn get_branches_with_commits(
     conn: &PooledConnection<SqliteConnectionManager>,
     commit_limit: usize,
-) -> Result<Vec<BranchWithCommits>, Error> {
+) -> AppResult<Vec<BranchWithCommits>> {
     let mut result = Vec::new();
 
     // First, get all branches with their repo info
@@ -1158,14 +1118,13 @@ pub fn get_branches_with_commits(
 pub fn get_repo_by_commit_sha(
     commit_sha: &str,
     conn: &PooledConnection<SqliteConnectionManager>,
-) -> Result<Option<Repo>, Error> {
+) -> AppResult<Option<Repo>> {
     conn.prepare(
         "SELECT r.id, r.name, r.owner_name, r.default_branch, r.private, r.language
          FROM git_commit c
          JOIN git_repo r ON c.repo_id = r.id
          WHERE c.sha = ?1",
-    )
-    .unwrap()
+    )?
     .query_row([commit_sha], |row| {
         Ok(Repo {
             id: row.get(0)?,
@@ -1177,19 +1136,19 @@ pub fn get_repo_by_commit_sha(
         })
     })
     .optional()
+    .map_err(AppError::from)
 }
 
 /// Get repository by ID
 pub fn get_repo_by_id(
     repo_id: i64,
     conn: &PooledConnection<SqliteConnectionManager>,
-) -> Result<Option<Repo>, Error> {
+) -> AppResult<Option<Repo>> {
     conn.prepare(
         "SELECT id, name, owner_name, default_branch, private, language
          FROM git_repo
          WHERE id = ?1",
-    )
-    .unwrap()
+    )?
     .query_row([repo_id], |row| {
         Ok(Repo {
             id: row.get(0)?,
@@ -1201,10 +1160,11 @@ pub fn get_repo_by_id(
         })
     })
     .optional()
+    .map_err(AppError::from)
 }
 
 /// Get all repositories
-pub fn get_all_repos(conn: &PooledConnection<SqliteConnectionManager>) -> Result<Vec<Repo>, Error> {
+pub fn get_all_repos(conn: &PooledConnection<SqliteConnectionManager>) -> AppResult<Vec<Repo>> {
     let mut stmt = conn
         .prepare("SELECT id, name, owner_name, default_branch, private, language FROM git_repo")?;
 
@@ -1228,7 +1188,7 @@ pub fn get_all_repos(conn: &PooledConnection<SqliteConnectionManager>) -> Result
 pub fn get_branches_by_repo_id(
     repo_id: i64,
     conn: &PooledConnection<SqliteConnectionManager>,
-) -> Result<Vec<Branch>, Error> {
+) -> AppResult<Vec<Branch>> {
     let mut stmt = conn
         .prepare("SELECT id, name, head_commit_sha, repo_id FROM git_branch WHERE repo_id = ?")?;
 
@@ -1250,7 +1210,7 @@ pub fn get_branches_by_repo_id(
 pub fn get_child_commits(
     parent_sha: &str,
     conn: &PooledConnection<SqliteConnectionManager>,
-) -> Result<Vec<Commit>, Error> {
+) -> AppResult<Vec<Commit>> {
     let query = "SELECT c.id, c.sha, c.message, c.timestamp, c.build_status, c.build_url
          FROM git_commit c
          JOIN git_commit_parent p ON c.sha = p.commit_sha

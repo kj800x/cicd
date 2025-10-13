@@ -203,7 +203,7 @@ impl WithInterpolatedVersion for serde_json::Map<String, serde_json::Value> {
         serde_json::Value::Object(self.clone())
             .with_interpolated_version(version)
             .as_object()
-            .unwrap()
+            .expect("with_interpolated_version should return an object")
             .clone()
     }
 }
@@ -225,7 +225,7 @@ impl WithVersion for DynamicObject {
         obj.meta_mut()
             .annotations
             .as_mut()
-            .unwrap()
+            .expect("Annotations should exist after initialization")
             .insert("currentSha".to_owned(), version.to_owned());
 
         obj.data = obj.data.with_interpolated_version(version);
@@ -261,6 +261,10 @@ pub enum Error {
     /// Database error
     #[error("Database error: {0}")]
     Db(#[from] rusqlite::Error),
+
+    /// App error
+    #[error("App error: {0}")]
+    App(#[from] crate::error::AppError),
 
     /// Other errors
     #[error("Other error: {0}")]
@@ -670,7 +674,7 @@ async fn create_deploy_config(client: &Client, final_config: &DeployConfig) -> R
                 },
             }
         }))
-        .unwrap(),
+        .expect("Should be able to serialize DeployConfig status"),
     )
     .await?;
 

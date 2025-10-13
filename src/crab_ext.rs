@@ -33,6 +33,11 @@ pub fn initialize_octocrabs() -> Octocrabs {
 
     github_pats
         .split(',')
-        .map(|pat| Octocrab::builder().personal_token(pat).build().unwrap())
+        .map(|pat| {
+            Octocrab::builder()
+                .personal_token(pat)
+                .build()
+                .expect("Failed to build Octocrab client - invalid GitHub PAT")
+        })
         .collect()
 }

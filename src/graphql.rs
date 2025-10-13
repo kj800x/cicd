@@ -53,16 +53,24 @@ impl QueryRoot {
             .data_unchecked::<Pool<SqliteConnectionManager>>()
             .clone();
 
-        let conn = pool.get().unwrap();
+        let conn = pool.get()
+            .map_err(|e| format!("Failed to get database connection: {}", e))?;
 
         let since = Utc::now() - chrono::Duration::hours(1);
-        let commits = get_commits_since(&conn, since.timestamp_millis());
+        let commits = get_commits_since(&conn, since.timestamp_millis())
+            .map_err(|e| format!("Failed to get commits: {}", e))?;
 
         let mut builds = Vec::new();
 
-        for commit_with_repo in commits.unwrap() {
-            let parent_shas = get_commit_parents(&commit_with_repo.commit.sha, &conn).unwrap();
-            let branches = get_branches_for_commit(&commit_with_repo.commit.sha, &conn).unwrap();
+        for commit_with_repo in commits {
+            let parent_shas = get_commit_parents(&commit_with_repo.commit.sha, &conn)
+                .map_err(|e| format!("Failed to get commit parents: {}", e))?;
+            let branches = get_branches_for_commit(&commit_with_repo.commit.sha, &conn)
+                .map_err(|e| format!("Failed to get branches for commit: {}", e))?;
+
+            let status = to_variant_name(&commit_with_repo.commit.build_status)
+                .map_err(|e| format!("Failed to serialize build status: {}", e))?
+                .to_string();
 
             builds.push(Build {
                 commit: Commit {
@@ -81,9 +89,7 @@ impl QueryRoot {
                     is_private: commit_with_repo.repo.private,
                     language: commit_with_repo.repo.language,
                 },
-                status: to_variant_name(&commit_with_repo.commit.build_status)
-                    .unwrap()
-                    .to_string(),
+                status,
                 url: commit_with_repo.commit.build_url,
                 branches: branches
                     .into_iter()
@@ -105,39 +111,47 @@ impl QueryRoot {
             .data_unchecked::<Pool<SqliteConnectionManager>>()
             .clone();
 
-        let conn = pool.get().unwrap();
+        let conn = pool.get()
+            .map_err(|e| format!("Failed to get database connection: {}", e))?;
 
-        let commit_with_repo_branches = get_commit_with_repo_branches(&sha, &conn).unwrap();
+        let commit_with_repo_branches = get_commit_with_repo_branches(&sha, &conn)
+            .map_err(|e| format!("Failed to get commit with repo branches: {}", e))?;
 
-        Ok(commit_with_repo_branches.map(|x| Build {
-            commit: Commit {
-                id: x.commit.id,
-                sha: x.commit.sha,
-                message: x.commit.message,
-                timestamp: x.commit.timestamp,
-                author: "Unknown".to_string(), // Need to extend DB model to store author
-                parent_shas: x.parent_shas,
-            },
-            repository: Repository {
-                id: x.repo.id,
-                name: x.repo.name,
-                owner: x.repo.owner_name,
-                default_branch: x.repo.default_branch,
-                is_private: x.repo.private,
-                language: x.repo.language,
-            },
-            status: to_variant_name(&x.commit.build_status).unwrap().to_string(),
-            url: x.commit.build_url,
-            branches: x
-                .branches
-                .into_iter()
-                .map(|b| Branch {
-                    id: b.id,
-                    name: b.name,
-                    head_commit_sha: b.head_commit_sha,
-                })
-                .collect(),
-        }))
+        Ok(commit_with_repo_branches.map(|x| -> Result<Build> {
+            let status = to_variant_name(&x.commit.build_status)
+                .map_err(|e| format!("Failed to serialize build status: {}", e))?
+                .to_string();
+
+            Ok(Build {
+                commit: Commit {
+                    id: x.commit.id,
+                    sha: x.commit.sha,
+                    message: x.commit.message,
+                    timestamp: x.commit.timestamp,
+                    author: "Unknown".to_string(), // Need to extend DB model to store author
+                    parent_shas: x.parent_shas,
+                },
+                repository: Repository {
+                    id: x.repo.id,
+                    name: x.repo.name,
+                    owner: x.repo.owner_name,
+                    default_branch: x.repo.default_branch,
+                    is_private: x.repo.private,
+                    language: x.repo.language,
+                },
+                status,
+                url: x.commit.build_url,
+                branches: x
+                    .branches
+                    .into_iter()
+                    .map(|b| Branch {
+                        id: b.id,
+                        name: b.name,
+                        head_commit_sha: b.head_commit_sha,
+                    })
+                    .collect(),
+            })
+        }).transpose()?)
     }
 
     // Get parent builds of a specific commit
@@ -151,19 +165,28 @@ impl QueryRoot {
             .data_unchecked::<Pool<SqliteConnectionManager>>()
             .clone();
 
-        let conn = pool.get().unwrap();
+        let conn = pool.get()
+            .map_err(|e| format!("Failed to get database connection: {}", e))?;
 
-        let commit_repo = get_repo_by_commit_sha(&sha, &conn).unwrap();
+        let commit_repo = get_repo_by_commit_sha(&sha, &conn)
+            .map_err(|e| format!("Failed to get repository by commit SHA: {}", e))?;
 
         if let Some(repo) = commit_repo {
             let max_depth = max_depth.unwrap_or(10).clamp(1, 20) as usize;
-            let parent_commits = get_parent_commits(&sha, &conn, max_depth).unwrap();
+            let parent_commits = get_parent_commits(&sha, &conn, max_depth)
+                .map_err(|e| format!("Failed to get parent commits: {}", e))?;
 
             let mut builds = Vec::new();
 
             for commit in parent_commits {
-                let parent_shas = get_commit_parents(&commit.sha, &conn).unwrap();
-                let branches = get_branches_for_commit(&commit.sha, &conn).unwrap();
+                let parent_shas = get_commit_parents(&commit.sha, &conn)
+                    .map_err(|e| format!("Failed to get commit parents: {}", e))?;
+                let branches = get_branches_for_commit(&commit.sha, &conn)
+                    .map_err(|e| format!("Failed to get branches for commit: {}", e))?;
+
+                let status = to_variant_name(&commit.build_status)
+                    .map_err(|e| format!("Failed to serialize build status: {}", e))?
+                    .to_string();
 
                 builds.push(Build {
                     commit: Commit {
@@ -182,7 +205,7 @@ impl QueryRoot {
                         is_private: repo.private,
                         language: repo.language.clone(),
                     },
-                    status: to_variant_name(&commit.build_status).unwrap().to_string(),
+                    status,
                     url: commit.build_url,
                     branches: branches
                         .into_iter()
@@ -207,44 +230,28 @@ impl QueryRoot {
             .data_unchecked::<Pool<SqliteConnectionManager>>()
             .clone();
 
-        let conn = pool.get().unwrap();
+        let conn = pool.get()
+            .map_err(|e| format!("Failed to get database connection: {}", e))?;
 
         // Get child commits
-        let child_commits = get_child_commits(&sha, &conn).unwrap();
+        let child_commits = get_child_commits(&sha, &conn)
+            .map_err(|e| format!("Failed to get child commits: {}", e))?;
 
         let mut builds = Vec::new();
 
         for db_commit in child_commits {
             // Get the repo info for this commit
-            let repo_id = get_commit(&conn, db_commit.id, db_commit.sha.clone())
-                .unwrap()
-                .map(|_| {
-                    // Get repo_id from the commit - we need to query it
-                    get_repo_by_commit_sha(&db_commit.sha, &conn)
-                        .unwrap()
-                        .map(|r| r.id)
-                })
-                .flatten()
-                .unwrap_or(0);
-
-            let repo = get_repo_by_id(repo_id, &conn)
-                .unwrap()
-                .map(|r| Repository {
-                    id: r.id,
-                    name: r.name,
-                    owner: r.owner_name,
-                    default_branch: r.default_branch,
-                    is_private: r.private,
-                    language: r.language,
-                })
-                .unwrap();
+            let repo = get_repo_by_commit_sha(&db_commit.sha, &conn)
+                .map_err(|e| format!("Failed to get repository by commit SHA: {}", e))?
+                .ok_or_else(|| format!("Repository not found for commit {}", db_commit.sha))?;
 
             // Get the parent SHAs
-            let parent_shas = get_commit_parents(&db_commit.sha, &conn).unwrap();
+            let parent_shas = get_commit_parents(&db_commit.sha, &conn)
+                .map_err(|e| format!("Failed to get commit parents: {}", e))?;
 
             // Get branches
             let branches = get_branches_for_commit(&db_commit.sha, &conn)
-                .unwrap()
+                .map_err(|e| format!("Failed to get branches for commit: {}", e))?
                 .into_iter()
                 .map(|b| Branch {
                     id: b.id,
@@ -252,6 +259,10 @@ impl QueryRoot {
                     head_commit_sha: b.head_commit_sha,
                 })
                 .collect();
+
+            let status = to_variant_name(&db_commit.build_status)
+                .map_err(|e| format!("Failed to serialize build status: {}", e))?
+                .to_string();
 
             builds.push(Build {
                 commit: Commit {
@@ -263,10 +274,15 @@ impl QueryRoot {
                     author: "Unknown".to_string(),
                     parent_shas,
                 },
-                repository: repo,
-                status: to_variant_name(&db_commit.build_status)
-                    .unwrap()
-                    .to_string(),
+                repository: Repository {
+                    id: repo.id,
+                    name: repo.name,
+                    owner: repo.owner_name,
+                    default_branch: repo.default_branch,
+                    is_private: repo.private,
+                    language: repo.language,
+                },
+                status,
                 url: db_commit.build_url,
                 branches,
             });
@@ -281,10 +297,11 @@ impl QueryRoot {
             .data_unchecked::<Pool<SqliteConnectionManager>>()
             .clone();
 
-        let conn = pool.get().unwrap();
+        let conn = pool.get()
+            .map_err(|e| format!("Failed to get database connection: {}", e))?;
 
         let repos = get_all_repos(&conn)
-            .unwrap()
+            .map_err(|e| format!("Failed to get all repositories: {}", e))?
             .into_iter()
             .map(|r| Repository {
                 id: r.id,
@@ -305,10 +322,11 @@ impl QueryRoot {
             .data_unchecked::<Pool<SqliteConnectionManager>>()
             .clone();
 
-        let conn = pool.get().unwrap();
+        let conn = pool.get()
+            .map_err(|e| format!("Failed to get database connection: {}", e))?;
 
         let branches = get_branches_by_repo_id(repo_id, &conn)
-            .unwrap()
+            .map_err(|e| format!("Failed to get branches by repo ID: {}", e))?
             .into_iter()
             .map(|b| Branch {
                 id: b.id,

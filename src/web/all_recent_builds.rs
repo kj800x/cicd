@@ -3,7 +3,13 @@ use crate::web::{build_status_helpers, formatting, header};
 
 /// Generate the HTML fragment for the build grid content
 pub fn render_build_grid_fragment(pool: &Pool<SqliteConnectionManager>) -> Markup {
-    let conn = pool.get().unwrap();
+    let conn = match pool.get() {
+        Ok(c) => c,
+        Err(e) => {
+            log::error!("Failed to get database connection: {}", e);
+            return html! { div { "Error: Failed to connect to database" } };
+        }
+    };
     let since = Utc::now() - chrono::Duration::hours(24);
     let commits_result = get_commits_since(&conn, since.timestamp_millis());
 
