@@ -796,6 +796,7 @@ dependencies = [
  "serde_variant",
  "serde_yaml",
  "serenity",
+ "sha2 0.10.9",
  "thiserror 1.0.60",
  "tokio",
  "tokio-tungstenite 0.21.0",
@@ -848,7 +849,7 @@ dependencies = [
  "hmac 0.12.1",
  "percent-encoding",
  "rand",
- "sha2 0.10.8",
+ "sha2 0.10.9",
  "subtle",
  "time",
  "version_check",
@@ -2535,7 +2536,7 @@ checksum = "d7a240022f37c361ec1878d646fc5b7d7c4d28d5946e1a80ad5a7a4f4ca0bdcd"
 dependencies = [
  "once_cell",
  "pest",
- "sha2 0.10.8",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -3369,9 +3370,9 @@ dependencies = [
 
 [[package]]
 name = "sha2"
-version = "0.10.8"
+version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "793db75ad2bcafc3ffa7c68b215fee268f537982cd901d132f89c6343f3a3dc8"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
 dependencies = [
  "cfg-if",
  "cpufeatures",

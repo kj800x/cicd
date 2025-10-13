@@ -1,6 +1,7 @@
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use kube::{CustomResource, ResourceExt};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 pub const DEPLOY_CONFIG_KIND: &str = if cfg!(feature = "test-crd") {
     "TestDeployConfig"
@@ -87,7 +88,7 @@ pub struct DeployConfigConfigStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
 
-    /// The SHA for the current version of the config (specs and metadata)
+    /// A SHA256 hash of the current specs. NOT THE GIT SHA.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha: Option<String>,
 }
@@ -292,6 +293,13 @@ impl DeployConfig {
     /// Get the Kubernetes resource specs
     pub fn resource_specs(&self) -> &[serde_json::Value] {
         &self.spec.spec.specs
+    }
+
+    #[allow(clippy::expect_used)]
+    pub fn spec_hash(&self) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(serde_json::to_string(&self.spec.spec).expect("Failed to serialize spec"));
+        format!("{:x}", hasher.finalize())
     }
 }
 

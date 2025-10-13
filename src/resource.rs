@@ -199,7 +199,7 @@ pub async fn sync_repo_deploy_configs_impl(
             })
             .collect::<Result<Vec<Value>, anyhow::Error>>()?;
 
-        let dc = DeployConfig {
+        let mut dc = DeployConfig {
             spec: DeployConfigSpec {
                 spec: DeployConfigSpecFields {
                     artifact: RepositoryBranch {
@@ -218,19 +218,21 @@ pub async fn sync_repo_deploy_configs_impl(
                 namespace: Some(config.namespace),
                 ..ObjectMeta::default()
             },
-            status: Some(DeployConfigStatus {
+            status: None,
+        };
+
+        dc.status = Some(DeployConfigStatus {
+            config: Some(DeployConfigConfigStatus {
+                owner: Some(owner.clone()),
+                repo: Some(repo.clone()),
                 // TODO: Semantically this is correct today (since we overwrite the
                 // live config spec as soon as we get the webhook). In the future,
                 // we will want to defer the update until the user actually does
                 // a deploy.
-                config: Some(DeployConfigConfigStatus {
-                    owner: Some(owner.clone()),
-                    repo: Some(repo.clone()),
-                    sha: Some(sha.clone()),
-                }),
-                ..Default::default()
+                sha: Some(dc.spec_hash()),
             }),
-        };
+            ..Default::default()
+        });
 
         final_deploy_configs.push(dc);
     }
@@ -346,6 +348,5 @@ pub async fn sync_all_deploy_configs(
         }
     }
 
-    // todo!();
     HttpResponse::Ok().body("Synced all deploy configs")
 }
