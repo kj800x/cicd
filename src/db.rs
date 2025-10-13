@@ -67,6 +67,21 @@ pub struct Commit {
     pub build_url: Option<String>,
 }
 
+impl Commit {
+    /// Build a Commit from a database row
+    /// Expects columns in order: id, sha, message, timestamp, build_status, build_url
+    pub fn from_row(row: &rusqlite::Row) -> Result<Self, rusqlite::Error> {
+        Ok(Commit {
+            id: row.get(0)?,
+            sha: row.get(1)?,
+            message: row.get(2)?,
+            timestamp: row.get(3)?,
+            build_status: row.get::<_, Option<String>>(4)?.into(),
+            build_url: row.get(5)?,
+        })
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CommitParent {
     pub sha: String,
@@ -397,16 +412,7 @@ pub fn get_commit_with_branches(
              WHERE c.sha = ?1",
         )
         .unwrap()
-        .query_row([commit_sha], |row| {
-            Ok(Commit {
-                id: row.get(0)?,
-                sha: row.get(1)?,
-                message: row.get(2)?,
-                timestamp: row.get(3)?,
-                build_status: row.get::<_, Option<String>>(4)?.into(),
-                build_url: row.get(5)?,
-            })
-        })
+        .query_row([commit_sha], |row| Commit::from_row(row))
         .optional()
         .unwrap();
 
@@ -506,16 +512,7 @@ pub fn get_parent_commits(
                          WHERE sha = ?1",
                     )
                     .unwrap()
-                    .query_row([&parent_sha], |row| {
-                        Ok(Commit {
-                            id: row.get(0)?,
-                            sha: row.get(1)?,
-                            message: row.get(2)?,
-                            timestamp: row.get(3)?,
-                            build_status: row.get::<_, Option<String>>(4)?.into(),
-                            build_url: row.get(5)?,
-                        })
-                    })
+                    .query_row([&parent_sha], |row| Commit::from_row(row))
                     .optional()
                     .unwrap();
 
@@ -669,16 +666,7 @@ pub fn get_latest_build(
             "#,
         )
         .unwrap()
-        .query_row([branch_id], |row| {
-            Ok(Commit {
-                id: row.get(0)?,
-                sha: row.get(1)?,
-                message: row.get(2)?,
-                timestamp: row.get(3)?,
-                build_status: row.get::<_, Option<String>>(4)?.into(),
-                build_url: row.get(5)?,
-            })
-        })
+        .query_row([branch_id], |row| Commit::from_row(row))
         .optional()
         .unwrap();
 
@@ -717,16 +705,7 @@ pub fn get_latest_completed_build(
             "#,
         )
         .unwrap()
-        .query_row([branch_id], |row| {
-            Ok(Commit {
-                id: row.get(0)?,
-                sha: row.get(1)?,
-                message: row.get(2)?,
-                timestamp: row.get(3)?,
-                build_status: row.get::<_, Option<String>>(4)?.into(),
-                build_url: row.get(5)?,
-            })
-        })
+        .query_row([branch_id], |row| Commit::from_row(row))
         .optional()
         .unwrap();
 

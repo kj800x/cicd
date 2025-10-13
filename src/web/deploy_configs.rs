@@ -112,16 +112,7 @@ fn get_latest_successful_build(
             "#,
         )
         .unwrap()
-        .query_row([branch_id], |row| {
-            Ok(Commit {
-                id: row.get(0)?,
-                sha: row.get(1)?,
-                message: row.get(2)?,
-                timestamp: row.get(3)?,
-                build_status: row.get::<_, Option<String>>(4)?.into(),
-                build_url: row.get(5)?,
-            })
-        })
+        .query_row([branch_id], |row| Commit::from_row(row))
         .optional()
         .unwrap();
 
@@ -133,18 +124,9 @@ pub fn get_commit_by_sha(
     sha: &str,
     conn: &PooledConnection<SqliteConnectionManager>,
 ) -> Option<Commit> {
-    conn.prepare(r#"SELECT * FROM git_commit WHERE sha = ?"#)
+    conn.prepare(r#"SELECT id, sha, message, timestamp, build_status, build_url FROM git_commit WHERE sha = ?"#)
         .unwrap()
-        .query_row([sha], |row| {
-            Ok(Commit {
-                id: row.get(0)?,
-                sha: row.get(1)?,
-                message: row.get(2)?,
-                timestamp: row.get(3)?,
-                build_status: row.get::<usize, Option<String>>(4)?.into(),
-                build_url: row.get(5)?,
-            })
-        })
+        .query_row([sha], |row| Commit::from_row(row))
         .optional()
         .unwrap()
 }
