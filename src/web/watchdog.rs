@@ -113,18 +113,15 @@ impl PartialEq for WatchdogIssue {
 impl Eq for WatchdogIssue {}
 
 fn render_issue(issue: &WatchdogIssue) -> Markup {
-    let base_url = format!(
-        "/deploy?selected={}/{}",
-        issue.config.namespace().unwrap_or_default(),
-        issue.config.name_any()
-    );
+    let base_url = format!("/deploy?selected={}", issue.config.qualified_name());
 
     let action_url = match &issue.issue_type {
         WatchdogIssueType::NonDefaultBranch => {
             // Link to deploy with default branch to fix the non-default branch issue
             format!(
                 "{}&action=deploy&branch={}",
-                base_url, issue.config.spec.spec.artifact.branch
+                base_url,
+                issue.config.default_branch()
             )
         }
         WatchdogIssueType::AutodeployMismatch => {
@@ -134,7 +131,8 @@ fn render_issue(issue: &WatchdogIssue) -> Markup {
             // Link to deploy with default branch since we want to deploy the standard version
             format!(
                 "{}&action=deploy&branch={}",
-                base_url, issue.config.spec.spec.artifact.branch
+                base_url,
+                issue.config.default_branch()
             )
         }
         // For out of sync and failing builds, just link to the deploy page
@@ -196,27 +194,27 @@ pub async fn watchdog(
     // Check each deploy config for issues
     for config in deploy_configs {
         // Check for non-default branch
-        let tracking_branch = &config.tracking_branch();
-        if tracking_branch != &config.spec.spec.artifact.branch {
+        if !config.is_tracking_default_branch() {
             issues.push(WatchdogIssue::new(
                 WatchdogIssueType::NonDefaultBranch,
                 config.clone(),
                 format!(
                     "Tracking '{}' instead of default branch '{}'",
-                    tracking_branch, config.spec.spec.artifact.branch
+                    config.tracking_branch(),
+                    config.default_branch()
                 ),
             ));
         }
 
         // Check for autodeploy mismatch
-        let current_autodeploy = config.current_autodeploy();
-        if current_autodeploy != config.spec.spec.autodeploy {
+        if !config.autodeploy_matches_spec() {
             issues.push(WatchdogIssue::new(
                 WatchdogIssueType::AutodeployMismatch,
                 config.clone(),
                 format!(
                     "State: {}, Spec: {}",
-                    current_autodeploy, config.spec.spec.autodeploy
+                    config.current_autodeploy(),
+                    config.spec.spec.autodeploy
                 ),
             ));
         }
@@ -225,8 +223,8 @@ pub async fn watchdog(
         let tracking_branch = config.tracking_branch();
 
         let commit = get_latest_completed_build(
-            &config.spec.spec.artifact.owner,
-            &config.spec.spec.artifact.repo,
+            config.artifact_owner(),
+            config.artifact_repo(),
             tracking_branch,
             &conn,
         );
@@ -250,7 +248,7 @@ pub async fn watchdog(
         }
 
         // Check for undeployed with autodeploy
-        if config.current_autodeploy() == true && config.wanted_sha().is_none() {
+        if config.current_autodeploy() && config.is_undeployed() {
             issues.push(WatchdogIssue::new(
                 WatchdogIssueType::UndeployedWithAutodeploy,
                 config.clone(),
@@ -259,8 +257,8 @@ pub async fn watchdog(
         }
 
         // Check for out of sync
-        if let (Some(latest), Some(wanted)) = (&config.latest_sha(), &config.wanted_sha()) {
-            if latest != wanted {
+        if !config.is_in_sync() {
+            if let (Some(latest), Some(wanted)) = (config.latest_sha(), config.wanted_sha()) {
                 issues.push(WatchdogIssue::new(
                     WatchdogIssueType::OutOfSync,
                     config.clone(),

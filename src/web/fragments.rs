@@ -244,7 +244,7 @@ pub async fn build_status(
             div class="alert-content" {
               div class="details" {
                 div {
-                  (resolved_version.format(None, &selected_config.spec.spec.artifact.owner, &selected_config.spec.spec.artifact.repo))
+                  (resolved_version.format(None, selected_config.artifact_owner(), selected_config.artifact_repo()))
                   @match commit.build_status {
                     BuildStatus::Pending => " is actively being built.",
                     BuildStatus::Failure => " failed to build.",

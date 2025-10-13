@@ -228,4 +228,66 @@ impl DeployConfig {
             block_owner_deletion: Some(true),
         }
     }
+
+    /// Get the owner of the artifact repository
+    pub fn artifact_owner(&self) -> &str {
+        &self.spec.spec.artifact.owner
+    }
+
+    /// Get the name of the artifact repository
+    pub fn artifact_repo(&self) -> &str {
+        &self.spec.spec.artifact.repo
+    }
+
+    /// Get the default branch from spec
+    pub fn default_branch(&self) -> &str {
+        &self.spec.spec.artifact.branch
+    }
+
+    /// Get the team name
+    pub fn team(&self) -> &str {
+        &self.spec.spec.team
+    }
+
+    /// Get the kind
+    pub fn kind(&self) -> &str {
+        &self.spec.spec.kind
+    }
+
+    /// Check if tracking the default branch
+    pub fn is_tracking_default_branch(&self) -> bool {
+        self.tracking_branch() == self.default_branch()
+    }
+
+    /// Check if autodeploy matches spec
+    pub fn autodeploy_matches_spec(&self) -> bool {
+        self.current_autodeploy() == self.spec.spec.autodeploy
+    }
+
+    /// Get a Repository struct for the artifact
+    pub fn artifact_repository(&self) -> Repository {
+        Repository {
+            owner: self.spec.spec.artifact.owner.clone(),
+            repo: self.spec.spec.artifact.repo.clone(),
+        }
+    }
+
+    /// Get fully qualified name (namespace/name)
+    pub fn qualified_name(&self) -> String {
+        format!("{}/{}", self.namespace().unwrap_or_default(), self.name_any())
+    }
+
+    /// Check if deployment is undeployed
+    pub fn is_undeployed(&self) -> bool {
+        self.wanted_sha().is_none()
+    }
+
+    /// Check if latest and wanted are in sync
+    pub fn is_in_sync(&self) -> bool {
+        match (self.latest_sha(), self.wanted_sha()) {
+            (Some(latest), Some(wanted)) => latest == wanted,
+            (None, None) => true,
+            _ => false,
+        }
+    }
 }

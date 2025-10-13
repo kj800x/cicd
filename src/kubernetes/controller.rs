@@ -595,14 +595,9 @@ pub async fn handle_build_completed(
     };
 
     let matching_configs = deploy_configs.iter().filter(|dc| {
-        dc.spec.spec.artifact.owner == owner
-            && dc.spec.spec.artifact.repo == repo
-            && dc
-                .status
-                .as_ref()
-                .and_then(|s| s.artifact.as_ref().and_then(|a| a.branch.clone()))
-                .unwrap_or_else(|| dc.spec.spec.artifact.branch.clone())
-                == branch
+        dc.artifact_owner() == owner
+            && dc.artifact_repo() == repo
+            && dc.tracking_branch() == branch
     });
 
     for config in matching_configs {
@@ -630,7 +625,7 @@ pub async fn handle_build_completed(
             insert_deploy_event(
                 &DeployEvent {
                     deploy_config: name.to_string(),
-                    team: config.spec.spec.team.clone(),
+                    team: config.team().to_string(),
                     timestamp: Utc::now().timestamp(),
                     initiator: "autodeploy".to_string(),
                     status: "SUCCESS".to_string(),

@@ -222,20 +222,20 @@ impl ResolvedVersion {
                 let branch = config.tracking_branch();
                 let commit = match build_filter {
                     BuildFilter::Any => get_latest_build(
-                        &config.spec.spec.artifact.owner,
-                        &config.spec.spec.artifact.repo,
+                        config.artifact_owner(),
+                        config.artifact_repo(),
                         &branch,
                         conn,
                     ),
                     BuildFilter::Completed => get_latest_completed_build(
-                        &config.spec.spec.artifact.owner,
-                        &config.spec.spec.artifact.repo,
+                        config.artifact_owner(),
+                        config.artifact_repo(),
                         &branch,
                         conn,
                     ),
                     BuildFilter::Successful => get_latest_successful_build(
-                        &config.spec.spec.artifact.owner,
-                        &config.spec.spec.artifact.repo,
+                        config.artifact_owner(),
+                        config.artifact_repo(),
                         &branch,
                         conn,
                     ),
@@ -253,20 +253,20 @@ impl ResolvedVersion {
             Action::DeployBranch { branch } => {
                 let commit = match build_filter {
                     BuildFilter::Any => get_latest_build(
-                        &config.spec.spec.artifact.owner,
-                        &config.spec.spec.artifact.repo,
+                        config.artifact_owner(),
+                        config.artifact_repo(),
                         &branch,
                         conn,
                     ),
                     BuildFilter::Completed => get_latest_completed_build(
-                        &config.spec.spec.artifact.owner,
-                        &config.spec.spec.artifact.repo,
+                        config.artifact_owner(),
+                        config.artifact_repo(),
                         &branch,
                         conn,
                     ),
                     BuildFilter::Successful => get_latest_successful_build(
-                        &config.spec.spec.artifact.owner,
-                        &config.spec.spec.artifact.repo,
+                        config.artifact_owner(),
+                        config.artifact_repo(),
                         &branch,
                         conn,
                     ),
@@ -442,7 +442,7 @@ impl DeployTransition {
 
 /// Generate the status header showing current branch and autodeploy status
 fn generate_status_header(config: &DeployConfig, owner: &str, repo: &str) -> Markup {
-    let default_branch = config.spec.spec.artifact.branch.clone();
+    let default_branch = config.default_branch();
     let default_autodeploy = config.spec.spec.autodeploy;
     let current_autodeploy = config.current_autodeploy();
     let current_branch = config.tracking_branch();
@@ -489,8 +489,8 @@ pub async fn render_preview_content(
     action: &Action,
     conn: &PooledConnection<SqliteConnectionManager>,
 ) -> Markup {
-    let owner = selected_config.spec.spec.artifact.owner.clone();
-    let repo = selected_config.spec.spec.artifact.repo.clone();
+    let owner = selected_config.artifact_owner().to_string();
+    let repo = selected_config.artifact_repo().to_string();
 
     let preview_content = match action {
         Action::DeployLatest
@@ -553,8 +553,8 @@ async fn generate_preview(
     action: &Action,
     conn: &PooledConnection<SqliteConnectionManager>,
 ) -> Markup {
-    let owner = selected_config.spec.spec.artifact.owner.clone();
-    let repo = selected_config.spec.spec.artifact.repo.clone();
+    let owner = selected_config.artifact_owner().to_string();
+    let repo = selected_config.artifact_repo().to_string();
 
     // Wrap the preview content in the container markup
     html! {
@@ -1286,7 +1286,7 @@ pub async fn deploy_config(
             insert_deploy_event(
                 &DeployEvent {
                     deploy_config: name.to_string(),
-                    team: config.spec.spec.team.clone(),
+                    team: config.team().to_string(),
                     timestamp: Utc::now().timestamp(),
                     initiator: "USER".to_string(),
                     status: "SUCCESS".to_string(),
@@ -1301,7 +1301,7 @@ pub async fn deploy_config(
             insert_deploy_event(
                 &DeployEvent {
                     deploy_config: name.to_string(),
-                    team: config.spec.spec.team.clone(),
+                    team: config.team().to_string(),
                     timestamp: Utc::now().timestamp(),
                     initiator: "USER".to_string(),
                     status: "SUCCESS".to_string(),
