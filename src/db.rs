@@ -413,7 +413,7 @@ pub fn get_commit_with_branches(
              FROM git_commit c
              WHERE c.sha = ?1",
         )?
-        .query_row([commit_sha], |row| Commit::from_row(row))
+        .query_row([commit_sha], Commit::from_row)
         .optional()?;
 
     match commit_result {
@@ -509,7 +509,7 @@ pub fn get_parent_commits(
                          FROM git_commit
                          WHERE sha = ?1",
                     )?
-                    .query_row([&parent_sha], |row| Commit::from_row(row))
+                    .query_row([&parent_sha], Commit::from_row)
                     .optional()?;
 
                 if let Some(commit) = parent_commit {
@@ -646,7 +646,7 @@ pub fn get_latest_build(
         None => return Ok(None),
     };
 
-    let branch_id = match get_branch_by_name(&branch, repo_id as u64, conn)? {
+    let branch_id = match get_branch_by_name(branch, repo_id as u64, conn)? {
         Some(branch) => branch.id,
         None => return Ok(None),
     };
@@ -662,7 +662,7 @@ pub fn get_latest_build(
             LIMIT 1
             "#,
         )?
-        .query_row([branch_id], |row| Commit::from_row(row))
+        .query_row([branch_id], Commit::from_row)
         .optional()?;
 
     Ok(commit)
@@ -681,7 +681,7 @@ pub fn get_latest_completed_build(
     };
 
     // Get the branch ID
-    let branch_id = match get_branch_by_name(&branch, repo_id as u64, conn)? {
+    let branch_id = match get_branch_by_name(branch, repo_id as u64, conn)? {
         Some(branch) => branch.id,
         None => return Ok(None),
     };
@@ -699,7 +699,7 @@ pub fn get_latest_completed_build(
             LIMIT 1
             "#,
         )?
-        .query_row([branch_id], |row| Commit::from_row(row))
+        .query_row([branch_id], Commit::from_row)
         .optional()?;
 
     Ok(commit)
@@ -968,7 +968,7 @@ pub fn get_latest_successful_build(
     };
 
     // Get the branch ID
-    let branch_id = match get_branch_by_name(&branch, repo_id as u64, conn)? {
+    let branch_id = match get_branch_by_name(branch, repo_id as u64, conn)? {
         Some(branch) => branch.id,
         None => return Ok(None),
     };
@@ -986,7 +986,7 @@ pub fn get_latest_successful_build(
             LIMIT 1
             "#,
         )?
-        .query_row([branch_id], |row| Commit::from_row(row))
+        .query_row([branch_id], Commit::from_row)
         .optional()?;
 
     Ok(commit)
@@ -998,7 +998,7 @@ pub fn get_commit_by_sha(
     conn: &PooledConnection<SqliteConnectionManager>,
 ) -> AppResult<Option<Commit>> {
     conn.prepare(r#"SELECT id, sha, message, timestamp, build_status, build_url FROM git_commit WHERE sha = ?"#)?
-        .query_row([sha], |row| Commit::from_row(row))
+        .query_row([sha], Commit::from_row)
         .optional()
         .map_err(AppError::from)
 }
@@ -1202,7 +1202,7 @@ pub fn get_child_commits(
 
     let mut stmt = conn.prepare(query)?;
     let commits = stmt
-        .query_map([parent_sha], |row| Commit::from_row(row))?
+        .query_map([parent_sha], Commit::from_row)?
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(commits)

@@ -119,7 +119,7 @@ impl QueryRoot {
         let commit_with_repo_branches = get_commit_with_repo_branches(&sha, &conn)
             .map_err(|e| format!("Failed to get commit with repo branches: {}", e))?;
 
-        Ok(commit_with_repo_branches
+        commit_with_repo_branches
             .map(|x| -> Result<Build> {
                 let status = to_variant_name(&x.commit.build_status)
                     .map_err(|e| format!("Failed to serialize build status: {}", e))?
@@ -155,7 +155,7 @@ impl QueryRoot {
                         .collect(),
                 })
             })
-            .transpose()?)
+            .transpose()
     }
 
     // Get parent builds of a specific commit

@@ -46,7 +46,7 @@ pub async fn apply(
         .map_err(|e| anyhow::anyhow!("GVK {gvk:?} not found via discovery: {}", e))?;
 
     let api: Api<DynamicObject> = match caps.scope {
-        discovery::Scope::Namespaced => Api::namespaced_with(client.clone(), &ns, &ar),
+        discovery::Scope::Namespaced => Api::namespaced_with(client.clone(), ns, &ar),
         discovery::Scope::Cluster => Api::all_with(client.clone(), &ar),
     };
 
@@ -149,7 +149,7 @@ pub async fn list_namespace_objects(
                 continue_token =
                     list.metadata
                         .continue_
-                        .and_then(|x| if x == "" { None } else { Some(x) });
+                        .and_then(|x| if x.is_empty() { None } else { Some(x) });
 
                 if continue_token.is_none() {
                     break;
@@ -591,7 +591,7 @@ pub async fn handle_build_completed(
                     branch: Some(branch.to_string()),
                     sha: Some(sha.to_string()),
                 },
-                &conn,
+                conn,
             )?;
             update_deploy_config_status(
                 client,
@@ -656,6 +656,8 @@ async fn create_deploy_config(client: &Client, final_config: &DeployConfig) -> R
     let api: Api<DeployConfig> = Api::namespaced(client.clone(), &ns);
 
     api.create(&PostParams::default(), final_config).await?;
+
+    #[allow(clippy::expect_used)]
     api.replace_status(
         &name,
         &PostParams::default(),

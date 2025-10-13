@@ -178,7 +178,7 @@ impl DeployConfig {
         self.status.as_ref().and_then(|s| {
             s.artifact
                 .as_ref()
-                .and_then(|a| a.wanted_sha.as_ref().map(|s| s.as_str()))
+                .and_then(|a| a.wanted_sha.as_deref())
         })
     }
 
@@ -186,7 +186,7 @@ impl DeployConfig {
         self.status.as_ref().and_then(|s| {
             s.artifact
                 .as_ref()
-                .and_then(|a| a.latest_sha.as_ref().map(|s| s.as_str()))
+                .and_then(|a| a.latest_sha.as_deref())
         })
     }
 
@@ -194,7 +194,7 @@ impl DeployConfig {
         self.status.as_ref().and_then(|s| {
             s.artifact
                 .as_ref()
-                .and_then(|a| a.current_sha.as_ref().map(|s| s.as_str()))
+                .and_then(|a| a.current_sha.as_deref())
         })
     }
 
@@ -202,7 +202,7 @@ impl DeployConfig {
         self.status.as_ref().and_then(|s| {
             s.artifact
                 .as_ref()
-                .and_then(|a| a.branch.as_ref().map(|s| s.as_str()))
+                .and_then(|a| a.branch.as_deref())
         })
     }
 
@@ -212,7 +212,7 @@ impl DeployConfig {
             .and_then(|s| {
                 s.artifact
                     .as_ref()
-                    .and_then(|a| a.branch.as_ref().map(|s| s.as_str()))
+                    .and_then(|a| a.branch.as_deref())
             })
             .unwrap_or(&self.spec.spec.artifact.branch)
     }

@@ -110,7 +110,7 @@ impl ResolvedVersion {
     fn get_build_time(&self) -> Option<u64> {
         match self {
             ResolvedVersion::BranchTracked { build_time, .. }
-            | ResolvedVersion::TrackedSha { build_time, .. } => Some(build_time.clone()),
+            | ResolvedVersion::TrackedSha { build_time, .. } => Some(*build_time),
             _ => None,
         }
     }
@@ -155,7 +155,7 @@ impl ResolvedVersion {
                     BuildFilter::Any => get_latest_build(
                         config.artifact_owner(),
                         config.artifact_repo(),
-                        &branch,
+                        branch,
                         conn,
                     )
                     .ok()
@@ -163,7 +163,7 @@ impl ResolvedVersion {
                     BuildFilter::Completed => get_latest_completed_build(
                         config.artifact_owner(),
                         config.artifact_repo(),
-                        &branch,
+                        branch,
                         conn,
                     )
                     .ok()
@@ -171,7 +171,7 @@ impl ResolvedVersion {
                     BuildFilter::Successful => get_latest_successful_build(
                         config.artifact_owner(),
                         config.artifact_repo(),
-                        &branch,
+                        branch,
                         conn,
                     )
                     .ok()
@@ -192,7 +192,7 @@ impl ResolvedVersion {
                     BuildFilter::Any => get_latest_build(
                         config.artifact_owner(),
                         config.artifact_repo(),
-                        &branch,
+                        branch,
                         conn,
                     )
                     .ok()
@@ -200,7 +200,7 @@ impl ResolvedVersion {
                     BuildFilter::Completed => get_latest_completed_build(
                         config.artifact_owner(),
                         config.artifact_repo(),
-                        &branch,
+                        branch,
                         conn,
                     )
                     .ok()
@@ -208,7 +208,7 @@ impl ResolvedVersion {
                     BuildFilter::Successful => get_latest_successful_build(
                         config.artifact_owner(),
                         config.artifact_repo(),
-                        &branch,
+                        branch,
                         conn,
                     )
                     .ok()
@@ -225,7 +225,7 @@ impl ResolvedVersion {
                 }
             }
             Action::DeployCommit { sha } => {
-                let commit = get_commit_by_sha(&sha, conn).ok().flatten();
+                let commit = get_commit_by_sha(sha, conn).ok().flatten();
 
                 match commit {
                     Some(commit) => ResolvedVersion::TrackedSha {

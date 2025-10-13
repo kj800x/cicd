@@ -201,7 +201,7 @@ pub async fn sync_repo_deploy_configs_impl(
     }
 
     update_deploy_configs_by_defining_repo(
-        &client,
+        client,
         &final_deploy_configs,
         &Repository {
             owner: owner.clone(),

@@ -117,8 +117,7 @@ pub async fn deploy_status(selected_config: &DeployConfig) -> Vec<Markup> {
         .filter(|pod| {
             pod.metadata
                 .owner_references
-                .as_ref()
-                .map_or(false, |refs| {
+                .as_ref().is_some_and(|refs| {
                     refs.iter()
                         .any(|ref_| ref_.kind == "ReplicaSet" && ref_.name.starts_with(&name))
                 })
@@ -198,7 +197,7 @@ pub async fn build_status(
     conn: &PooledConnection<SqliteConnectionManager>,
 ) -> Vec<Markup> {
     let resolved_version =
-        ResolvedVersion::from_action(&action, &selected_config, &conn, BuildFilter::Any);
+        ResolvedVersion::from_action(action, selected_config, conn, BuildFilter::Any);
 
     if let ResolvedVersion::UnknownSha { .. } = resolved_version {
         let markup = html! {
@@ -216,8 +215,8 @@ pub async fn build_status(
         ResolvedVersion::UnknownSha { .. } => {
             panic!("unreachable")
         }
-        ResolvedVersion::TrackedSha { sha, .. } => get_commit_by_sha(&sha, &conn).ok().flatten(),
-        ResolvedVersion::BranchTracked { sha, .. } => get_commit_by_sha(&sha, &conn).ok().flatten(),
+        ResolvedVersion::TrackedSha { sha, .. } => get_commit_by_sha(sha, conn).ok().flatten(),
+        ResolvedVersion::BranchTracked { sha, .. } => get_commit_by_sha(sha, conn).ok().flatten(),
         ResolvedVersion::Undeployed => None,
         ResolvedVersion::ResolutionFailed => None,
     };
@@ -227,7 +226,9 @@ pub async fn build_status(
         None => return vec![],
     };
 
-    let markup = match commit.build_status {
+    
+
+    match commit.build_status {
         BuildStatus::Success => vec![],
         BuildStatus::Pending | BuildStatus::None | BuildStatus::Failure => vec![html! {
           div.alert.alert-danger[matches!(commit.build_status, BuildStatus::Failure)].alert-warning[matches!(commit.build_status, BuildStatus::None | BuildStatus::Pending)] {
@@ -267,9 +268,7 @@ pub async fn build_status(
             }
           }
         }],
-    };
-
-    markup
+    }
 }
 
 pub async fn get_deploy_config(namespace: &str, name: &str) -> Option<DeployConfig> {
