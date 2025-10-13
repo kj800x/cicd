@@ -11,6 +11,7 @@ use kube::{
     runtime::{controller::Action, watcher, Controller},
     Discovery,
 };
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::{sync::Arc, time::Duration};
 
@@ -19,6 +20,7 @@ use super::Repository;
 use crate::db::{insert_deploy_event, DeployEvent};
 use crate::error::format_error_chain;
 use crate::kubernetes::deployconfig::DEPLOY_CONFIG_KIND;
+use crate::kubernetes::DeployConfigStatusBuilder;
 use crate::prelude::*;
 
 pub async fn apply(
@@ -347,6 +349,7 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
             }
 
             // Prune stale resources
+            // FIXME: Does this have a bug if artifact sha stays the same but config sha changes?
             log::debug!("Pruning stale resources...");
             let objects = list_namespace_objects(client.clone(), &ns).await?;
             log::debug!("Got objects in namespace {}/{}", ns, name);
@@ -366,7 +369,7 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
                 client,
                 &ns,
                 &name,
-                StatusUpdate::CurrentSha(wanted_sha.to_string()),
+                DeployConfigStatusBuilder::new().with_artifact_current_sha(wanted_sha.to_string()),
             )
             .await?;
             if wanted_sha != current_sha {
@@ -404,7 +407,7 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
                 client,
                 &ns,
                 &name,
-                StatusUpdate::CurrentSha(wanted_sha.to_string()),
+                DeployConfigStatusBuilder::new().with_artifact_current_sha(wanted_sha.to_string()),
             )
             .await?;
             log::info!("DeployConfig {}/{} has created its resources", ns, name);
@@ -428,7 +431,13 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
                 delete_dynamic_object(client.clone(), object).await?;
             }
 
-            update_deploy_config_status(client, &ns, &name, StatusUpdate::CurrentShaNone).await?;
+            update_deploy_config_status(
+                client,
+                &ns,
+                &name,
+                DeployConfigStatusBuilder::new().with_null_artifact_current_sha(),
+            )
+            .await?;
             log::info!(
                 "Resources for DeployConfig {}/{} have been undeployed",
                 ns,
@@ -446,46 +455,16 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
     Ok(Action::requeue(Duration::from_secs(5)))
 }
 
-/// Status field to update in a DeployConfig
-enum StatusUpdate {
-    WantedSha(String),
-    LatestSha(String),
-    CurrentSha(String),
-    CurrentShaNone,
-}
-
-/// Update the DeployConfig status with a specific field
+/// Update the DeployConfig status according to the given status builder
 async fn update_deploy_config_status(
     client: &Client,
     namespace: &str,
     name: &str,
-    update: StatusUpdate,
+    update: DeployConfigStatusBuilder,
 ) -> Result<(), Error> {
     let api: Api<DeployConfig> = Api::namespaced(client.clone(), namespace);
 
-    let status = match update {
-        StatusUpdate::WantedSha(sha) => serde_json::json!({
-            "status": {
-                "wantedSha": sha,
-            }
-        }),
-        StatusUpdate::LatestSha(sha) => serde_json::json!({
-            "status": {
-                "latestSha": sha,
-            }
-        }),
-        StatusUpdate::CurrentSha(sha) => serde_json::json!({
-            "status": {
-                "currentSha": sha,
-            }
-        }),
-        StatusUpdate::CurrentShaNone => serde_json::json!({
-            "status": {
-                "currentSha": null,
-            }
-        }),
-    };
-
+    let status: Value = update.into();
     let patch = Patch::Merge(&status);
     let params = PatchParams::default();
     api.patch_status(name, &params, &patch).await?;
@@ -576,8 +555,13 @@ pub async fn handle_build_completed(
         );
 
         // RULE: When a build completes, update latestSha for all matching DeployConfigs
-        update_deploy_config_status(client, &ns, &name, StatusUpdate::LatestSha(sha.to_string()))
-            .await?;
+        update_deploy_config_status(
+            client,
+            &ns,
+            &name,
+            DeployConfigStatusBuilder::new().with_artifact_latest_sha(sha.to_string()),
+        )
+        .await?;
 
         // RULE: If autodeploy is enabled, also update wantedSha
         if config.current_autodeploy() {
@@ -603,7 +587,7 @@ pub async fn handle_build_completed(
                 client,
                 &ns,
                 &name,
-                StatusUpdate::WantedSha(sha.to_string()),
+                DeployConfigStatusBuilder::new().with_artifact_wanted_sha(sha.to_string()),
             )
             .await?;
         }
@@ -627,6 +611,7 @@ async fn update_deploy_config(
     let api: Api<DeployConfig> = Api::namespaced(client.clone(), &ns);
     api.patch(&name, &PatchParams::default(), &Patch::Merge(&final_config))
         .await?;
+    // FIXME: Does patch-status make sense here?
     api.patch_status(
         &name,
         &PatchParams::default(),
@@ -663,6 +648,7 @@ async fn create_deploy_config(client: &Client, final_config: &DeployConfig) -> R
 
     api.create(&PostParams::default(), final_config).await?;
 
+    // FIXME: Does patch-status make sense here?
     #[allow(clippy::expect_used)]
     api.replace_status(
         &name,

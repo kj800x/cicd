@@ -1,4 +1,5 @@
 use crate::db::{get_latest_build, get_latest_completed_build, insert_deploy_event, DeployEvent};
+use crate::kubernetes::DeployConfigStatusBuilder;
 use crate::prelude::*;
 use crate::web::{build_status, deploy_status, header};
 use kube::{
@@ -7,6 +8,7 @@ use kube::{
     ResourceExt,
 };
 use maud::{html, Markup, Render};
+use serde_json::Value;
 use std::collections::HashMap;
 
 struct PreviewArrow;
@@ -862,32 +864,25 @@ pub async fn deploy_config(
             match resolved_version {
                 ResolvedVersion::UnknownSha { sha }
                 | ResolvedVersion::TrackedSha { sha, build_time: _ } => {
-                    serde_json::json!({
-                        "status": {
-                            "currentBranch": "",
-                            "latestSha": "",
-                            "wantedSha": sha
-                        }
-                    })
+                    DeployConfigStatusBuilder::new()
+                        .with_artifact_wanted_sha(sha.clone())
+                        .with_artifact_branch("".to_string())
+                        .with_artifact_latest_sha("".to_string())
                 }
+
                 ResolvedVersion::BranchTracked {
                     sha,
                     branch,
                     build_time: _,
-                } => serde_json::json!({
-                    "status": {
-                        "currentBranch": branch,
-                        "latestSha": sha,
-                        "wantedSha": sha
-                    }
-                }),
+                } => DeployConfigStatusBuilder::new()
+                    .with_artifact_wanted_sha(sha.clone())
+                    .with_artifact_branch(branch.clone())
+                    .with_artifact_latest_sha(sha.clone()),
+
                 ResolvedVersion::Undeployed => {
-                    serde_json::json!({
-                        "status": {
-                            "wantedSha": null
-                        }
-                    })
+                    DeployConfigStatusBuilder::new().with_artifact_wanted_sha("".to_string())
                 }
+
                 ResolvedVersion::ResolutionFailed => {
                     return HttpResponse::BadRequest()
                         .content_type("text/html; charset=utf-8")
@@ -895,19 +890,13 @@ pub async fn deploy_config(
                 }
             }
         }
+
         Action::ToggleAutodeploy => {
-            serde_json::json!({
-                "status": {
-                    "autodeploy": !config.current_autodeploy()
-                }
-            })
+            DeployConfigStatusBuilder::new().with_autodeploy(!config.current_autodeploy())
         }
+
         Action::Undeploy => {
-            serde_json::json!({
-                "status": {
-                    "wantedSha": null
-                }
-            })
+            DeployConfigStatusBuilder::new().with_artifact_wanted_sha("".to_string())
         }
     };
 
@@ -922,10 +911,7 @@ pub async fn deploy_config(
                 }
             };
 
-            let sha = status
-                .get("status")
-                .and_then(|s| s.get("wantedSha"))
-                .map(|s| s.to_string());
+            let sha = status.get_artifact_wanted_sha().map(|s| s.to_string());
 
             match insert_deploy_event(
                 &DeployEvent {
@@ -967,7 +953,8 @@ pub async fn deploy_config(
     }
 
     // Apply the status update
-    let patch = Patch::Merge(&status);
+    let patch: Patch<&Value> = Patch::Merge(&status.into());
+    log::info!("Patching DeployConfig status: {:#?}", patch);
     let params = PatchParams::default();
     match deploy_configs_api
         .patch_status(&name, &params, &patch)
