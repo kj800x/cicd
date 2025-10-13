@@ -20,21 +20,37 @@ pub async fn deploy_status(selected_config: &DeployConfig) -> Vec<Markup> {
     let namespace = selected_config.namespace().unwrap_or_default();
     let name = selected_config.name_any();
 
+    let mut alerts = Vec::new();
+
+    if selected_config.wanted_sha() != selected_config.current_sha() {
+        let markup = html! {
+            div.alert.alert-warning {
+                div class="alert-header" {
+                    "Deploy change enqueued"
+                }
+                div class="alert-content" {
+                    div class="details" {
+                        span { "Deploy change request has not been completed by the reconciler yet" }
+                    }
+                }
+            }
+        };
+        alerts.push(markup);
+    }
+
     // Get the deployment status
     let deployments_api: Api<Deployment> = Api::namespaced(client.clone(), &namespace);
     let deployment = match deployments_api.get(&name).await {
         Ok(deployment) => deployment,
         Err(kube::Error::Api(kube::error::ErrorResponse { code: 404, .. })) => {
             // Deployment doesn't exist yet
-            return vec![];
+            return alerts;
         }
         Err(e) => {
             log::error!("Failed to get deployment: {}", e);
             panic!("Failed to get deployment status");
         }
     };
-
-    let mut alerts = Vec::new();
 
     // Check if deployment is actively rolling out
     if let Some(status) = &deployment.status {
