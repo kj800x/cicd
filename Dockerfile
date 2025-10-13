@@ -2,7 +2,7 @@
 FROM rust:1.88-alpine AS builder
 WORKDIR /usr/src/
 # Install required build dependencies
-RUN apk add --no-cache musl-dev pkgconfig openssl-dev libc-dev gcc g++ sqlite-dev
+RUN apk add --no-cache musl-dev pkgconfig openssl-dev gcc g++ make
 
 # - Install dependencies
 WORKDIR /usr/src
