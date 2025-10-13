@@ -1,5 +1,45 @@
 use actix_web::{http::StatusCode, HttpResponse, ResponseError};
+use std::fmt::Write;
 use thiserror::Error;
+
+/// Formats an error and its entire source chain with each error on a new line
+///
+/// This produces output like:
+/// ```
+/// Error message
+///   Caused by: First cause
+///   Caused by: Second cause
+///   Caused by: Root cause
+/// ```
+pub fn format_error_chain(err: &dyn std::error::Error) -> String {
+    let mut output = String::new();
+    write!(&mut output, "{}", err).ok();
+
+    let mut source = err.source();
+    while let Some(err) = source {
+        write!(&mut output, "\n  Caused by: {}", err).ok();
+        source = err.source();
+    }
+
+    output
+}
+
+/// Formats an anyhow::Error with its full chain
+pub fn format_anyhow_chain(err: &anyhow::Error) -> String {
+    let mut output = String::new();
+
+    // Get the chain iterator from anyhow
+    let chain: Vec<_> = err.chain().collect();
+
+    if let Some((first, rest)) = chain.split_first() {
+        write!(&mut output, "{}", first).ok();
+        for cause in rest {
+            write!(&mut output, "\n  Caused by: {}", cause).ok();
+        }
+    }
+
+    output
+}
 
 /// Central application error type
 #[derive(Error, Debug)]

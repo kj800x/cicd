@@ -17,6 +17,7 @@ use std::{sync::Arc, time::Duration};
 use super::DeployConfig;
 use super::Repository;
 use crate::db::{insert_deploy_event, DeployEvent};
+use crate::error::format_error_chain;
 use crate::kubernetes::deployconfig::DEPLOY_CONFIG_KIND;
 use crate::prelude::*;
 
@@ -494,7 +495,10 @@ async fn update_deploy_config_status(
 
 /// Error handler for the controller
 fn error_policy(_dc: Arc<DeployConfig>, error: &Error, _ctx: Arc<ControllerContext>) -> Action {
-    log::error!("Error during reconciliation: {:?}", error);
+    log::error!(
+        "Error during reconciliation:\n{}",
+        format_error_chain(error)
+    );
     Action::requeue(Duration::from_secs(5))
 }
 
@@ -551,7 +555,7 @@ pub async fn handle_build_completed(
     let deploy_configs = match deploy_configs_api.list(&Default::default()).await {
         Ok(list) => list.items,
         Err(e) => {
-            log::error!("Failed to list DeployConfigs: {}", e);
+            log::error!("Failed to list DeployConfigs:\n{}", format_error_chain(&e));
             return Err(Error::Kube(e));
         }
     };
@@ -714,7 +718,7 @@ pub async fn update_deploy_configs_by_defining_repo(
     let deploy_configs = match deploy_configs_api.list(&Default::default()).await {
         Ok(list) => list.items,
         Err(e) => {
-            log::error!("Failed to list DeployConfigs: {}", e);
+            log::error!("Failed to list DeployConfigs:\n{}", format_error_chain(&e));
             return Err(Error::Kube(e));
         }
     };

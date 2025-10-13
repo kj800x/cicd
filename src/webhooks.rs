@@ -2,8 +2,10 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 use crate::crab_ext::Octocrabs;
+use crate::error::{format_anyhow_chain, format_error_chain};
 use crate::kubernetes;
 use crate::prelude::*;
+use anyhow::Context;
 use futures_util::SinkExt;
 use futures_util::StreamExt;
 use kube::Client as KubeClient;
@@ -160,7 +162,7 @@ async fn handle_new_commit(
     __discord_notifier: &Option<DiscordNotifier>,
     kube_client: &Option<KubeClient>,
     octocrabs: &Octocrabs,
-) -> Result<(), String> {
+) -> Result<(), anyhow::Error> {
     if let Some(kube_client) = kube_client {
         sync_repo_deploy_configs_impl(
             octocrabs,
@@ -169,40 +171,34 @@ async fn handle_new_commit(
             repo.name.clone(),
         )
         .await
-        .map_err(|e| format!("Error syncing deploy configs: {}", e))?;
+        .context("Error syncing deploy configs")?;
     } else {
         log::warn!("Kubernetes client not available, skipping DeployConfig updates");
     }
 
-    match upsert_repo(repo, conn) {
-        Ok(repo_id) => {
-            // Store the commit info but don't set any build status
-            if let Err(e) = upsert_commit(
-                &GhCommit {
-                    id: commit_sha.to_string(),
-                    message: commit_message.to_string(),
-                    timestamp: timestamp.to_string(),
-                    author: author.clone(),
-                    committer: committer.clone(),
-                    parent_shas,
-                },
-                repo_id,
-                conn,
-            ) {
-                return Err(format!("Error storing commit: {}", e));
-            }
+    let repo_id = upsert_repo(repo, conn).context("Error upserting repository")?;
 
-            // Extract branch name if this is a branch push
-            if let Some(branch_name) = extract_branch_name(r#ref) {
-                if let Err(e) = upsert_branch(&branch_name, commit_sha, repo_id, conn) {
-                    return Err(format!("Error updating branch: {}", e));
-                }
-            }
+    // Store the commit info but don't set any build status
+    upsert_commit(
+        &GhCommit {
+            id: commit_sha.to_string(),
+            message: commit_message.to_string(),
+            timestamp: timestamp.to_string(),
+            author: author.clone(),
+            committer: committer.clone(),
+            parent_shas,
+        },
+        repo_id,
+        conn,
+    )
+    .context("Error storing commit")?;
 
-            Ok(())
-        }
-        Err(e) => Err(format!("Error upserting repository: {}", e)),
+    // Extract branch name if this is a branch push
+    if let Some(branch_name) = extract_branch_name(r#ref) {
+        upsert_branch(&branch_name, commit_sha, repo_id, conn).context("Error updating branch")?;
     }
+
+    Ok(())
 }
 
 /// Helper function to mark a build as in progress
@@ -213,41 +209,36 @@ async fn handle_build_started(
     build_url: &str,
     conn: &PooledConnection<SqliteConnectionManager>,
     discord_notifier: &Option<DiscordNotifier>,
-) -> Result<(), String> {
-    match upsert_repo(repo, conn) {
-        Ok(repo_id) => {
-            // Set the commit status to Pending
-            if let Err(e) = set_commit_status(
+) -> Result<(), anyhow::Error> {
+    let repo_id = upsert_repo(repo, conn).context("Error upserting repository")?;
+
+    // Set the commit status to Pending
+    set_commit_status(
+        commit_sha,
+        BuildStatus::Pending,
+        build_url.to_string(),
+        repo_id,
+        conn,
+    )
+    .context("Error setting commit status to Pending")?;
+
+    // Send notification that build has started
+    if let Some(notifier) = discord_notifier {
+        notifier
+            .notify_build_started(
+                &repo.owner.login,
+                &repo.name,
                 commit_sha,
-                BuildStatus::Pending,
-                build_url.to_string(),
-                repo_id,
-                conn,
-            ) {
-                return Err(format!("Error setting commit status to Pending: {}", e));
-            }
-
-            // Send notification that build has started
-            if let Some(notifier) = discord_notifier {
-                match notifier
-                    .notify_build_started(
-                        &repo.owner.login,
-                        &repo.name,
-                        commit_sha,
-                        commit_message,
-                        Some(build_url),
-                    )
-                    .await
-                {
-                    Ok(_) => log::debug!("Discord notification sent for build start"),
-                    Err(e) => return Err(format!("Failed to send Discord notification: {}", e)),
-                }
-            }
-
-            Ok(())
-        }
-        Err(e) => Err(format!("Error upserting repository: {}", e)),
+                commit_message,
+                Some(build_url),
+            )
+            .await
+            .map_err(anyhow::Error::msg)
+            .context("Failed to send Discord notification")?;
+        log::debug!("Discord notification sent for build start");
     }
+
+    Ok(())
 }
 
 /// Helper function to mark a build as completed
@@ -261,86 +252,88 @@ async fn handle_build_completed(
     conn: &PooledConnection<SqliteConnectionManager>,
     discord_notifier: &Option<DiscordNotifier>,
     kube_client: &Option<KubeClient>,
-) -> Result<(), String> {
-    match upsert_repo(repo, conn) {
-        Ok(repo_id) => {
-            // Set the commit status
-            if let Err(e) = set_commit_status(
-                commit_sha,
-                build_status.clone(),
-                build_url.to_string(),
-                repo_id,
-                conn,
-            ) {
-                return Err(format!("Error setting commit status: {}", e));
-            }
+) -> Result<(), anyhow::Error> {
+    let repo_id = upsert_repo(repo, conn).context("Error upserting repository")?;
 
-            // Send notification that build has completed
-            if let Some(notifier) = discord_notifier {
-                match notifier
-                    .notify_build_completed(
+    // Set the commit status
+    set_commit_status(
+        commit_sha,
+        build_status.clone(),
+        build_url.to_string(),
+        repo_id,
+        conn,
+    )
+    .context("Error setting commit status")?;
+
+    // Send notification that build has completed
+    if let Some(notifier) = discord_notifier {
+        notifier
+            .notify_build_completed(
+                &repo.owner.login,
+                &repo.name,
+                commit_sha,
+                commit_message,
+                &build_status,
+                Some(build_url),
+            )
+            .await
+            .map_err(anyhow::Error::msg)
+            .context("Failed to send Discord notification")?;
+        log::debug!("Discord notification sent for build completion");
+    }
+
+    // If build was successful, update Kubernetes DeployConfigs
+    if matches!(build_status, BuildStatus::Success) {
+        if let Some(kube_client) = kube_client {
+            // Get branches for this commit
+            if let Ok(branches) = get_branches_for_commit(commit_sha, conn) {
+                for branch in branches {
+                    if commit_sha != branch.head_commit_sha {
+                        log::debug!(
+                            "Commit {} is not the latest on branch {}, not updating DeployConfigs",
+                            commit_sha,
+                            branch.name
+                        );
+                        continue;
+                    }
+
+                    // For each branch, update DeployConfigs
+                    match kubernetes::handle_build_completed(
+                        kube_client,
                         &repo.owner.login,
                         &repo.name,
+                        &branch.name,
                         commit_sha,
-                        commit_message,
-                        &build_status,
-                        Some(build_url),
+                        conn,
                     )
                     .await
-                {
-                    Ok(_) => log::debug!("Discord notification sent for build completion"),
-                    Err(e) => return Err(format!("Failed to send Discord notification: {}", e)),
-                }
-            }
-
-            // If build was successful, update Kubernetes DeployConfigs
-            if matches!(build_status, BuildStatus::Success) {
-                if let Some(kube_client) = kube_client {
-                    // Get branches for this commit
-                    if let Ok(branches) = get_branches_for_commit(commit_sha, conn) {
-                        for branch in branches {
-                            if commit_sha != branch.head_commit_sha {
-                                log::debug!("Commit {} is not the latest on branch {}, not updating DeployConfigs", commit_sha, branch.name);
-                                continue;
-                            }
-
-                            // For each branch, update DeployConfigs
-                            match kubernetes::handle_build_completed(
-                                kube_client,
-                                &repo.owner.login,
-                                &repo.name,
-                                &branch.name,
-                                commit_sha,
-                                conn,
-                            )
-                            .await
-                            {
-                                Ok(_) => {
-                                    log::info!(
-                                        "Updated DeployConfigs for {}/{} branch {} with SHA {}",
-                                        repo.owner.login,
-                                        repo.name,
-                                        branch.name,
-                                        &commit_sha[0..7]
-                                    );
-                                }
-                                Err(e) => {
-                                    log::error!("Failed to update DeployConfigs: {:?}", e);
-                                }
-                            }
+                    {
+                        Ok(_) => {
+                            log::info!(
+                                "Updated DeployConfigs for {}/{} branch {} with SHA {}",
+                                repo.owner.login,
+                                repo.name,
+                                branch.name,
+                                &commit_sha[0..7]
+                            );
                         }
-                    } else {
-                        log::warn!("Could not find branches for commit {}", commit_sha);
+                        Err(e) => {
+                            log::error!(
+                                "Failed to update DeployConfigs:\n{}",
+                                format_error_chain(&e)
+                            );
+                        }
                     }
-                } else {
-                    log::warn!("Kubernetes client not available, skipping DeployConfig updates");
                 }
+            } else {
+                log::warn!("Could not find branches for commit {}", commit_sha);
             }
-
-            Ok(())
+        } else {
+            log::warn!("Kubernetes client not available, skipping DeployConfig updates");
         }
-        Err(e) => Err(format!("Error upserting repository: {}", e)),
     }
+
+    Ok(())
 }
 
 async fn process_event(
@@ -391,7 +384,7 @@ async fn process_event(
                     )
                     .await
                     {
-                        log::error!("Error handling new commit: {}", e);
+                        log::error!("Error handling new commit:\n{}", format_anyhow_chain(&e));
                     }
                 }
                 Err(e) => {
@@ -444,7 +437,7 @@ async fn process_event(
                     )
                     .await
                     {
-                        log::error!("Error handling build start: {}", e);
+                        log::error!("Error handling build start:\n{}", format_anyhow_chain(&e));
                     }
                 }
             }
@@ -484,7 +477,10 @@ async fn process_event(
                     )
                     .await
                     {
-                        log::error!("Error handling build completion: {}", e);
+                        log::error!(
+                            "Error handling build completion:\n{}",
+                            format_anyhow_chain(&e)
+                        );
                     }
                 }
             }
