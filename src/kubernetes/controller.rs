@@ -355,7 +355,7 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
             }
             log::debug!("Pruning stale resources complete");
 
-            update_deploy_config_status_current(client, &ns, &name, wanted_sha).await?;
+            update_deploy_config_status(client, &ns, &name, StatusUpdate::CurrentSha(wanted_sha.to_string())).await?;
             if wanted_sha != current_sha {
                 log::info!(
                     "Resources for DeployConfig {}/{} have been synced",
@@ -387,7 +387,7 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
                 apply(client, &ns, obj).await?;
             }
 
-            update_deploy_config_status_current(client, &ns, &name, wanted_sha).await?;
+            update_deploy_config_status(client, &ns, &name, StatusUpdate::CurrentSha(wanted_sha.to_string())).await?;
             log::info!("DeployConfig {}/{} has created its resources", ns, name);
         }
         (None, Some(_)) => {
@@ -409,7 +409,7 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
                 delete_dynamic_object(client.clone(), object).await?;
             }
 
-            update_deploy_config_status_current_none(client, &ns, &name).await?;
+            update_deploy_config_status(client, &ns, &name, StatusUpdate::CurrentShaNone).await?;
             log::info!(
                 "Resources for DeployConfig {}/{} have been undeployed",
                 ns,
@@ -427,104 +427,48 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
     Ok(Action::requeue(Duration::from_secs(5)))
 }
 
-/// Update the DeployConfig status with wanted SHA
-async fn update_deploy_config_status_wanted(
-    client: &Client,
-    namespace: &str,
-    name: &str,
-    sha: &str,
-) -> Result<(), Error> {
-    // Get the API for DeployConfig resources
-    let api: Api<DeployConfig> = Api::namespaced(client.clone(), namespace);
-
-    // Determine the status
-    let status = serde_json::json!({
-        "status": {
-            "wantedSha": sha,
-        }
-    });
-
-    // Apply the status update
-    let patch = Patch::Merge(&status);
-    let params = PatchParams::default();
-
-    api.patch_status(name, &params, &patch).await?;
-
-    Ok(())
+/// Status field to update in a DeployConfig
+enum StatusUpdate {
+    WantedSha(String),
+    LatestSha(String),
+    CurrentSha(String),
+    CurrentShaNone,
 }
 
-/// Update the DeployConfig status with latest SHA
-async fn update_deploy_config_status_latest(
+/// Update the DeployConfig status with a specific field
+async fn update_deploy_config_status(
     client: &Client,
     namespace: &str,
     name: &str,
-    sha: &str,
+    update: StatusUpdate,
 ) -> Result<(), Error> {
-    // Get the API for DeployConfig resources
     let api: Api<DeployConfig> = Api::namespaced(client.clone(), namespace);
 
-    // Determine the status
-    let status = serde_json::json!({
-        "status": {
-            "latestSha": sha,
-        }
-    });
+    let status = match update {
+        StatusUpdate::WantedSha(sha) => serde_json::json!({
+            "status": {
+                "wantedSha": sha,
+            }
+        }),
+        StatusUpdate::LatestSha(sha) => serde_json::json!({
+            "status": {
+                "latestSha": sha,
+            }
+        }),
+        StatusUpdate::CurrentSha(sha) => serde_json::json!({
+            "status": {
+                "currentSha": sha,
+            }
+        }),
+        StatusUpdate::CurrentShaNone => serde_json::json!({
+            "status": {
+                "currentSha": null,
+            }
+        }),
+    };
 
-    // Apply the status update
     let patch = Patch::Merge(&status);
     let params = PatchParams::default();
-
-    api.patch_status(name, &params, &patch).await?;
-
-    Ok(())
-}
-
-/// Update the DeployConfig status with current SHA
-async fn update_deploy_config_status_current(
-    client: &Client,
-    namespace: &str,
-    name: &str,
-    sha: &str,
-) -> Result<(), Error> {
-    // Get the API for DeployConfig resources
-    let api: Api<DeployConfig> = Api::namespaced(client.clone(), namespace);
-
-    // Determine the status
-    let status = serde_json::json!({
-        "status": {
-            "currentSha": sha,
-        }
-    });
-
-    // Apply the status update
-    let patch = Patch::Merge(&status);
-    let params = PatchParams::default();
-
-    api.patch_status(name, &params, &patch).await?;
-
-    Ok(())
-}
-
-/// Update the DeployConfig status with current SHA
-async fn update_deploy_config_status_current_none(
-    client: &Client,
-    namespace: &str,
-    name: &str,
-) -> Result<(), Error> {
-    // Get the API for DeployConfig resources
-    let api: Api<DeployConfig> = Api::namespaced(client.clone(), namespace);
-
-    // Determine the status
-    let status = serde_json::json!({
-        "status": {
-            "currentSha": null,
-        }
-    });
-
-    // Apply the status update
-    let patch = Patch::Merge(&status);
-    let params = PatchParams::default();
-
     api.patch_status(name, &params, &patch).await?;
 
     Ok(())
@@ -610,7 +554,7 @@ pub async fn handle_build_completed(
         );
 
         // RULE: When a build completes, update latestSha for all matching DeployConfigs
-        update_deploy_config_status_latest(client, &ns, &name, sha).await?;
+        update_deploy_config_status(client, &ns, &name, StatusUpdate::LatestSha(sha.to_string())).await?;
 
         // RULE: If autodeploy is enabled, also update wantedSha
         if config.current_autodeploy() {
@@ -632,7 +576,7 @@ pub async fn handle_build_completed(
                 },
                 &conn,
             )?;
-            update_deploy_config_status_wanted(client, &ns, &name, sha).await?;
+            update_deploy_config_status(client, &ns, &name, StatusUpdate::WantedSha(sha.to_string())).await?;
         }
     }
 
