@@ -313,7 +313,9 @@ pub fn upsert_commit(
     match existing {
         Some(ExistenceResult { id }) => {
             let timestamp = DateTime::parse_from_rfc3339(&commit.timestamp)
-                .map_err(|e| AppError::Parse(format!("Invalid timestamp '{}': {}", commit.timestamp, e)))?
+                .map_err(|e| {
+                    AppError::Parse(format!("Invalid timestamp '{}': {}", commit.timestamp, e))
+                })?
                 .timestamp_millis();
 
             conn.prepare(
@@ -337,18 +339,15 @@ pub fn upsert_commit(
         }
         None => {
             let timestamp = DateTime::parse_from_rfc3339(&commit.timestamp)
-                .map_err(|e| AppError::Parse(format!("Invalid timestamp '{}': {}", commit.timestamp, e)))?
+                .map_err(|e| {
+                    AppError::Parse(format!("Invalid timestamp '{}': {}", commit.timestamp, e))
+                })?
                 .timestamp_millis();
 
             conn.prepare(
                 "INSERT INTO git_commit (sha, message, timestamp, repo_id) VALUES (?1, ?2, ?3, ?4)",
             )?
-            .execute(params![
-                commit.id,
-                commit.message,
-                timestamp,
-                repo_id,
-            ])?;
+            .execute(params![commit.id, commit.message, timestamp, repo_id,])?;
 
             let commit_id = conn.last_insert_rowid() as u64;
 
@@ -391,11 +390,10 @@ pub fn get_commit_parents(
     commit_sha: &str,
     conn: &PooledConnection<SqliteConnectionManager>,
 ) -> AppResult<Vec<String>> {
-    let mut stmt = conn
-        .prepare("SELECT parent_sha FROM git_commit_parent WHERE commit_sha = ?1")?;
+    let mut stmt =
+        conn.prepare("SELECT parent_sha FROM git_commit_parent WHERE commit_sha = ?1")?;
 
-    let parents_iter = stmt
-        .query_map([commit_sha], |row| row.get::<_, String>(0))?;
+    let parents_iter = stmt.query_map([commit_sha], |row| row.get::<_, String>(0))?;
 
     let mut parents = Vec::new();
     for parent in parents_iter {
@@ -759,18 +757,12 @@ pub fn set_commit_status(
     conn: &PooledConnection<SqliteConnectionManager>,
 ) -> AppResult<()> {
     let sha = sha.to_string();
-    let status_str = to_variant_name(&build_status)
-        .map_err(|e| AppError::Parse(e.to_string()))?;
+    let status_str = to_variant_name(&build_status).map_err(|e| AppError::Parse(e.to_string()))?;
 
     conn.prepare(
         "UPDATE git_commit SET build_status = ?1, build_url = ?2 WHERE sha = ?3 AND repo_id = ?4",
     )?
-    .execute(params![
-        status_str,
-        build_url,
-        sha,
-        repo_id
-    ])?;
+    .execute(params![status_str, build_url, sha, repo_id])?;
 
     Ok(())
 }
@@ -822,23 +814,21 @@ pub fn get_branches_for_commit(
     commit_sha: &str,
     conn: &PooledConnection<SqliteConnectionManager>,
 ) -> AppResult<Vec<Branch>> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT b.id, b.name, b.head_commit_sha, b.repo_id
+    let mut stmt = conn.prepare(
+        "SELECT b.id, b.name, b.head_commit_sha, b.repo_id
              FROM git_branch b
              JOIN git_commit_branch cb ON b.id = cb.branch_id
              WHERE cb.commit_sha = ?1",
-        )?;
+    )?;
 
-    let branches_iter = stmt
-        .query_map([commit_sha], |row| {
-            Ok(Branch {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                head_commit_sha: row.get(2)?,
-                repo_id: row.get(3)?,
-            })
-        })?;
+    let branches_iter = stmt.query_map([commit_sha], |row| {
+        Ok(Branch {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            head_commit_sha: row.get(2)?,
+            repo_id: row.get(3)?,
+        })
+    })?;
 
     let mut branches = Vec::new();
     for branch in branches_iter {
@@ -853,26 +843,24 @@ pub fn get_deploy_events_by_deploy_config_name(
     deploy_config_name: &str,
     conn: &PooledConnection<SqliteConnectionManager>,
 ) -> AppResult<Vec<DeployEvent>> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT deploy_config, team, timestamp, initiator, status, sha, branch
+    let mut stmt = conn.prepare(
+        "SELECT deploy_config, team, timestamp, initiator, status, sha, branch
              FROM deploy_event
              WHERE deploy_config = ?1
              ORDER BY timestamp DESC",
-        )?;
+    )?;
 
-    let deploy_events_iter = stmt
-        .query_map([deploy_config_name], |row| {
-            Ok(DeployEvent {
-                deploy_config: row.get(0)?,
-                team: row.get(1)?,
-                timestamp: row.get(2)?,
-                initiator: row.get(3)?,
-                status: row.get(4)?,
-                sha: row.get(5)?,
-                branch: row.get(6)?,
-            })
-        })?;
+    let deploy_events_iter = stmt.query_map([deploy_config_name], |row| {
+        Ok(DeployEvent {
+            deploy_config: row.get(0)?,
+            team: row.get(1)?,
+            timestamp: row.get(2)?,
+            initiator: row.get(3)?,
+            status: row.get(4)?,
+            sha: row.get(5)?,
+            branch: row.get(6)?,
+        })
+    })?;
 
     let mut deploy_events = Vec::new();
     for event in deploy_events_iter {
@@ -887,26 +875,24 @@ pub fn get_deploy_events_by_team(
     team: &str,
     conn: &PooledConnection<SqliteConnectionManager>,
 ) -> AppResult<Vec<DeployEvent>> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT deploy_config, team, timestamp, initiator, status, sha, branch
+    let mut stmt = conn.prepare(
+        "SELECT deploy_config, team, timestamp, initiator, status, sha, branch
              FROM deploy_event
              WHERE team = ?1
              ORDER BY timestamp DESC",
-        )?;
+    )?;
 
-    let deploy_events_iter = stmt
-        .query_map([team], |row| {
-            Ok(DeployEvent {
-                deploy_config: row.get(0)?,
-                team: row.get(1)?,
-                timestamp: row.get(2)?,
-                initiator: row.get(3)?,
-                status: row.get(4)?,
-                sha: row.get(5)?,
-                branch: row.get(6)?,
-            })
-        })?;
+    let deploy_events_iter = stmt.query_map([team], |row| {
+        Ok(DeployEvent {
+            deploy_config: row.get(0)?,
+            team: row.get(1)?,
+            timestamp: row.get(2)?,
+            initiator: row.get(3)?,
+            status: row.get(4)?,
+            sha: row.get(5)?,
+            branch: row.get(6)?,
+        })
+    })?;
 
     let mut deploy_events = Vec::new();
     for event in deploy_events_iter {
@@ -920,26 +906,24 @@ pub fn get_deploy_events_by_team(
 pub fn get_recent_deploy_events(
     conn: &PooledConnection<SqliteConnectionManager>,
 ) -> AppResult<Vec<DeployEvent>> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT deploy_config, team, timestamp, initiator, status, sha, branch
+    let mut stmt = conn.prepare(
+        "SELECT deploy_config, team, timestamp, initiator, status, sha, branch
              FROM deploy_event
              ORDER BY timestamp DESC
              LIMIT 100",
-        )?;
+    )?;
 
-    let deploy_events_iter = stmt
-        .query_map([], |row| {
-            Ok(DeployEvent {
-                deploy_config: row.get(0)?,
-                team: row.get(1)?,
-                timestamp: row.get(2)?,
-                initiator: row.get(3)?,
-                status: row.get(4)?,
-                sha: row.get(5)?,
-                branch: row.get(6)?,
-            })
-        })?;
+    let deploy_events_iter = stmt.query_map([], |row| {
+        Ok(DeployEvent {
+            deploy_config: row.get(0)?,
+            team: row.get(1)?,
+            timestamp: row.get(2)?,
+            initiator: row.get(3)?,
+            status: row.get(4)?,
+            sha: row.get(5)?,
+            branch: row.get(6)?,
+        })
+    })?;
 
     let mut deploy_events = Vec::new();
     for event in deploy_events_iter {

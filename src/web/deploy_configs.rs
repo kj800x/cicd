@@ -157,19 +157,25 @@ impl ResolvedVersion {
                         config.artifact_repo(),
                         &branch,
                         conn,
-                    ).ok().flatten(),
+                    )
+                    .ok()
+                    .flatten(),
                     BuildFilter::Completed => get_latest_completed_build(
                         config.artifact_owner(),
                         config.artifact_repo(),
                         &branch,
                         conn,
-                    ).ok().flatten(),
+                    )
+                    .ok()
+                    .flatten(),
                     BuildFilter::Successful => get_latest_successful_build(
                         config.artifact_owner(),
                         config.artifact_repo(),
                         &branch,
                         conn,
-                    ).ok().flatten(),
+                    )
+                    .ok()
+                    .flatten(),
                 };
 
                 match commit {
@@ -188,19 +194,25 @@ impl ResolvedVersion {
                         config.artifact_repo(),
                         &branch,
                         conn,
-                    ).ok().flatten(),
+                    )
+                    .ok()
+                    .flatten(),
                     BuildFilter::Completed => get_latest_completed_build(
                         config.artifact_owner(),
                         config.artifact_repo(),
                         &branch,
                         conn,
-                    ).ok().flatten(),
+                    )
+                    .ok()
+                    .flatten(),
                     BuildFilter::Successful => get_latest_successful_build(
                         config.artifact_owner(),
                         config.artifact_repo(),
                         &branch,
                         conn,
-                    ).ok().flatten(),
+                    )
+                    .ok()
+                    .flatten(),
                 };
 
                 match commit {
@@ -927,7 +939,7 @@ pub async fn deploy_config(
                 },
                 &conn,
             ) {
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(e) => {
                     log::error!("Failed to insert deploy event: {}", e);
                 }
