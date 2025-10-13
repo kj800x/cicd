@@ -243,7 +243,7 @@ async fn handle_build_started(
 
 /// Helper function to mark a build as completed
 #[allow(clippy::too_many_arguments)]
-async fn handle_build_completed(
+pub async fn handle_build_completed(
     repo: &Repository,
     commit_sha: &str,
     commit_message: &str,
@@ -298,7 +298,7 @@ async fn handle_build_completed(
                     }
 
                     // For each branch, update DeployConfigs
-                    match kubernetes::handle_build_completed(
+                    match kubernetes::webhook_handlers::handle_build_completed(
                         kube_client,
                         &repo.owner.login,
                         &repo.name,

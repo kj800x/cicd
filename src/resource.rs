@@ -10,11 +10,9 @@ use serde_json::Value;
 use crate::{
     crab_ext::{OctocrabExt, Octocrabs},
     kubernetes::{
-        controller::update_deploy_configs_by_defining_repo,
-        deployconfig::{
-            DeployConfigConfigStatus, DeployConfigSpec, DeployConfigSpecFields, Repository,
-            RepositoryBranch,
-        },
+        deploy_config::{DeployConfigConfigStatus, DeployConfigSpec, DeployConfigSpecFields},
+        repo::{Repository, RepositoryBranch},
+        webhook_handlers::update_deploy_configs_by_defining_repo,
     },
     prelude::*,
 };

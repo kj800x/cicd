@@ -1,4 +1,4 @@
-use crate::kubernetes::deployconfig::IRepo;
+use crate::kubernetes::repo::IRepo;
 use octocrab::Octocrab;
 
 pub type Octocrabs = Vec<Octocrab>;
