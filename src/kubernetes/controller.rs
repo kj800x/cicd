@@ -325,9 +325,8 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
             }
 
             // Create or update resources as needed
-            let resources = dc.spec.spec.specs.clone();
-            for resource in resources {
-                let mut obj: DynamicObject = serde_json::from_value(resource).map_err(|e| {
+            for resource in dc.resource_specs() {
+                let mut obj: DynamicObject = serde_json::from_value(resource.clone()).map_err(|e| {
                     anyhow::anyhow!(
                         "JSON didn't look like a Kubernetes object (apiVersion/kind/metadata): {}",
                         e
@@ -372,9 +371,8 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
             );
 
             // Create the resources for the first time
-            let resources = dc.spec.spec.specs.clone();
-            for resource in resources {
-                let mut obj: DynamicObject = serde_json::from_value(resource).map_err(|e| {
+            for resource in dc.resource_specs() {
+                let mut obj: DynamicObject = serde_json::from_value(resource.clone()).map_err(|e| {
                     anyhow::anyhow!(
                         "JSON didn't look like a Kubernetes object (apiVersion/kind/metadata): {}",
                         e
@@ -595,9 +593,7 @@ pub async fn handle_build_completed(
     };
 
     let matching_configs = deploy_configs.iter().filter(|dc| {
-        dc.artifact_owner() == owner
-            && dc.artifact_repo() == repo
-            && dc.tracking_branch() == branch
+        dc.artifact_owner() == owner && dc.artifact_repo() == repo && dc.tracking_branch() == branch
     });
 
     for config in matching_configs {

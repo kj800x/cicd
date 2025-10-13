@@ -214,7 +214,7 @@ pub async fn watchdog(
                 format!(
                     "State: {}, Spec: {}",
                     config.current_autodeploy(),
-                    config.spec.spec.autodeploy
+                    config.spec_autodeploy()
                 ),
             ));
         }

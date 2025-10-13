@@ -443,7 +443,7 @@ impl DeployTransition {
 /// Generate the status header showing current branch and autodeploy status
 fn generate_status_header(config: &DeployConfig, owner: &str, repo: &str) -> Markup {
     let default_branch = config.default_branch();
-    let default_autodeploy = config.spec.spec.autodeploy;
+    let default_autodeploy = config.spec_autodeploy();
     let current_autodeploy = config.current_autodeploy();
     let current_branch = config.tracking_branch();
 

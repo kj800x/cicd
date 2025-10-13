@@ -274,7 +274,11 @@ impl DeployConfig {
 
     /// Get fully qualified name (namespace/name)
     pub fn qualified_name(&self) -> String {
-        format!("{}/{}", self.namespace().unwrap_or_default(), self.name_any())
+        format!(
+            "{}/{}",
+            self.namespace().unwrap_or_default(),
+            self.name_any()
+        )
     }
 
     /// Check if deployment is undeployed
@@ -289,5 +293,15 @@ impl DeployConfig {
             (None, None) => true,
             _ => false,
         }
+    }
+
+    /// Get the autodeploy value from the spec (not the current status)
+    pub fn spec_autodeploy(&self) -> bool {
+        self.spec.spec.autodeploy
+    }
+
+    /// Get the Kubernetes resource specs
+    pub fn resource_specs(&self) -> &[serde_json::Value] {
+        &self.spec.spec.specs
     }
 }
