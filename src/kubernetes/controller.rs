@@ -326,12 +326,13 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
 
             // Create or update resources as needed
             for resource in dc.resource_specs() {
-                let mut obj: DynamicObject = serde_json::from_value(resource.clone()).map_err(|e| {
-                    anyhow::anyhow!(
+                let mut obj: DynamicObject =
+                    serde_json::from_value(resource.clone()).map_err(|e| {
+                        anyhow::anyhow!(
                         "JSON didn't look like a Kubernetes object (apiVersion/kind/metadata): {}",
                         e
                     )
-                })?;
+                    })?;
                 obj = obj.with_version(wanted_sha);
                 ensure_owner_reference(&mut obj, &dc);
                 ensure_labels(&mut obj);
@@ -372,12 +373,13 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result
 
             // Create the resources for the first time
             for resource in dc.resource_specs() {
-                let mut obj: DynamicObject = serde_json::from_value(resource.clone()).map_err(|e| {
-                    anyhow::anyhow!(
+                let mut obj: DynamicObject =
+                    serde_json::from_value(resource.clone()).map_err(|e| {
+                        anyhow::anyhow!(
                         "JSON didn't look like a Kubernetes object (apiVersion/kind/metadata): {}",
                         e
                     )
-                })?;
+                    })?;
                 obj = obj.with_version(wanted_sha);
                 ensure_owner_reference(&mut obj, &dc);
                 ensure_labels(&mut obj);

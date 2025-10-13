@@ -1,7 +1,6 @@
 use crate::db::BuildStatus;
 use crate::prelude::*;
-use crate::web::header;
-use chrono::{Local, TimeZone};
+use crate::web::{formatting, header};
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -29,40 +28,6 @@ pub struct CommitData {
     pub build_status: BuildStatus,
     pub build_url: Option<String>,
     pub parent_shas: Vec<String>,
-}
-
-/// Format a timestamp as a human-readable relative time
-fn format_relative_time(timestamp: i64) -> String {
-    let now = Local::now();
-    let dt = Local.timestamp_millis_opt(timestamp).unwrap();
-    let duration = now.signed_duration_since(dt);
-
-    if duration.num_days() > 0 {
-        format!("{} days ago", duration.num_days())
-    } else if duration.num_hours() > 0 {
-        format!("{} hours ago", duration.num_hours())
-    } else if duration.num_minutes() > 0 {
-        format!("{} minutes ago", duration.num_minutes())
-    } else {
-        "just now".to_string()
-    }
-}
-
-/// Format a git sha as a short version
-fn format_short_sha(sha: &str) -> &str {
-    if sha.len() > 7 {
-        &sha[0..7]
-    } else {
-        sha
-    }
-}
-
-fn truncate_message(message: &str, max_length: usize) -> String {
-    if message.len() <= max_length {
-        message.to_string()
-    } else {
-        format!("{}...", &message[0..max_length])
-    }
 }
 
 /// Generate the HTML fragment for the branch grid content
@@ -206,7 +171,7 @@ pub fn render_branch_grid_fragment(pool: &Pool<SqliteConnectionManager>) -> Mark
                                     span {
                                         // Show the latest commit time
                                         @if let Some(commit) = data.commits.first() {
-                                            (format!("updated {}", format_relative_time(commit.timestamp)))
+                                            (format!("updated {}", formatting::format_relative_time(commit.timestamp)))
                                         }
                                     }
                                 }
@@ -228,16 +193,16 @@ pub fn render_branch_grid_fragment(pool: &Pool<SqliteConnectionManager>) -> Mark
                                         BuildStatus::None => "none",
                                     })) {}
 
-                                    div class="commit-sha" { (format_short_sha(&commit.sha)) }
+                                    div class="commit-sha" { (formatting::format_short_sha(&commit.sha)) }
 
                                     div class="commit-message-cell" {
                                         div class="commit-message-text tooltipped" data-tooltip=(commit.message) {
-                                            (truncate_message(&commit.message, 60))
+                                            (formatting::truncate_message(&commit.message, 60))
                                         }
                                     }
 
                                     div class="commit-time" {
-                                        (format_relative_time(commit.timestamp))
+                                        (formatting::format_relative_time(commit.timestamp))
                                     }
 
                                     div class="commit-links" {

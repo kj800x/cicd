@@ -1,5 +1,6 @@
 mod all_recent_builds;
 mod deploy_configs;
+mod formatting;
 mod fragments;
 mod header;
 mod htmx;

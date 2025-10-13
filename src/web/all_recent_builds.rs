@@ -1,32 +1,5 @@
 use crate::prelude::*;
-use crate::web::header;
-use chrono::{Local, TimeZone};
-
-/// Format a timestamp as a human-readable relative time
-fn format_relative_time(timestamp: i64) -> String {
-    let now = Local::now();
-    let dt = Local.timestamp_millis_opt(timestamp).unwrap();
-    let duration = now.signed_duration_since(dt);
-
-    if duration.num_days() > 0 {
-        format!("{} days ago", duration.num_days())
-    } else if duration.num_hours() > 0 {
-        format!("{} hours ago", duration.num_hours())
-    } else if duration.num_minutes() > 0 {
-        format!("{} minutes ago", duration.num_minutes())
-    } else {
-        "just now".to_string()
-    }
-}
-
-/// Format a git sha as a short version
-fn format_short_sha(sha: &str) -> &str {
-    if sha.len() > 7 {
-        &sha[0..7]
-    } else {
-        sha
-    }
-}
+use crate::web::{formatting, header};
 
 /// Generate the HTML fragment for the build grid content
 pub fn render_build_grid_fragment(pool: &Pool<SqliteConnectionManager>) -> Markup {
@@ -89,14 +62,14 @@ pub fn render_build_grid_fragment(pool: &Pool<SqliteConnectionManager>) -> Marku
                                 }
                             }
                             div class="build-time" {
-                                (format_relative_time(commit.timestamp))
+                                (formatting::format_relative_time(commit.timestamp))
                             }
                         }
                         div class="build-body" {
                             div class="commit-message" { (commit.message) }
                         }
                         div class="build-footer" {
-                            div class="sha" { (format_short_sha(&commit.sha)) }
+                            div class="sha" { (formatting::format_short_sha(&commit.sha)) }
                             div class="links" {
                                 a href=(format!("https://github.com/{}/{}/commit/{}",
                                                 repo.owner_name, repo.name, commit.sha))
