@@ -147,22 +147,40 @@ fn extract_branch_name(r#ref: &str) -> Option<String> {
     }
 }
 
-/// Helper function to handle a new commit with no build status yet
-#[allow(clippy::too_many_arguments)]
-async fn handle_new_commit(
-    repo: &Repository,
-    r#ref: &str,
-    commit_sha: &str,
-    commit_message: &str,
-    author: &CommitAuthor,
-    committer: &CommitAuthor,
-    timestamp: &str,
-    parent_shas: Option<Vec<String>>,
+/// Helper function to handle a new commit with no build status yet.
+/// Goals:
+/// - Upsert repo
+/// - Upsert branch
+/// - Upsert commit
+/// - See if this affects any DeployConfigs and if so, track their new spec sha256 in the db
+/// - In the rare case where a DeployConfig is found, it has autodeploy, and it has no artifact at all, update the kube resource.
+async fn handle_push(
+    payload: PushEvent,
     conn: &PooledConnection<SqliteConnectionManager>,
     __discord_notifier: &Option<DiscordNotifier>,
     kube_client: &Option<KubeClient>,
     octocrabs: &Octocrabs,
 ) -> Result<(), anyhow::Error> {
+    log::debug!(
+        "Received push event for {}/{}, ref: {}",
+        payload.repository.owner.login,
+        payload.repository.name,
+        payload.r#ref
+    );
+
+    let repo = &payload.repository;
+    let r#ref = &payload.r#ref;
+    let commit_sha = &payload.head_commit.id;
+    let commit_message = &payload.head_commit.message;
+    let author = &payload.head_commit.author;
+    let committer = &payload.head_commit.committer;
+    let timestamp = &payload.head_commit.timestamp;
+    let parent_shas = payload
+        .head_commit
+        .parents
+        .as_ref()
+        .map(|parents| parents.iter().map(|p| p.sha.clone()).collect());
+
     if let Some(kube_client) = kube_client {
         sync_repo_deploy_configs_impl(
             octocrabs,
@@ -202,6 +220,10 @@ async fn handle_new_commit(
 }
 
 /// Helper function to mark a build as in progress
+/// Goals:
+/// - Upsert repo
+/// - Set commit status to Pending
+/// - Send Discord notification
 async fn handle_build_started(
     repo: &Repository,
     commit_sha: &str,
@@ -242,6 +264,11 @@ async fn handle_build_started(
 }
 
 /// Helper function to mark a build as completed
+/// Goals:
+/// - Upsert repo
+/// - Set commit status to Success/Failure/Pending
+/// - Send Discord notification
+/// - If build was successful, update Kubernetes DeployConfigs
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_build_completed(
     repo: &Repository,
@@ -336,6 +363,106 @@ pub async fn handle_build_completed(
     Ok(())
 }
 
+async fn handle_check_run(
+    payload: CheckRunEvent,
+    conn: &PooledConnection<SqliteConnectionManager>,
+    discord_notifier: &Option<DiscordNotifier>,
+    __kube_client: &Option<KubeClient>,
+) -> Result<(), anyhow::Error> {
+    if payload.action.as_str() == "created" {
+        let repo_id = match upsert_repo(&payload.repository, conn) {
+            Ok(id) => id,
+            Err(e) => {
+                log::error!("Failed to upsert repository: {}", e);
+                return Err(e.into());
+            }
+        };
+
+        let head_commit = match get_commit(
+            conn,
+            repo_id as i64,
+            payload.check_run.check_suite.head_sha.clone(),
+        ) {
+            Ok(Some(commit)) => commit,
+            Ok(None) => {
+                log::error!(
+                    "Commit not found: {}",
+                    payload.check_run.check_suite.head_sha
+                );
+                return Err(anyhow::Error::msg("Commit not found"));
+            }
+            Err(e) => {
+                log::error!("Failed to get commit: {}", e);
+                return Err(e.into());
+            }
+        };
+
+        if let Err(e) = handle_build_started(
+            &payload.repository,
+            &head_commit.sha,
+            &head_commit.message,
+            &format!(
+                "https://github.com/{}/{}/commit/{}/checks",
+                payload.repository.owner.login, payload.repository.name, head_commit.sha
+            ),
+            conn,
+            discord_notifier,
+        )
+        .await
+        {
+            log::error!("Error handling build start:\n{}", format_anyhow_chain(&e));
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_check_suite(
+    payload: CheckSuiteEvent,
+    conn: &PooledConnection<SqliteConnectionManager>,
+    discord_notifier: &Option<DiscordNotifier>,
+    kube_client: &Option<KubeClient>,
+) -> Result<(), anyhow::Error> {
+    if payload.action.as_str() == "completed" {
+        let build_status = BuildStatus::of(
+            &payload.check_suite.status,
+            &payload.check_suite.conclusion.as_deref(),
+        );
+
+        let head_commit_message = payload
+            .check_suite
+            .head_commit
+            .as_ref()
+            .map(|c| c.message.as_str())
+            .unwrap_or("No commit message");
+
+        if let Err(e) = handle_build_completed(
+            &payload.repository,
+            &payload.check_suite.head_sha,
+            head_commit_message,
+            build_status,
+            &format!(
+                "https://github.com/{}/{}/commit/{}/checks",
+                payload.repository.owner.login,
+                payload.repository.name,
+                payload.check_suite.head_sha
+            ),
+            conn,
+            discord_notifier,
+            kube_client,
+        )
+        .await
+        {
+            log::error!(
+                "Error handling build completion:\n{}",
+                format_anyhow_chain(&e)
+            );
+        }
+    }
+
+    Ok(())
+}
+
 async fn process_event(
     event: WebhookEvent,
     pool: &Pool<SqliteConnectionManager>,
@@ -352,145 +479,42 @@ async fn process_event(
     };
 
     log::debug!("Received event: {}", event.event_type);
-    match event.event_type.as_str() {
-        "push" => {
-            match serde_json::from_value::<PushEvent>(event.payload.clone()) {
-                Ok(payload) => {
-                    log::debug!(
-                        "Received push event for {}/{}, ref: {}",
-                        payload.repository.owner.login,
-                        payload.repository.name,
-                        payload.r#ref
-                    );
 
-                    // Handle new commits but don't set any build status
-                    if let Err(e) = handle_new_commit(
-                        &payload.repository,
-                        &payload.r#ref,
-                        &payload.head_commit.id,
-                        &payload.head_commit.message,
-                        &payload.head_commit.author,
-                        &payload.head_commit.committer,
-                        &payload.head_commit.timestamp,
-                        payload
-                            .head_commit
-                            .parents
-                            .as_ref()
-                            .map(|parents| parents.iter().map(|p| p.sha.clone()).collect()),
-                        &conn,
-                        discord_notifier,
-                        kube_client,
-                        octocrabs,
-                    )
-                    .await
-                    {
-                        log::error!("Error handling new commit:\n{}", format_anyhow_chain(&e));
-                    }
-                }
-                Err(e) => {
-                    log::error!("Error parsing push event: {}", e);
+    match event.event_type.as_str() {
+        "push" => match serde_json::from_value::<PushEvent>(event.payload.clone()) {
+            Ok(payload) => {
+                let handler_result =
+                    handle_push(payload, &conn, discord_notifier, kube_client, octocrabs).await;
+
+                if let Err(e) = handler_result {
+                    log::error!("Error handling new commit:\n{}", format_anyhow_chain(&e));
                 }
             }
-        }
+            Err(e) => log::error!("Error parsing push event: {}", e),
+        },
         "check_run" => match serde_json::from_value::<CheckRunEvent>(event.payload) {
             Ok(payload) => {
-                if payload.action.as_str() == "created" {
-                    let repo_id = match upsert_repo(&payload.repository, &conn) {
-                        Ok(id) => id,
-                        Err(e) => {
-                            log::error!("Failed to upsert repository: {}", e);
-                            return;
-                        }
-                    };
+                let handler_result =
+                    handle_check_run(payload, &conn, discord_notifier, kube_client).await;
 
-                    let head_commit = match get_commit(
-                        &conn,
-                        repo_id as i64,
-                        payload.check_run.check_suite.head_sha.clone(),
-                    ) {
-                        Ok(Some(commit)) => commit,
-                        Ok(None) => {
-                            log::error!(
-                                "Commit not found: {}",
-                                payload.check_run.check_suite.head_sha
-                            );
-                            return;
-                        }
-                        Err(e) => {
-                            log::error!("Failed to get commit: {}", e);
-                            return;
-                        }
-                    };
-
-                    if let Err(e) = handle_build_started(
-                        &payload.repository,
-                        &head_commit.sha,
-                        &head_commit.message,
-                        &format!(
-                            "https://github.com/{}/{}/commit/{}/checks",
-                            payload.repository.owner.login,
-                            payload.repository.name,
-                            head_commit.sha
-                        ),
-                        &conn,
-                        discord_notifier,
-                    )
-                    .await
-                    {
-                        log::error!("Error handling build start:\n{}", format_anyhow_chain(&e));
-                    }
+                if let Err(e) = handler_result {
+                    log::error!("Error handling check run:\n{}", format_anyhow_chain(&e));
                 }
             }
-            Err(e) => {
-                log::error!("Failed to parse check run event: {}", e);
-            }
+            Err(e) => log::error!("Failed to parse check run event: {}", e),
         },
         "check_suite" => match serde_json::from_value::<CheckSuiteEvent>(event.payload) {
             Ok(payload) => {
-                if payload.action.as_str() == "completed" {
-                    let build_status = BuildStatus::of(
-                        &payload.check_suite.status,
-                        &payload.check_suite.conclusion.as_deref(),
-                    );
+                let handler_result =
+                    handle_check_suite(payload, &conn, discord_notifier, kube_client).await;
 
-                    let head_commit_message = payload
-                        .check_suite
-                        .head_commit
-                        .as_ref()
-                        .map(|c| c.message.as_str())
-                        .unwrap_or("No commit message");
-
-                    if let Err(e) = handle_build_completed(
-                        &payload.repository,
-                        &payload.check_suite.head_sha,
-                        head_commit_message,
-                        build_status,
-                        &format!(
-                            "https://github.com/{}/{}/commit/{}/checks",
-                            payload.repository.owner.login,
-                            payload.repository.name,
-                            payload.check_suite.head_sha
-                        ),
-                        &conn,
-                        discord_notifier,
-                        kube_client,
-                    )
-                    .await
-                    {
-                        log::error!(
-                            "Error handling build completion:\n{}",
-                            format_anyhow_chain(&e)
-                        );
-                    }
+                if let Err(e) = handler_result {
+                    log::error!("Error handling check suite:\n{}", format_anyhow_chain(&e));
                 }
             }
-            Err(e) => {
-                log::error!("Failed to parse check suite event: {}", e);
-            }
+            Err(e) => log::error!("Failed to parse check suite event: {}", e),
         },
-        _ => {
-            log::debug!("Received unknown event: {}", event.event_type);
-        }
+        _ => log::debug!("Received unknown event: {}", event.event_type),
     }
 }
 
