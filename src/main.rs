@@ -18,9 +18,9 @@ pub mod prelude {
 
     pub use crate::resource::*;
 
-    pub use crate::webhooks::{
-        start_websockets, GhCommit, RepoOwner, Repository as WebhookRepository,
-    };
+    // pub use crate::webhooks::{
+    //     start_websockets, GhCommit, RepoOwner, Repository as WebhookRepository,
+    // };
 
     pub use crate::kubernetes::{
         controller::start_controller, DeployConfig, DeployConfigStatus, Repository as K8sRepository,
@@ -81,6 +81,9 @@ use crate::prelude::*;
 use crate::web::{
     assets, branch_grid_fragment, build_grid_fragment, deploy_configs, deploy_preview,
 };
+use crate::webhooks::database::DatabaseHandler;
+use crate::webhooks::log::LogHandler;
+use crate::webhooks::manager::WebhookManager;
 
 async fn start_http(
     registry: Registry,
@@ -215,44 +218,54 @@ async fn main() -> std::io::Result<()> {
         std::env::var("DATABASE_PATH").unwrap_or("db.db".to_string()),
     );
     let pool = Pool::new(manager).expect("Failed to create database pool");
-    migrate(
-        pool.get()
-            .expect("Failed to get database connection from pool"),
-    )
-    .expect("Failed to run database migrations");
-
-    // Setup Discord notifier
-    log::info!("Setting up Discord notifier...");
-    let discord_notifier = setup_discord().await;
-
-    match &discord_notifier {
-        Some(_) => log::info!("Discord notifier initialized"),
-        None => log::warn!("Discord notifier NOT initialized - notifications will be disabled"),
+    {
+        let conn = pool.get().expect("Failed to get database connection");
+        migrate(conn).expect("Failed to run database migrations");
     }
 
-    // Determine if we should run the Kubernetes controller
-    let enable_k8s_controller = std::env::var("ENABLE_K8S_CONTROLLER")
-        .map(|v| v.to_lowercase() == "true")
-        .unwrap_or(false);
+    // Setup Discord notifier
+    // log::info!("Setting up Discord notifier...");
+    // let discord_notifier = setup_discord().await;
 
-    tokio::select! {
-        _ = Box::pin(start_http(
-            registry,
-            pool.clone(),
-            discord_notifier.clone(),
-            octocrabs.clone(),
-        )) =>  {},
-        _ = Box::pin(start_websockets(
-            pool.clone(),
-            discord_notifier.clone(),
-            octocrabs.clone(),
-        )) => {},
-        _ = Box::pin(start_kubernetes_controller(
-            pool.clone(),
-            enable_k8s_controller,
-            discord_notifier,
-        )) => {}
-    };
+    // match &discord_notifier {
+    //     Some(_) => log::info!("Discord notifier initialized"),
+    //     None => log::warn!("Discord notifier NOT initialized - notifications will be disabled"),
+    // }
+
+    // // Determine if we should run the Kubernetes controller
+    // let enable_k8s_controller = std::env::var("ENABLE_K8S_CONTROLLER")
+    //     .map(|v| v.to_lowercase() == "true")
+    //     .unwrap_or(false);
+
+    let mut webhook_manager = WebhookManager::new(
+        std::env::var("WEBSOCKET_URL").expect("WEBSOCKET_URL must be set"),
+        std::env::var("CLIENT_SECRET").expect("CLIENT_SECRET must be set"),
+    );
+    webhook_manager.add_handler(LogHandler::new());
+    webhook_manager.add_handler(DatabaseHandler::new(pool.clone(), octocrabs.clone()));
+    webhook_manager
+        .start()
+        .await
+        .expect("Webhook manager crashed");
+
+    // tokio::select! {
+    //     _ = Box::pin(start_http(
+    //         registry,
+    //         pool.clone(),
+    //         discord_notifier.clone(),
+    //         octocrabs.clone(),
+    //     )) =>  {},
+    //     _ = Box::pin(start_websockets(
+    //         pool.clone(),
+    //         discord_notifier.clone(),
+    //         octocrabs.clone(),
+    //     )) => {},
+    //     _ = Box::pin(start_kubernetes_controller(
+    //         pool.clone(),
+    //         enable_k8s_controller,
+    //         discord_notifier,
+    //     )) => {}
+    // };
 
     Ok(())
 }

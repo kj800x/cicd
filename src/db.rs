@@ -1,4 +1,5 @@
 use crate::prelude::*;
+use indoc::indoc;
 use serde_variant::to_variant_name;
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -141,8 +142,8 @@ pub struct CommitWithParents {
 
 pub fn migrate(mut conn: PooledConnection<SqliteConnectionManager>) -> AppResult<()> {
     let migrations: Migrations = Migrations::new(vec![
-        M::up(
-            "CREATE TABLE git_repo (
+        M::up(indoc! { r#"
+            CREATE TABLE git_repo (
                 id INTEGER PRIMARY KEY NOT NULL,
                 owner_name TEXT NOT NULL,
                 name TEXT NOT NULL,
@@ -156,88 +157,74 @@ pub fn migrate(mut conn: PooledConnection<SqliteConnectionManager>) -> AppResult
                 name TEXT NOT NULL,
                 head_commit_sha TEXT NOT NULL,
                 repo_id INTEGER NOT NULL,
+                active BOOLEAN NOT NULL DEFAULT TRUE,
                 FOREIGN KEY(repo_id) REFERENCES git_repo(id)
             );
 
             CREATE TABLE git_commit (
                 id INTEGER PRIMARY KEY NOT NULL,
                 sha TEXT NOT NULL,
+                repo_id INTEGER NOT NULL,
                 message TEXT NOT NULL,
                 timestamp INTEGER NOT NULL,
-                build_status TEXT,
-                build_url TEXT,
-                repo_id INTEGER NOT NULL,
                 FOREIGN KEY(repo_id) REFERENCES git_repo(id)
             );
 
-            CREATE INDEX idx_git_repo_owner_name ON git_repo(owner_name, name);
-            CREATE INDEX idx_git_branch_repo_id ON git_branch(repo_id);
-            CREATE INDEX idx_git_branch_repo_name ON git_branch(repo_id, name);
-            CREATE INDEX idx_git_commit_sha ON git_commit(sha);
-            ",
-        ),
-        M::up(
-            "ALTER TABLE git_commit ADD COLUMN parent_sha TEXT;
+            CREATE TABLE git_commit_parent (
+                commit_id INTEGER NOT NULL,
+                parent_id INTEGER NOT NULL,
+                PRIMARY KEY(commit_id, parent_id),
+                FOREIGN KEY(commit_id) REFERENCES git_commit(id),
+                FOREIGN KEY(parent_id) REFERENCES git_commit(id)
+            );
 
             CREATE TABLE git_commit_branch (
-                commit_sha TEXT NOT NULL,
+                commit_id INTEGER NOT NULL,
                 branch_id INTEGER NOT NULL,
+                PRIMARY KEY(commit_id, branch_id),
+                FOREIGN KEY(commit_id) REFERENCES git_commit(id),
+                FOREIGN KEY(branch_id) REFERENCES git_branch(id)
+            );
+
+            CREATE TABLE git_commit_build (
                 repo_id INTEGER NOT NULL,
-                PRIMARY KEY (commit_sha, branch_id),
-                FOREIGN KEY(branch_id) REFERENCES git_branch(id),
-                FOREIGN KEY(repo_id) REFERENCES git_repo(id)
+                commit_id INTEGER NOT NULL,
+                check_name TEXT NOT NULL,
+                status TEXT NOT NULL,
+                url TEXT NOT NULL,
+                PRIMARY KEY(repo_id, commit_id, check_name),
+                FOREIGN KEY(repo_id) REFERENCES git_repo(id),
+                FOREIGN KEY(commit_id) REFERENCES git_commit(id)
             );
 
-            CREATE INDEX idx_git_commit_branch_commit ON git_commit_branch(commit_sha);
-            CREATE INDEX idx_git_commit_branch_branch ON git_commit_branch(branch_id);
-            CREATE INDEX idx_git_commit_branch_repo ON git_commit_branch(repo_id);
-            ",
-        ),
-        M::up(
-            "CREATE TABLE git_commit_parent (
-                commit_sha TEXT NOT NULL,
-                parent_sha TEXT NOT NULL,
-                repo_id INTEGER NOT NULL,
-                PRIMARY KEY (commit_sha, parent_sha),
-                FOREIGN KEY(repo_id) REFERENCES git_repo(id)
+            CREATE TABLE deploy_config (
+                name TEXT NOT NULL,
+                team TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                configRepoId INTEGER NOT NULL,
+                artifactRepoId INTEGER,
+                active BOOLEAN NOT NULL DEFAULT TRUE
             );
 
-            -- Migrate existing parent_sha data to the new table
-            INSERT INTO git_commit_parent (commit_sha, parent_sha, repo_id)
-            SELECT sha, parent_sha, repo_id FROM git_commit
-            WHERE parent_sha IS NOT NULL;
-
-            CREATE INDEX idx_git_commit_parent_commit ON git_commit_parent(commit_sha);
-            CREATE INDEX idx_git_commit_parent_parent ON git_commit_parent(parent_sha);
-            CREATE INDEX idx_git_commit_parent_repo ON git_commit_parent(repo_id);
-            ",
-        ),
-        M::up(
-            "CREATE TABLE deploy_event (
-                deploy_config TEXT NOT NULL, -- deploy config name
-                team TEXT NOT NULL,          -- deploy config team
-                timestamp INTEGER NOT NULL,  -- deploy event timestamp
-                initiator TEXT NOT NULL,     -- user or autodeploy or revert (what triggered the deploy)
-                status TEXT NOT NULL,        -- status (future proofing, always SUCCESS right now)
-                sha TEXT,                    -- sha (or null if undeployed)
-                branch TEXT                  -- branch (if the sha was from a branch deployment)
+            CREATE TABLE autodeploy_state (
+                name TEXT NOT NULL,
+                enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                PRIMARY KEY(name),
+                FOREIGN KEY(name) REFERENCES deploy_config(name)
             );
 
-            CREATE INDEX idx_deploy_event_timestamp ON deploy_event(timestamp);
-            CREATE INDEX idx_deploy_event_deploy_config ON deploy_event(deploy_config, timestamp);
-            ",
-        ),
-        M::up(
-            "CREATE TABLE deploy_config_version (
-                deploy_config TEXT NOT NULL,
-                commit_sha TEXT NOT NULL,
-                repo_id INTEGER NOT NULL,
-                config_hash TEXT NOT NULL
+            CREATE TABLE DeployEvent (
+                name TEXT NOT NULL,
+                timestamp INTEGER NOT NULL,
+                initiator TEXT NOT NULL,
+                configSha TEXT,
+                artifactSha TEXT,
+                artifactBranch TEXT
             );
-            ",
-        )
-        // In the future, add more migrations here:
-        //M::up("ALTER TABLE friend ADD COLUMN email TEXT;"),
+        "#}),
+        // M::up( indoc! { r#"
+        //     SQL GOES HERE
+        // "#}),
     ]);
 
     conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))?;
@@ -252,7 +239,7 @@ struct ExistenceResult {
 }
 
 pub fn upsert_repo(
-    repo: &crate::webhooks::Repository,
+    repo: &crate::webhooks::models::Repository,
     conn: &PooledConnection<SqliteConnectionManager>,
 ) -> AppResult<u64> {
     let repo = repo.clone();
@@ -297,7 +284,7 @@ pub fn upsert_repo(
 }
 
 pub fn upsert_commit(
-    commit: &crate::webhooks::GhCommit,
+    commit: &crate::webhooks::models::GhCommit,
     repo_id: u64,
     conn: &PooledConnection<SqliteConnectionManager>,
 ) -> AppResult<u64> {
@@ -705,6 +692,7 @@ pub fn get_latest_completed_build(
     Ok(commit)
 }
 
+// FIXME: Also set the branch to active
 pub fn upsert_branch(
     name: &str,
     sha: &str,
@@ -747,6 +735,18 @@ pub fn upsert_branch(
             Ok(branch_id)
         }
     }
+}
+
+// FIXME: Need to define this column in the schema
+pub fn delete_branch(
+    name: &str,
+    repo_id: u64,
+    conn: &PooledConnection<SqliteConnectionManager>,
+) -> AppResult<()> {
+    conn.prepare("UPDATE git_branch SET active = FALSE WHERE name = ?1 AND repo_id = ?2")?
+        .execute(params![name, repo_id])?;
+
+    Ok(())
 }
 
 pub fn set_commit_status(
