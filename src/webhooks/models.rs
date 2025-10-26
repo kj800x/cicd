@@ -22,6 +22,12 @@ pub struct CommitAuthor {
     // pub username: String,
 }
 
+impl From<&CommitAuthor> for String {
+    fn from(author: &CommitAuthor) -> Self {
+        format!("{} <{}>", author.name, author.email)
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GhCommit {
     pub id: String, // sha

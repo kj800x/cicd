@@ -1,5 +1,10 @@
-use crate::kubernetes::repo::IRepo;
+// use crate::kubernetes::repo::IRepo;
 use octocrab::Octocrab;
+
+pub trait IRepo {
+    fn owner(&self) -> &str;
+    fn repo(&self) -> &str;
+}
 
 pub type Octocrabs = Vec<Octocrab>;
 

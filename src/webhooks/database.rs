@@ -1,13 +1,18 @@
 use anyhow::Context;
+use chrono::{DateTime, Utc};
+use itertools::Itertools;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use serenity::async_trait;
 
 use crate::{
-    crab_ext::Octocrabs,
+    build_status::BuildStatus,
+    crab_ext::{OctocrabExt, Octocrabs},
     db::{
-        delete_branch, get_commit, set_commit_status, upsert_branch, upsert_commit, upsert_repo,
-        BuildStatus,
+        git_branch::{GitBranch, GitBranchEgg},
+        git_commit::{GitCommit, GitCommitEgg},
+        git_commit_build::GitCommitBuild,
+        git_repo::{GitRepo, GitRepoEgg},
     },
     webhooks::{
         models::{CheckRunEvent, CheckSuiteEvent, DeleteEvent, GhCommit, PushEvent},
@@ -44,56 +49,67 @@ impl WebhookHandler for DatabaseHandler {
             .get()
             .context("Failed to get database connection")?;
 
-        let repo = &payload.repository;
-        let r#ref = &payload.r#ref;
+        let repo: GitRepo = payload.repository.clone().into();
+        repo.upsert(&conn).context("Error upserting repository")?;
 
         // If no head commit, this is probably branch deleted which is handled by the delete handler
         let Some(head_commit) = payload.head_commit else {
             return Ok(());
         };
 
-        let commit_sha = &head_commit.id;
-        let commit_message = &head_commit.message;
-        let author = &head_commit.author;
-        let committer = &head_commit.committer;
-        let timestamp = &head_commit.timestamp;
+        let branch_egg = GitBranchEgg {
+            name: extract_branch_name(&payload.r#ref).context("Error extracting branch name")?,
+            head_commit_sha: head_commit.id.clone(),
+            repo_id: repo.id,
+            active: true,
+        };
+        let branch = branch_egg.upsert(&conn).context("Error upserting branch")?;
 
-        // FIXME: Move to separate handler
-        // if let Some(kube_client) = kube_client {
-        //     sync_repo_deploy_configs_impl(
-        //         octocrabs,
-        //         kube_client,
-        //         repo.owner.login.clone(),
-        //         repo.name.clone(),
-        //     )
-        //     .await
-        //     .context("Error syncing deploy configs")?;
-        // } else {
-        //     log::warn!("Kubernetes client not available, skipping DeployConfig updates");
-        // }
+        for commit in payload.commits {
+            let commit_sha = &commit.id;
+            let commit_message = &commit.message;
+            let author = &commit.author;
+            let committer = &commit.committer;
+            let timestamp = &commit.timestamp;
 
-        let repo_id = upsert_repo(repo, &conn).context("Error upserting repository")?;
+            let commit_ts = DateTime::parse_from_rfc3339(timestamp)?;
+            let commit_ts = commit_ts.with_timezone(&Utc).timestamp_millis();
 
-        // Store the commit info but don't set any build status
-        upsert_commit(
-            &GhCommit {
-                id: commit_sha.to_string(),
+            let commit_egg = GitCommitEgg {
+                sha: commit_sha.to_string(),
+                repo_id: repo.id,
                 message: commit_message.to_string(),
-                timestamp: timestamp.to_string(),
-                author: author.clone(),
-                committer: committer.clone(),
-                // FIXME: GH doesn't send parent shas in webhooks, need to fetch separately later
-                parent_shas: None,
-            },
-            repo_id,
-            &conn,
-        )
-        .context("Error storing commit")?;
+                timestamp: commit_ts,
+                author: author.into(),
+                committer: committer.into(),
+            };
+            let commit = GitCommit::upsert(&commit_egg, &conn).context("Error upserting commit")?;
 
-        // Extract branch name if this is a branch push
-        if let Some(branch_name) = extract_branch_name(r#ref) {
-            upsert_branch(&branch_name, commit_sha, repo_id, &conn)
-                .context("Error updating branch")?;
+            let octocrab = self
+                .octocrabs
+                .crab_for(&repo)
+                .await
+                .context("Error getting octocrab")?;
+
+            let parents = octocrab
+                .repos(repo.owner_name.clone(), repo.name.clone())
+                .list_commits()
+                .sha(commit.sha.clone())
+                .send()
+                .await?
+                .items
+                .first()
+                .iter()
+                .flat_map(|c| c.parents.iter().flat_map(|p| p.sha.clone()))
+                .collect_vec();
+
+            commit
+                .add_parent_shas(parents, &conn)
+                .context("Error adding parent SHAs")?;
+
+            commit
+                .add_branch(branch.id, &conn)
+                .context("Error adding branch")?;
         }
 
         Ok(())
@@ -108,26 +124,30 @@ impl WebhookHandler for DatabaseHandler {
             .context("Failed to get database connection")?;
 
         if payload.action.as_str() == "created" {
-            let repo_id =
-                upsert_repo(&payload.repository, &conn).context("Error upserting repository")?;
+            let build_status = BuildStatus::of(
+                &payload.check_run.check_suite.status,
+                &payload.check_run.check_suite.conclusion.as_deref(),
+            );
 
-            let head_commit = get_commit(
+            let repo: GitRepo = payload.repository.clone().into();
+            repo.upsert(&conn).context("Error upserting repository")?;
+
+            let head_commit = GitCommit::get_by_sha(
+                &payload.check_run.check_suite.head_sha.clone(),
+                repo.id,
                 &conn,
-                repo_id as i64,
-                payload.check_run.check_suite.head_sha.clone(),
             )
             .context("Error getting commit")?
             .ok_or(anyhow::Error::msg("Commit not found"))?;
 
-            // Set the commit status to Pending
-            set_commit_status(
-                &head_commit.sha,
-                BuildStatus::Pending,
-                payload.check_run.details_url.clone(),
-                repo_id,
-                &conn,
-            )
-            .context("Error setting commit status to Pending")?;
+            let commit_build = GitCommitBuild {
+                repo_id: repo.id,
+                commit_id: head_commit.id,
+                check_name: "default".to_string(), // FIXME: Why can't we get the check name? Do we have to fetch it separately?
+                status: build_status.into(),
+                url: payload.check_run.details_url.clone(),
+            };
+            GitCommitBuild::upsert(&commit_build, &conn).context("Error upserting commit build")?;
         }
 
         Ok(())
@@ -147,23 +167,28 @@ impl WebhookHandler for DatabaseHandler {
                 &payload.check_suite.conclusion.as_deref(),
             );
 
-            let repo_id =
-                upsert_repo(&payload.repository, &conn).context("Error upserting repository")?;
+            let repo: GitRepo = payload.repository.clone().into();
+            repo.upsert(&conn).context("Error upserting repository")?;
 
-            // Set the commit status
-            set_commit_status(
-                payload.check_suite.head_sha.as_str(),
-                build_status.clone(),
-                format!(
-                    "https://github.com/{}/{}/commit/{}/checks",
-                    payload.repository.owner.login,
-                    payload.repository.name,
-                    payload.check_suite.head_sha
-                ),
-                repo_id,
-                &conn,
-            )
-            .context("Error setting commit status")?;
+            let head_commit =
+                GitCommit::get_by_sha(&payload.check_suite.head_sha.clone(), repo.id, &conn)
+                    .context("Error getting commit")?
+                    .ok_or(anyhow::Error::msg("Commit not found"))?;
+
+            let build_url = format!(
+                "https://github.com/{}/{}/commit/{}/checks",
+                payload.repository.owner.login,
+                payload.repository.name,
+                payload.check_suite.head_sha
+            );
+            let commit_build = GitCommitBuild {
+                repo_id: repo.id,
+                commit_id: head_commit.id,
+                check_name: "default".to_string(), // FIXME: Why can't we get the check name? Do we have to fetch it separately?
+                status: build_status.into(),
+                url: build_url,
+            };
+            GitCommitBuild::upsert(&commit_build, &conn).context("Error upserting commit build")?;
         }
 
         Ok(())
@@ -178,10 +203,18 @@ impl WebhookHandler for DatabaseHandler {
             .context("Failed to get database connection")?;
 
         if payload.ref_type == "branch" {
-            let repo_id =
-                upsert_repo(&payload.repository, &conn).context("Error upserting repository")?;
+            let repo: GitRepo = payload.repository.clone().into();
+            repo.upsert(&conn).context("Error upserting repository")?;
+
             let branch_name = &payload.r#ref;
-            delete_branch(branch_name, repo_id, &conn).context("Error deleting branch")?;
+            let branch = GitBranch::get_by_name(branch_name, repo.id, &conn)
+                .context("Error getting branch")?;
+
+            if let Some(mut branch) = branch {
+                branch
+                    .mark_inactive(&conn)
+                    .context("Error marking branch inactive")?;
+            }
         }
 
         Ok(())
