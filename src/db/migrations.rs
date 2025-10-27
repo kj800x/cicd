@@ -64,9 +64,22 @@ pub fn migrate(mut conn: PooledConnection<SqliteConnectionManager>) -> AppResult
               name TEXT NOT NULL,
               team TEXT NOT NULL,
               kind TEXT NOT NULL,
-              configRepoId INTEGER NOT NULL,
-              artifactRepoId INTEGER,
-              active BOOLEAN NOT NULL DEFAULT TRUE
+              config_repo_id INTEGER NOT NULL,
+              artifact_repo_id INTEGER,
+              active BOOLEAN NOT NULL DEFAULT TRUE,
+              PRIMARY KEY(name),
+              FOREIGN KEY(config_repo_id) REFERENCES git_repo(id)
+              FOREIGN KEY(artifact_repo_id) REFERENCES git_repo(id)
+          );
+
+          CREATE TABLE deploy_config_version (
+              name TEXT NOT NULL,
+              config_repo_id INTEGER NOT NULL,
+              config_commit_sha TEXT NOT NULL,
+              hash TEXT NOT NULL,
+              PRIMARY KEY(name, config_repo_id, config_commit_sha),
+              FOREIGN KEY(name) REFERENCES deploy_config(name),
+              FOREIGN KEY(config_repo_id) REFERENCES git_repo(id)
           );
 
           CREATE TABLE autodeploy_state (
@@ -80,9 +93,9 @@ pub fn migrate(mut conn: PooledConnection<SqliteConnectionManager>) -> AppResult
               name TEXT NOT NULL,
               timestamp INTEGER NOT NULL,
               initiator TEXT NOT NULL,
-              configSha TEXT,
-              artifactSha TEXT,
-              artifactBranch TEXT
+              config_sha TEXT,
+              artifact_sha TEXT,
+              artifact_branch TEXT
           );
       "#}),
         // M::up( indoc! { r#"

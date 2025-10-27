@@ -23,8 +23,6 @@ use crate::{
 
 pub struct DatabaseHandler {
     pool: Pool<SqliteConnectionManager>,
-
-    #[allow(dead_code)]
     octocrabs: Octocrabs,
 }
 

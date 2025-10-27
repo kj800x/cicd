@@ -37,9 +37,9 @@ impl BuildStatus {
     }
 }
 
-impl Into<String> for BuildStatus {
-    fn into(self) -> String {
-        match self {
+impl From<BuildStatus> for String {
+    fn from(val: BuildStatus) -> Self {
+        match val {
             BuildStatus::None => "None".to_string(),
             BuildStatus::Pending => "Pending".to_string(),
             BuildStatus::Success => "Success".to_string(),

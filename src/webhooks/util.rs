@@ -1,5 +1,7 @@
 use regex::Regex;
 
+// FIXME: This can be a method impl on the PushEvent itself
+
 // Pushes can be for reasons other than branches, such as tags
 pub fn extract_branch_name(r#ref: &str) -> Option<String> {
     // This regex is a compile-time constant pattern, so expect is appropriate

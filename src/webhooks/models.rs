@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::crab_ext::IRepo;
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RepoOwner {
     pub login: String,
@@ -13,6 +15,15 @@ pub struct Repository {
     pub private: bool,
     pub language: Option<String>,
     pub default_branch: String,
+}
+
+impl IRepo for Repository {
+    fn owner(&self) -> &str {
+        &self.owner.login
+    }
+    fn repo(&self) -> &str {
+        &self.name
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

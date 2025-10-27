@@ -67,7 +67,7 @@ mod db;
 // mod discord;
 mod error;
 // mod graphql;
-// mod kubernetes;
+mod kubernetes;
 // mod resource;
 // mod web;
 mod build_status;
@@ -80,6 +80,7 @@ use crate::crab_ext::{initialize_octocrabs, Octocrabs};
 use crate::db::migrations::migrate;
 // use crate::discord::setup_discord;
 use crate::prelude::*;
+use crate::webhooks::config_sync::ConfigSyncHandler;
 // use crate::web::{
 //     assets, branch_grid_fragment, build_grid_fragment, deploy_configs, deploy_preview,
 // };
@@ -225,6 +226,11 @@ async fn main() -> std::io::Result<()> {
         migrate(conn).expect("Failed to run database migrations");
     }
 
+    // Initialize Kubernetes client
+    let client = kube::Client::try_default()
+        .await
+        .expect("Failed to initialize Kubernetes client");
+
     // Setup Discord notifier
     // log::info!("Setting up Discord notifier...");
     // let discord_notifier = setup_discord().await;
@@ -245,6 +251,11 @@ async fn main() -> std::io::Result<()> {
     );
     webhook_manager.add_handler(LogHandler::new());
     webhook_manager.add_handler(DatabaseHandler::new(pool.clone(), octocrabs.clone()));
+    webhook_manager.add_handler(ConfigSyncHandler::new(
+        pool.clone(),
+        client.clone(),
+        octocrabs.clone(),
+    ));
     webhook_manager
         .start()
         .await

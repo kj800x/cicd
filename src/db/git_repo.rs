@@ -1,7 +1,11 @@
-use crate::{crab_ext::IRepo, error::AppResult, webhooks::models::Repository as WebhookRepository};
+use crate::{
+    crab_ext::IRepo,
+    error::{AppError, AppResult},
+    webhooks::models::Repository as WebhookRepository,
+};
 use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 
 pub struct GitRepo {
     pub id: u64,
@@ -63,6 +67,20 @@ impl GitRepo {
             private: egg.private,
             language: egg.language.clone(),
         }
+    }
+
+    pub fn get_by_name(
+        owner_name: &str,
+        name: &str,
+        conn: &PooledConnection<SqliteConnectionManager>,
+    ) -> AppResult<Option<Self>> {
+        let repo = conn.prepare("SELECT id, owner_name, name, default_branch, private, language FROM git_repo WHERE owner_name = ?1 AND name = ?2")?
+          .query_row(params![owner_name, name], |row| {
+            Ok(GitRepo::from_row(row).map_err(AppError::from))
+          })
+          .optional().map_err(AppError::from)?.transpose()?;
+
+        Ok(repo)
     }
 
     pub fn upsert(&self, conn: &PooledConnection<SqliteConnectionManager>) -> AppResult<()> {
