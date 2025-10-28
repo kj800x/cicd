@@ -19,21 +19,18 @@ use crate::{
     },
     kubernetes::{
         deploy_config::{
-            DeployConfig, DeployConfigConfigStatus, DeployConfigSpec, DeployConfigSpecFields,
-            DeployConfigStatus,
+            DeployConfig, DeployConfigSpec, DeployConfigSpecFields, DeployConfigStatus,
         },
         repo::RepositoryBranch,
+        webhook_handlers::update_deploy_configs_by_defining_repo,
+        Repository,
     },
-    webhooks::{
-        models::{PushEvent, Repository},
-        util::extract_branch_name,
-        WebhookHandler,
-    },
+    webhooks::{self, models::PushEvent, util::extract_branch_name, WebhookHandler},
 };
 
 pub struct ConfigSyncHandler {
     pool: Pool<SqliteConnectionManager>,
-    // client: Client,
+    client: Client,
     octocrabs: Octocrabs,
 }
 
@@ -41,7 +38,7 @@ impl ConfigSyncHandler {
     pub fn new(pool: Pool<SqliteConnectionManager>, client: Client, octocrabs: Octocrabs) -> Self {
         Self {
             pool,
-            // client,
+            client,
             octocrabs,
         }
     }
@@ -67,21 +64,23 @@ impl WebhookHandler for ConfigSyncHandler {
                 .map(|dc| dc.name_any())
                 .collect::<Vec<String>>();
 
-            for deploy_config in deploy_configs {
-                // FIXME: Cases - artifact_repo defined and present in db, artifact_repo defined and not present in db, artifact_repo is null in the deploy config spec (not yet part of the shape properly)
+            for deploy_config in deploy_configs.clone() {
+                // FIXME: Cases - artifact_repo defined and present in db, artifact_repo defined and not present in db, artifact_repo is null in the deploy config spec
                 // Right now we're treating "can't find artifact repo" as "no artifact repo", which is not correct.
-                let artifact_repo_id = GitRepo::get_by_name(
-                    deploy_config.artifact_owner(),
-                    deploy_config.artifact_repo(),
-                    &conn,
-                )?;
+                let artifact_repo_id = match deploy_config.artifact_repository() {
+                    Some(repository) => {
+                        GitRepo::get_by_name(&repository.owner, &repository.repo, &conn)?
+                            .map(|r| r.id)
+                    }
+                    None => None,
+                };
 
                 let db_config = DbDeployConfig {
                     name: deploy_config.name_any(),
                     team: deploy_config.team().to_string(),
                     kind: deploy_config.kind().to_string(),
                     config_repo_id: event.repository.id,
-                    artifact_repo_id: artifact_repo_id.map(|r| r.id),
+                    artifact_repo_id,
                     active: true,
                 };
 
@@ -106,23 +105,34 @@ impl WebhookHandler for ConfigSyncHandler {
                 )?;
             }
 
-            for existing_deploy_config in existing_deploy_configs {
-                if !current_deploy_config_names.contains(&existing_deploy_config.name) {
-                    DbDeployConfig::mark_inactive(&existing_deploy_config.name, &conn)?;
-                }
+            let deleted_deploy_config_names = existing_deploy_configs
+                .iter()
+                .filter(|dc| !current_deploy_config_names.contains(&dc.name))
+                .map(|dc| dc.name.clone())
+                .collect::<Vec<String>>();
+
+            for deleted_deploy_config_name in &deleted_deploy_config_names {
+                DbDeployConfig::mark_inactive(deleted_deploy_config_name, &conn)?;
             }
 
             // FIXME: Also sync with kubernetes
-
-            // sync_repo_deploy_configs_impl(&self.octocrabs, &self.client, event.repository.clone())
-            //     .await?;
+            update_deploy_configs_by_defining_repo(
+                &self.client,
+                &deploy_configs,
+                &deleted_deploy_config_names,
+                &Repository {
+                    owner: event.repository.owner.login.clone(),
+                    repo: event.repository.name.clone(),
+                },
+            )
+            .await?;
         }
 
         Ok(())
     }
 }
 
-// MARK: Maybe move below this to a separate file?
+// MARK: Maybe move everything below this to a separate file?
 
 fn default_branch() -> String {
     "master".to_string()
@@ -143,13 +153,11 @@ struct GitHubDeployConfig {
     team: String,
     kind: String,
     namespace: String,
-    #[serde(default)]
-    autodeploy: bool,
 }
 
 pub async fn fetch_current_deploy_configs(
     octocrabs: &Octocrabs,
-    repository: Repository,
+    repository: webhooks::models::Repository,
 ) -> Result<Vec<DeployConfig>, anyhow::Error> {
     let result = octocrabs.crab_for(&repository).await;
 
@@ -290,15 +298,18 @@ pub async fn fetch_current_deploy_configs(
             })
             .collect::<Result<Vec<Value>, anyhow::Error>>()?;
 
-        let mut dc = DeployConfig {
+        let dc = DeployConfig {
             spec: DeployConfigSpec {
                 spec: DeployConfigSpecFields {
-                    artifact: RepositoryBranch {
-                        owner: config.artifact_repo.owner,
-                        repo: config.artifact_repo.repo,
-                        branch: config.artifact_repo.branch,
+                    artifact: Some(RepositoryBranch {
+                        owner: config.artifact_repo.owner.clone(),
+                        repo: config.artifact_repo.repo.clone(),
+                        branch: config.artifact_repo.branch.clone(),
+                    }),
+                    config: Repository {
+                        owner: owner.clone(),
+                        repo: repo.clone(),
                     },
-                    autodeploy: config.autodeploy,
                     kind: config.kind,
                     specs: child_files,
                     team: config.team.clone(),
@@ -312,34 +323,17 @@ pub async fn fetch_current_deploy_configs(
             status: None,
         };
 
-        dc.status = Some(DeployConfigStatus {
-            config: Some(DeployConfigConfigStatus {
-                owner: Some(owner.clone()),
-                repo: Some(repo.clone()),
-                // TODO: Semantically this is correct today (since we overwrite the
-                // live config spec as soon as we get the webhook). In the future,
-                // we will want to defer the update until the user actually does
-                // a deploy.
-                sha: Some(dc.spec_hash()),
-            }),
-            ..Default::default()
-        });
+        // // FIXME: Should this be setting status here?
+        // // I think no, lets see if everything works with this commented out.
+        // dc.status = Some(DeployConfigStatus {
+        //     config: None,
+        //     artifact: None,
+        //     autodeploy: None,
+        //     orphaned: None,
+        // });
 
         final_deploy_configs.push(dc);
     }
 
     Ok(final_deploy_configs)
-
-    // update_deploy_configs_by_defining_repo(
-    //     client,
-    //     &final_deploy_configs,
-    //     &Repository {
-    //         owner: owner.clone(),
-    //         repo: repo.clone(),
-    //     },
-    // )
-    // .await
-    // .map_err(|e| anyhow::anyhow!("Failed to update deploy configs: {}", e))?;
-
-    // Ok(())
 }

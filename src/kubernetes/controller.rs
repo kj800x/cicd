@@ -25,26 +25,6 @@ pub struct ControllerContext {
     discord_notifier: Option<DiscordNotifier>,
 }
 
-/// Error type for controller operations
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    /// Kube API error
-    #[error("Kubernetes API error: {0}")]
-    Kube(#[from] kube::Error),
-
-    /// Database error
-    #[error("Database error: {0}")]
-    Db(#[from] rusqlite::Error),
-
-    /// App error
-    #[error("App error: {0}")]
-    App(#[from] crate::error::AppError),
-
-    /// Other errors
-    #[error("Other error: {0}")]
-    Other(#[from] anyhow::Error),
-}
-
 /// The reconciliation function for DeployConfig resources
 async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> Result<Action, Error> {
     let client = &ctx.client;

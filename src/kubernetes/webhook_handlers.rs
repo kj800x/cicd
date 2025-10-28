@@ -1,10 +1,8 @@
 use super::DeployConfig;
 use super::Repository;
-use crate::db::{insert_deploy_event, DeployEvent};
 use crate::error::format_error_chain;
-use crate::kubernetes::api::update_deploy_config_status;
-use crate::kubernetes::controller::Error;
-use crate::kubernetes::DeployConfigStatusBuilder;
+use crate::kubernetes::repo::DeploymentState;
+use crate::kubernetes::Error;
 use crate::prelude::*;
 use itertools::Itertools;
 use kube::api::{DeleteParams, PostParams};
@@ -13,92 +11,95 @@ use kube::{
     client::Client,
 };
 
-/// Handle build completion events by updating relevant DeployConfigs
-pub async fn handle_build_completed(
-    client: &Client,
-    owner: &str,
-    repo: &str,
-    branch: &str,
-    sha: &str,
-    conn: &PooledConnection<SqliteConnectionManager>,
-) -> Result<(), Error> {
-    log::debug!(
-        "Build completed for {}/{} branch {} with SHA {}",
-        owner,
-        repo,
-        branch,
-        &sha[0..7]
-    );
+// /// Handle build completion events by updating relevant DeployConfigs
+// pub async fn handle_build_completed(
+//     client: &Client,
+//     owner: &str,
+//     repo: &str,
+//     branch: &str,
+//     sha: &str,
+//     conn: &PooledConnection<SqliteConnectionManager>,
+// ) -> Result<(), Error> {
+//     log::debug!(
+//         "Build completed for {}/{} branch {} with SHA {}",
+//         owner,
+//         repo,
+//         branch,
+//         &sha[0..7]
+//     );
 
-    // Find all DeployConfigs that match this repo and branch
-    let deploy_configs_api: Api<DeployConfig> = Api::all(client.clone());
-    let deploy_configs = match deploy_configs_api.list(&Default::default()).await {
-        Ok(list) => list.items,
-        Err(e) => {
-            log::error!("Failed to list DeployConfigs:\n{}", format_error_chain(&e));
-            return Err(Error::Kube(e));
-        }
-    };
+//     // Find all DeployConfigs that match this repo and branch
+//     let deploy_configs_api: Api<DeployConfig> = Api::all(client.clone());
+//     let deploy_configs = match deploy_configs_api.list(&Default::default()).await {
+//         Ok(list) => list.items,
+//         Err(e) => {
+//             log::error!("Failed to list DeployConfigs:\n{}", format_error_chain(&e));
+//             return Err(Error::Kube(e));
+//         }
+//     };
 
-    let matching_configs = deploy_configs.iter().filter(|dc| {
-        dc.artifact_owner() == owner && dc.artifact_repo() == repo && dc.tracking_branch() == branch
-    });
+//     let matching_configs = deploy_configs.iter().filter(|dc| {
+//         dc.artifact_owner() == owner && dc.artifact_repo() == repo && dc.tracking_branch() == branch
+//     });
 
-    for config in matching_configs {
-        let ns = config.namespace().unwrap_or_else(|| "default".to_string());
-        let name = config.name_any();
+//     for config in matching_configs {
+//         let ns = config.namespace().unwrap_or_else(|| "default".to_string());
+//         let name = config.name_any();
 
-        log::info!(
-            "Updating DeployConfig {}/{} with latest SHA {}",
-            ns,
-            name,
-            &sha[0..7]
-        );
+//         log::info!(
+//             "Updating DeployConfig {}/{} with latest SHA {}",
+//             ns,
+//             name,
+//             &sha[0..7]
+//         );
 
-        // RULE: When a build completes, update latestSha for all matching DeployConfigs
-        update_deploy_config_status(
-            client,
-            &ns,
-            &name,
-            DeployConfigStatusBuilder::new().with_artifact_latest_sha(sha.to_string()),
-        )
-        .await?;
+//         // RULE: When a build completes, update latestSha for all matching DeployConfigs
+//         update_deploy_config_status(
+//             client,
+//             &ns,
+//             &name,
+//             DeployConfigStatusBuilder::new().with_artifact_latest_sha(sha.to_string()),
+//         )
+//         .await?;
 
-        // RULE: If autodeploy is enabled, also update wantedSha
-        if config.current_autodeploy() {
-            log::info!(
-                "DeployConfig {}/{} has autodeploy enabled - setting wantedSha to {}",
-                ns,
-                name,
-                &sha[0..7]
-            );
-            insert_deploy_event(
-                &DeployEvent {
-                    deploy_config: name.to_string(),
-                    team: config.team().to_string(),
-                    timestamp: Utc::now().timestamp(),
-                    initiator: "autodeploy".to_string(),
-                    status: "SUCCESS".to_string(),
-                    branch: Some(branch.to_string()),
-                    sha: Some(sha.to_string()),
-                },
-                conn,
-            )?;
-            update_deploy_config_status(
-                client,
-                &ns,
-                &name,
-                DeployConfigStatusBuilder::new().with_artifact_wanted_sha(sha.to_string()),
-            )
-            .await?;
-        }
-    }
+//         // RULE: If autodeploy is enabled, also update wantedSha
+//         if config.current_autodeploy() {
+//             log::info!(
+//                 "DeployConfig {}/{} has autodeploy enabled - setting wantedSha to {}",
+//                 ns,
+//                 name,
+//                 &sha[0..7]
+//             );
+//             insert_deploy_event(
+//                 &DeployEvent {
+//                     deploy_config: name.to_string(),
+//                     team: config.team().to_string(),
+//                     timestamp: Utc::now().timestamp(),
+//                     initiator: "autodeploy".to_string(),
+//                     status: "SUCCESS".to_string(),
+//                     branch: Some(branch.to_string()),
+//                     sha: Some(sha.to_string()),
+//                 },
+//                 conn,
+//             )?;
+//             update_deploy_config_status(
+//                 client,
+//                 &ns,
+//                 &name,
+//                 DeployConfigStatusBuilder::new().with_artifact_wanted_sha(sha.to_string()),
+//             )
+//             .await?;
+//         }
+//     }
 
-    Ok(())
-}
+//     Ok(())
+// }
 
 // MARK: - update_deploy_configs_by_defining_repo
 
+// Goals: sync spec.config, spec.artifact, spec.team, spec.kind, status.orphaned (always false here)
+// NONGOALS: spec.specs (since that is updated ONLY by deploy events)
+// TODO: There's some other semantics here that need to be figured out, but lets get this online again first.
 async fn update_deploy_config(
     client: &Client,
     existing_config: &DeployConfig,
@@ -109,24 +110,24 @@ async fn update_deploy_config(
         .unwrap_or_else(|| "default".to_string());
     let name = existing_config.name_any();
 
+    // We always use the existing config's specs, since specs are only updated by deploy events.
+    let mut merge_patch = final_config.clone();
+    merge_patch.spec.spec.specs = existing_config.spec.spec.specs.clone();
+
     let api: Api<DeployConfig> = Api::namespaced(client.clone(), &ns);
-    api.patch(&name, &PatchParams::default(), &Patch::Merge(&final_config))
+    api.patch(&name, &PatchParams::default(), &Patch::Merge(&merge_patch))
         .await?;
-    // FIXME: Does patch-status make sense here?
+
     api.patch_status(
-      &name,
-      &PatchParams::default(),
-      &Patch::Merge(&serde_json::json!({
-          "status": {
-              "config": {
-                  "repo": final_config.status.as_ref().and_then(|s| s.config.as_ref().and_then(|c| c.repo.clone())),
-                  "sha": final_config.status.as_ref().and_then(|s| s.config.as_ref().and_then(|c| c.sha.clone())),
-                  "owner": final_config.status.as_ref().and_then(|s| s.config.as_ref().and_then(|c| c.owner.clone())),
-              },
-          }
-      })),
-  )
-  .await?;
+        &name,
+        &PatchParams::default(),
+        &Patch::Merge(&serde_json::json!({
+            "status": {
+              "orphaned": false,
+            }
+        })),
+    )
+    .await?;
 
     log::info!("Updated DeployConfig {}/{}", ns, name);
 
@@ -141,25 +142,25 @@ async fn create_deploy_config(client: &Client, final_config: &DeployConfig) -> R
 
     let api: Api<DeployConfig> = Api::namespaced(client.clone(), &ns);
 
-    api.create(&PostParams::default(), final_config).await?;
+    // We always create new configs without their specs, since specs are only updated by deploy events.
+    let mut create_config = final_config.clone();
+    create_config.spec.spec.specs = vec![];
+
+    api.create(&PostParams::default(), &create_config).await?;
 
     // FIXME: Does patch-status make sense here?
     #[allow(clippy::expect_used)]
-  api.replace_status(
-      &name,
-      &PostParams::default(),
-      serde_json::to_vec(&serde_json::json!({
-          "status": {
-              "config": {
-                  "repo": final_config.status.as_ref().and_then(|s| s.config.as_ref().and_then(|c| c.repo.clone())),
-                  "sha": final_config.status.as_ref().and_then(|s| s.config.as_ref().and_then(|c| c.sha.clone())),
-                  "owner": final_config.status.as_ref().and_then(|s| s.config.as_ref().and_then(|c| c.owner.clone())),
-              },
-          }
-      }))
-      .expect("Should be able to serialize DeployConfig status"),
-  )
-  .await?;
+    api.replace_status(
+        &name,
+        &PostParams::default(),
+        serde_json::to_vec(&serde_json::json!({
+            "status": {
+              "orphaned": false,
+            }
+        }))
+        .expect("Should be able to serialize DeployConfig status"),
+    )
+    .await?;
 
     log::info!("Created DeployConfig {}/{}", ns, name);
 
@@ -174,11 +175,33 @@ async fn delete_deploy_config(
         .namespace()
         .unwrap_or_else(|| "default".to_string());
     let name = existing_config.name_any();
-
     let api: Api<DeployConfig> = Api::namespaced(client.clone(), &ns);
-    api.delete(&name, &DeleteParams::default()).await?;
 
-    log::info!("Deleted DeployConfig {}/{}", ns, name);
+    if existing_config.deployment_state() == DeploymentState::Undeployed {
+        api.delete(&name, &DeleteParams::default()).await?;
+
+        log::info!("Deleted DeployConfig {}/{}", ns, name);
+    } else {
+        // FIXME: Does patch-status make sense here?
+        #[allow(clippy::expect_used)]
+        api.replace_status(
+            &name,
+            &PostParams::default(),
+            serde_json::to_vec(&serde_json::json!({
+                "status": {
+                  "orphaned": true,
+                }
+            }))
+            .expect("Should be able to serialize DeployConfig status"),
+        )
+        .await?;
+
+        log::info!(
+            "DeployConfig {}/{} currently deployed, marking as orphaned instead of deleting",
+            ns,
+            name
+        );
+    }
 
     Ok(())
 }
@@ -186,6 +209,7 @@ async fn delete_deploy_config(
 pub async fn update_deploy_configs_by_defining_repo(
     client: &Client,
     final_deploy_configs: &[DeployConfig],
+    deleted_deploy_config_names: &[String],
     __defining_repo: &Repository,
 ) -> Result<(), Error> {
     // Find all existing deploy configs for the defining repo
@@ -207,9 +231,17 @@ pub async fn update_deploy_configs_by_defining_repo(
     // that way deploy configs get removed properly
     // But I'm having trouble with `status` right now.
     // ChatGPT says we should stop using status and use labels or annotations instead.
+
+    // TODO: Right now we're always filtering to just configs that are present
+    //in the new set, so we never clean up any configs.
     let matching_configs = deploy_configs
         .iter()
-        .filter(|dc| new_deploy_config_names.contains(&dc.name_any()))
+        // FIXME: This is not the best way to handle the deleted configs. We should
+        // get this out of the kubernetes API instead of the database.
+        .filter(|dc| {
+            deleted_deploy_config_names.contains(&dc.name_any())
+                || new_deploy_config_names.contains(&dc.name_any())
+        })
         .collect::<Vec<&DeployConfig>>();
 
     let all_names = matching_configs

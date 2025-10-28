@@ -1,4 +1,7 @@
-use crate::kubernetes::{repo::RepositoryBranch, Repository};
+use crate::kubernetes::{
+    repo::{DeploymentState, RepositoryBranch, ShaMaybeBranch},
+    Repository,
+};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use kube::{CustomResource, ResourceExt};
 use serde::{Deserialize, Serialize};
@@ -10,58 +13,24 @@ pub const DEPLOY_CONFIG_KIND: &str = if cfg!(feature = "test-crd") {
     "DeployConfig"
 };
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct DeployConfigArtifactStatus {
-    /// The currently deployed Git commit SHA
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "currentSha"
-    )]
-    pub current_sha: Option<String>,
-
-    /// The Git commit SHA that should be deployed
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "wantedSha")]
-    pub wanted_sha: Option<String>,
-
-    /// The latest Git commit SHA for the configured branch
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "latestSha")]
-    pub latest_sha: Option<String>,
-
-    /// The currently active branch
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "branch")]
-    pub branch: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct DeployConfigConfigStatus {
-    /// GitHub username or organization containing this deploy config
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner: Option<String>,
-
-    /// Repository name containing this deploy config
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub repo: Option<String>,
-
-    /// A SHA256 hash of the current specs. NOT THE GIT SHA.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sha: Option<String>,
-}
-
 /// DeployConfig status information
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct DeployConfigStatus {
     /// Information about the current state of the artifact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub artifact: Option<DeployConfigArtifactStatus>,
+    pub artifact: Option<ShaMaybeBranch>,
 
     /// Information about the current state of the config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config: Option<DeployConfigConfigStatus>,
+    pub config: Option<ShaMaybeBranch>,
 
     /// The current state of autodeploy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autodeploy: Option<bool>,
+
+    /// Whether the deploy config is orphaned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orphaned: Option<bool>,
 }
 
 /// DeployConfig spec fields represent the desired state for a deployment
@@ -76,11 +45,10 @@ pub struct DeployConfigSpecFields {
     pub kind: String,
 
     /// Repository information
-    pub artifact: RepositoryBranch,
+    pub artifact: Option<RepositoryBranch>,
 
-    /// Autodeploy flag
-    #[serde(default)]
-    pub autodeploy: bool,
+    /// Repository information
+    pub config: Repository,
 
     /// Array of Kubernetes resource manifests
     #[serde(default)] // FIXME: Should this be (default)?
@@ -122,43 +90,28 @@ pub struct DeployConfigSpec {
 pub type DeployConfig = TestDeployConfig;
 
 impl DeployConfig {
-    /// Get the current autodeploy state, falling back to the spec's autodeploy if not set in status
-    pub fn current_autodeploy(&self) -> bool {
+    pub fn autodeploy(&self) -> bool {
         self.status
             .as_ref()
             .and_then(|s| s.autodeploy)
-            .unwrap_or(self.spec.spec.autodeploy)
+            .unwrap_or(false)
     }
 
-    pub fn wanted_sha(&self) -> Option<&str> {
-        self.status
-            .as_ref()
-            .and_then(|s| s.artifact.as_ref().and_then(|a| a.wanted_sha.as_deref()))
-    }
-
-    pub fn latest_sha(&self) -> Option<&str> {
-        self.status
-            .as_ref()
-            .and_then(|s| s.artifact.as_ref().and_then(|a| a.latest_sha.as_deref()))
-    }
-
-    pub fn current_sha(&self) -> Option<&str> {
-        self.status
-            .as_ref()
-            .and_then(|s| s.artifact.as_ref().and_then(|a| a.current_sha.as_deref()))
-    }
-
-    pub fn current_branch(&self) -> Option<&str> {
-        self.status
-            .as_ref()
-            .and_then(|s| s.artifact.as_ref().and_then(|a| a.branch.as_deref()))
-    }
-
-    pub fn tracking_branch(&self) -> &str {
-        self.status
-            .as_ref()
-            .and_then(|s| s.artifact.as_ref().and_then(|a| a.branch.as_deref()))
-            .unwrap_or(&self.spec.spec.artifact.branch)
+    pub fn deployment_state(&self) -> DeploymentState {
+        if let Some(config) = self.status.as_ref().and_then(|s| s.config.as_ref()) {
+            if let Some(artifact) = self.status.as_ref().and_then(|s| s.artifact.as_ref()) {
+                DeploymentState::DeployedWithArtifact {
+                    artifact: artifact.clone(),
+                    config: config.clone(),
+                }
+            } else {
+                DeploymentState::DeployedOnlyConfig {
+                    config: config.clone(),
+                }
+            }
+        } else {
+            DeploymentState::Undeployed
+        }
     }
 
     /// Returns the owner reference to be applied to child resources
@@ -174,21 +127,6 @@ impl DeployConfig {
         }
     }
 
-    /// Get the owner of the artifact repository
-    pub fn artifact_owner(&self) -> &str {
-        &self.spec.spec.artifact.owner
-    }
-
-    /// Get the name of the artifact repository
-    pub fn artifact_repo(&self) -> &str {
-        &self.spec.spec.artifact.repo
-    }
-
-    /// Get the default branch from spec
-    pub fn default_branch(&self) -> &str {
-        &self.spec.spec.artifact.branch
-    }
-
     /// Get the team name
     pub fn team(&self) -> &str {
         &self.spec.spec.team
@@ -199,22 +137,9 @@ impl DeployConfig {
         &self.spec.spec.kind
     }
 
-    /// Check if tracking the default branch
-    pub fn is_tracking_default_branch(&self) -> bool {
-        self.tracking_branch() == self.default_branch()
-    }
-
-    /// Check if autodeploy matches spec
-    pub fn autodeploy_matches_spec(&self) -> bool {
-        self.current_autodeploy() == self.spec.spec.autodeploy
-    }
-
-    /// Get a Repository struct for the artifact
-    pub fn artifact_repository(&self) -> Repository {
-        Repository {
-            owner: self.spec.spec.artifact.owner.clone(),
-            repo: self.spec.spec.artifact.repo.clone(),
-        }
+    /// Get a RepositoryBranch struct for the artifact
+    pub fn artifact_repository(&self) -> Option<RepositoryBranch> {
+        self.spec.spec.artifact.clone()
     }
 
     /// Get fully qualified name (namespace/name)
@@ -224,25 +149,6 @@ impl DeployConfig {
             self.namespace().unwrap_or_default(),
             self.name_any()
         )
-    }
-
-    /// Check if deployment is undeployed
-    pub fn is_undeployed(&self) -> bool {
-        self.wanted_sha().is_none()
-    }
-
-    /// Check if latest and wanted are in sync
-    pub fn is_in_sync(&self) -> bool {
-        match (self.latest_sha(), self.wanted_sha()) {
-            (Some(latest), Some(wanted)) => latest == wanted,
-            (None, None) => true,
-            _ => false,
-        }
-    }
-
-    /// Get the autodeploy value from the spec (not the current status)
-    pub fn spec_autodeploy(&self) -> bool {
-        self.spec.spec.autodeploy
     }
 
     /// Get the Kubernetes resource specs

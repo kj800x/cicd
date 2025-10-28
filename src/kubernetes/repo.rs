@@ -45,3 +45,25 @@ pub struct RepositoryBranch {
     /// Default Git branch to track
     pub branch: String,
 }
+
+/// Represents a SHA and optionally a branch that the SHA came from.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ShaMaybeBranch {
+    #[serde(default)]
+    pub sha: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum DeploymentState {
+    Undeployed,
+    DeployedOnlyConfig {
+        config: ShaMaybeBranch,
+    },
+    DeployedWithArtifact {
+        artifact: ShaMaybeBranch,
+        config: ShaMaybeBranch,
+    },
+}

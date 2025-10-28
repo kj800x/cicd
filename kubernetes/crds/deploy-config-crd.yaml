@@ -15,6 +15,16 @@ spec:
             spec:
               type: object
               properties:
+                config:
+                  type: object
+                  required:
+                    - owner
+                    - repo
+                  properties:
+                    owner:
+                      type: string
+                    repo:
+                      type: string
                 artifact:
                   type: object
                   required:
@@ -28,8 +38,6 @@ spec:
                       type: string
                     branch:
                       type: string
-                autodeploy:
-                  type: boolean
                 team:
                   type: string
                 kind:
@@ -42,35 +50,30 @@ spec:
                     type: object
                     x-kubernetes-preserve-unknown-fields: true
               required:
-                - artifact
-                - autodeploy
+                - config
                 - team
                 - specs
                 - kind
             status:
               type: object
               properties:
+                orphaned:
+                  type: boolean
                 autodeploy:
                   type: boolean
                 artifact:
                   type: object
                   properties:
-                    currentSha:
-                      type: string
-                    wantedSha:
-                      type: string
-                    latestSha:
+                    sha:
                       type: string
                     branch:
                       type: string
                 config:
                   type: object
                   properties:
-                    owner:
-                      type: string
-                    repo:
-                      type: string
                     sha:
+                      type: string
+                    branch:
                       type: string
 
       additionalPrinterColumns:
@@ -80,20 +83,17 @@ spec:
         - name: Kind
           jsonPath: .spec.kind
           type: string
-        - name: Repo
+        - name: Artifact Repo
           jsonPath: .spec.artifact.repo
           type: string
-        - name: Default Branch
-          jsonPath: .spec.artifact.branch
+        - name: Config Repo
+          jsonPath: .spec.config.repo
           type: string
-        - name: Current Branch
-          jsonPath: .status.artifact.branch
+        - name: Config SHA
+          jsonPath: .status.config.sha
           type: string
-        - name: Current SHA
-          jsonPath: .status.artifact.currentSha
-          type: string
-        - name: Wanted SHA
-          jsonPath: .status.artifact.wantedSha
+        - name: Artifact SHA
+          jsonPath: .status.artifact.sha
           type: string
         - name: Autodeploy
           jsonPath: .status.autodeploy
@@ -101,6 +101,9 @@ spec:
         - name: Age
           jsonPath: .metadata.creationTimestamp
           type: date
+        - name: Orphaned
+          jsonPath: .status.orphaned
+          type: boolean
       subresources:
         status: {}
   scope: Namespaced

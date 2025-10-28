@@ -1,4 +1,3 @@
-use crate::kubernetes::{controller::Error, DeployConfigStatusBuilder};
 use crate::prelude::*;
 use kube::api::{DeleteParams, GroupVersionKind, TypeMeta};
 use kube::discovery::pinned_kind;
@@ -8,7 +7,6 @@ use kube::{
     core::discovery,
     Discovery,
 };
-use serde_json::Value;
 
 pub async fn apply(
     client: &Client,
@@ -151,19 +149,19 @@ pub async fn list_namespace_objects(
     Ok(out)
 }
 
-/// Update the DeployConfig status according to the given status builder
-pub async fn update_deploy_config_status(
-    client: &Client,
-    namespace: &str,
-    name: &str,
-    update: DeployConfigStatusBuilder,
-) -> Result<(), Error> {
-    let api: Api<DeployConfig> = Api::namespaced(client.clone(), namespace);
+// /// Update the DeployConfig status according to the given status builder
+// pub async fn update_deploy_config_status(
+//     client: &Client,
+//     namespace: &str,
+//     name: &str,
+//     update: DeployConfigStatusBuilder,
+// ) -> Result<(), Error> {
+//     let api: Api<DeployConfig> = Api::namespaced(client.clone(), namespace);
 
-    let status: Value = update.into();
-    let patch = Patch::Merge(&status);
-    let params = PatchParams::default();
-    api.patch_status(name, &params, &patch).await?;
+//     let status: Value = update.into();
+//     let patch = Patch::Merge(&status);
+//     let params = PatchParams::default();
+//     api.patch_status(name, &params, &patch).await?;
 
-    Ok(())
-}
+//     Ok(())
+// }
