@@ -5,7 +5,9 @@ use crate::{
 use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{params, OptionalExtension};
+use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GitBranch {
     pub id: i64,
     pub name: String,
@@ -40,6 +42,24 @@ impl GitBranch {
             repo_id: egg.repo_id,
             active: egg.active,
         }
+    }
+
+    pub fn get_by_id(
+        id: i64,
+        conn: &PooledConnection<SqliteConnectionManager>,
+    ) -> AppResult<Option<Self>> {
+        let branch = conn
+            .prepare(
+                "SELECT id, name, head_commit_sha, repo_id, active FROM git_branch WHERE id = ?1",
+            )?
+            .query_row(params![id], |row| {
+                Ok(GitBranch::from_row(row).map_err(AppError::from))
+            })
+            .optional()
+            .map_err(AppError::from)?
+            .transpose()?;
+
+        Ok(branch)
     }
 
     pub fn insert(

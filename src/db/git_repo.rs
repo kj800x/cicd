@@ -6,7 +6,9 @@ use crate::{
 use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{params, OptionalExtension};
+use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GitRepo {
     pub id: u64,
     pub owner_name: String,

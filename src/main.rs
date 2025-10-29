@@ -76,7 +76,8 @@ mod webhooks;
 // use prometheus::Registry;
 use web::{
     all_recent_builds,
-    // deploy_config, index, watchdog
+    index,
+    // deploy_config, watchdog
 };
 
 use crate::crab_ext::{initialize_octocrabs, Octocrabs};
@@ -85,7 +86,7 @@ use crate::db::migrations::migrate;
 use crate::prelude::*;
 use crate::web::{
     assets,
-    // branch_grid_fragment,
+    branch_grid_fragment,
     build_grid_fragment,
     //  deploy_configs, deploy_preview,
 };
@@ -161,8 +162,8 @@ async fn start_http(
             // .service(sync_all_deploy_configs)
             // .service(sync_repo_deploy_configs)
             // .service(deploy_configs)
-            // .service(index)
-            // .service(branch_grid_fragment)
+            .service(index)
+            .service(branch_grid_fragment)
             .service(build_grid_fragment)
             .service(all_recent_builds)
             // .service(watchdog)
