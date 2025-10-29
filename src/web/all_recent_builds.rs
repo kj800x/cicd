@@ -1,3 +1,7 @@
+use itertools::Itertools;
+
+use crate::db::functions::get_commits_since;
+use crate::db::git_repo::GitRepo;
 use crate::prelude::*;
 use crate::web::{build_status_helpers, formatting, header};
 
@@ -16,20 +20,20 @@ pub fn render_build_grid_fragment(pool: &Pool<SqliteConnectionManager>) -> Marku
     let mut builds = Vec::new();
 
     if let Ok(commits) = commits_result {
-        for commit_with_repo in commits {
-            let parent_shas =
-                get_commit_parents(&commit_with_repo.commit.sha, &conn).unwrap_or_default();
-            let branches =
-                get_branches_for_commit(&commit_with_repo.commit.sha, &conn).unwrap_or_default();
+        for commit in commits {
+            // FIXME:
+            #[allow(clippy::expect_used)]
+            let repo = GitRepo::get_by_id(&commit.repo_id, &conn)
+                .expect("Expect")
+                .expect("Expect");
 
-            builds.push((
-                commit_with_repo.commit,
-                commit_with_repo.repo,
-                branches,
-                parent_shas,
-            ));
+            let parent_commits = commit.get_parents(&conn).unwrap_or_default();
+            let branches = commit.get_branches(&conn).unwrap_or_default();
+            let build_status = commit.get_build_status(&conn).unwrap_or_default();
+
+            builds.push((commit, repo, branches, build_status, parent_commits));
         }
-    }
+    };
 
     html! {
         @if builds.is_empty() {
@@ -39,10 +43,10 @@ pub fn render_build_grid_fragment(pool: &Pool<SqliteConnectionManager>) -> Marku
             }
         } @else {
             div class="build-grid" {
-                @for (commit, repo, branches, _) in builds {
-                    div class=(format!("build-card {}", build_status_helpers::build_card_status_class(&commit.build_status))) {
+                @for (commit, repo, branches, build_status, __parent_commits) in builds {
+                    div class=(format!("build-card {}", build_status_helpers::build_card_status_class(&build_status.clone().into()))) {
                         div class="build-header" {
-                            div class=(format!("status-indicator {}", build_status_helpers::build_status_class(&commit.build_status))) {}
+                            div class=(format!("status-indicator {}", build_status_helpers::build_status_class(&build_status.clone().into()))) {}
                             div class="build-info" {
                                 div class="repo-name" { (format!("{}/{}", repo.owner_name, repo.name)) }
                                 div class="branch-name" {
@@ -66,11 +70,10 @@ pub fn render_build_grid_fragment(pool: &Pool<SqliteConnectionManager>) -> Marku
                         div class="build-footer" {
                             div class="sha" { (formatting::format_short_sha(&commit.sha)) }
                             div class="links" {
-                                a href=(format!("https://github.com/{}/{}/commit/{}",
-                                                repo.owner_name, repo.name, commit.sha))
+                                a href=(format!("https://github.com/{}/{}/commit/{}", repo.owner_name, repo.name, commit.sha))
                                     target="_blank" { "View code" }
 
-                                @if let Some(url) = &commit.build_url {
+                                @if let Some(url) = &build_status.map(|x| x.url) {
                                     a href=(url) target="_blank" { "Build logs" }
                                 }
                             }

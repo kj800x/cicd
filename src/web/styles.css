@@ -607,19 +607,12 @@ header {
 
 
 .recent-builds-page {
-
   .build-grid {
     display: grid;
     grid-template-columns: 1fr;
     grid-gap: 16px;
     max-width: 1200px;
     margin: 0 auto;
-  }
-
-  @media (min-width: 768px) {
-    .build-grid {
-      grid-template-columns: repeat(auto-fill, minmax(500px, 1fr));
-    }
   }
 
   .build-card {

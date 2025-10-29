@@ -1,5 +1,7 @@
 use crate::{
-    db::git_commit_parent::GitCommitParent,
+    db::{
+        git_branch::GitBranch, git_commit_build::GitCommitBuild, git_commit_parent::GitCommitParent,
+    },
     error::{AppError, AppResult},
 };
 use r2d2::PooledConnection;
@@ -62,6 +64,55 @@ impl GitCommit {
           .optional().map_err(AppError::from)?.transpose()?;
 
         Ok(commit)
+    }
+
+    pub fn get_parents(
+        &self,
+        conn: &PooledConnection<SqliteConnectionManager>,
+    ) -> AppResult<Vec<GitCommit>> {
+        let parent_commits: Vec<GitCommit> = conn
+            .prepare(
+                r#"
+                    SELECT gc.id, gc.sha, gc.repo_id, gc.message, gc.author, gc.committer, gc.timestamp
+                    FROM git_commit_parent gcp
+                    JOIN git_commit gc ON gc.sha = gcp.parent_sha
+                    WHERE gcp.commit_id = ?1
+                    AND gc.repo_id = ?2
+                    ORDER BY gcp.rowid
+                "#,
+            )?
+            .query_and_then(params![self.id, self.repo_id], GitCommit::from_row)?
+            .collect::<AppResult<Vec<GitCommit>>>()?;
+
+        Ok(parent_commits)
+    }
+
+    pub fn get_branches(
+        &self,
+        conn: &PooledConnection<SqliteConnectionManager>,
+    ) -> AppResult<Vec<GitBranch>> {
+        let branches: Vec<GitBranch> = conn
+            .prepare(
+                r#"
+                    SELECT gb.id, gb.name, gb.head_commit_sha, gb.repo_id, gb.active
+                    FROM git_commit_branch gcb
+                    JOIN git_branch gb ON gb.id = gcb.branch_id
+                    WHERE gcb.commit_id = ?1
+                    AND gb.active = TRUE
+                    ORDER BY gcb.rowid
+                "#,
+            )?
+            .query_and_then(params![self.id], GitBranch::from_row)?
+            .collect::<AppResult<Vec<GitBranch>>>()?;
+
+        Ok(branches)
+    }
+
+    pub fn get_build_status(
+        &self,
+        conn: &PooledConnection<SqliteConnectionManager>,
+    ) -> AppResult<Option<GitCommitBuild>> {
+        GitCommitBuild::get_by_commit_id(&self.id, &self.repo_id, conn)
     }
 
     pub fn upsert(

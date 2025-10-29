@@ -4,6 +4,7 @@ pub mod autodeploy_state;
 pub mod deploy_config;
 pub mod deploy_config_version;
 pub mod deploy_event;
+pub mod functions;
 pub mod git_branch;
 pub mod git_commit;
 pub mod git_commit_branch;

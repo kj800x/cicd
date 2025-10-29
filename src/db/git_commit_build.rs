@@ -1,8 +1,9 @@
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 
+#[derive(Debug, Clone)]
 pub struct GitCommitBuild {
     pub repo_id: u64,
     pub commit_id: i64,
@@ -20,6 +21,20 @@ impl GitCommitBuild {
             status: row.get(3)?,
             url: row.get(4)?,
         })
+    }
+
+    pub fn get_by_commit_id(
+        commit_id: &i64,
+        repo_id: &u64,
+        conn: &PooledConnection<SqliteConnectionManager>,
+    ) -> AppResult<Option<GitCommitBuild>> {
+        let build = conn.prepare("SELECT repo_id, commit_id, check_name, status, url FROM git_commit_build WHERE commit_id = ?1 AND repo_id = ?2")?
+          .query_row(params![commit_id, repo_id], |row| {
+            Ok(GitCommitBuild::from_row(row).map_err(AppError::from))
+          })
+          .optional().map_err(AppError::from)?.transpose()?;
+
+        Ok(build)
     }
 
     pub fn upsert(

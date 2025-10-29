@@ -76,7 +76,20 @@ impl GitRepo {
     ) -> AppResult<Option<Self>> {
         let repo = conn.prepare("SELECT id, owner_name, name, default_branch, private, language FROM git_repo WHERE owner_name = ?1 AND name = ?2")?
           .query_row(params![owner_name, name], |row| {
-            Ok(GitRepo::from_row(row).map_err(AppError::from))
+            Ok(GitRepo::from_row(row))
+          })
+          .optional().map_err(AppError::from)?.transpose()?;
+
+        Ok(repo)
+    }
+
+    pub fn get_by_id(
+        id: &u64,
+        conn: &PooledConnection<SqliteConnectionManager>,
+    ) -> AppResult<Option<Self>> {
+        let repo = conn.prepare("SELECT id, owner_name, name, default_branch, private, language FROM git_repo WHERE id = ?1")?
+          .query_row(params![id], |row| {
+            Ok(GitRepo::from_row(row))
           })
           .optional().map_err(AppError::from)?.transpose()?;
 

@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::db::git_commit_build::GitCommitBuild;
+
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub enum BuildStatus {
     None,
@@ -44,6 +46,27 @@ impl From<BuildStatus> for String {
             BuildStatus::Pending => "Pending".to_string(),
             BuildStatus::Success => "Success".to_string(),
             BuildStatus::Failure => "Failure".to_string(),
+        }
+    }
+}
+
+impl From<GitCommitBuild> for BuildStatus {
+    fn from(value: GitCommitBuild) -> Self {
+        match value.status.as_str() {
+            "None" => BuildStatus::None,
+            "Pending" => BuildStatus::Pending,
+            "Success" => BuildStatus::Success,
+            "Failure" => BuildStatus::Failure,
+            _ => BuildStatus::None,
+        }
+    }
+}
+
+impl From<Option<GitCommitBuild>> for BuildStatus {
+    fn from(value: Option<GitCommitBuild>) -> Self {
+        match value {
+            Some(build) => build.into(),
+            None => BuildStatus::None,
         }
     }
 }
