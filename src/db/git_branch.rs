@@ -1,5 +1,5 @@
 use crate::{
-    db::ExistenceResult,
+    db::{git_commit::GitCommit, ExistenceResult},
     error::{AppError, AppResult},
 };
 use r2d2::PooledConnection;
@@ -52,9 +52,7 @@ impl GitBranch {
             .prepare(
                 "SELECT id, name, head_commit_sha, repo_id, active FROM git_branch WHERE id = ?1",
             )?
-            .query_row(params![id], |row| {
-                Ok(GitBranch::from_row(row).map_err(AppError::from))
-            })
+            .query_row(params![id], |row| Ok(GitBranch::from_row(row)))
             .optional()
             .map_err(AppError::from)?
             .transpose()?;
@@ -86,7 +84,7 @@ impl GitBranch {
     ) -> AppResult<Option<Self>> {
         let branch = conn.prepare("SELECT id, name, head_commit_sha, repo_id, active FROM git_branch WHERE name = ?1 AND repo_id = ?2")?
           .query_row(params![name, repo_id], |row| {
-            Ok(GitBranch::from_row(row).map_err(AppError::from))
+            Ok(GitBranch::from_row(row))
           })
           .optional().map_err(AppError::from)?.transpose()?;
 
@@ -103,6 +101,66 @@ impl GitBranch {
         self.active = false;
 
         Ok(())
+    }
+
+    pub fn latest_build(
+        &self,
+        conn: &PooledConnection<SqliteConnectionManager>,
+    ) -> AppResult<Option<GitCommit>> {
+        let commit = GitCommit::get_by_sha(&self.head_commit_sha, self.repo_id, conn)
+            .ok()
+            .flatten();
+        Ok(commit)
+    }
+
+    pub fn latest_completed_build(
+        &self,
+        conn: &PooledConnection<SqliteConnectionManager>,
+    ) -> AppResult<Option<GitCommit>> {
+        // Get the latest completed build for this branch
+        let commit = conn
+            .prepare(
+                r#"
+                    SELECT c.id, c.sha, c.repo_id, c.message, c.author, c.committer, c.timestamp
+                    FROM git_commit c
+                    JOIN git_commit_branch cb ON c.id = cb.commit_id
+                    JOIN git_commit_build cbuild ON c.id = cbuild.commit_id
+                    WHERE cb.branch_id = ?1
+                    AND cbuild.status IN ('Success', 'Failure')
+                    ORDER BY c.timestamp DESC
+                    LIMIT 1
+                    "#,
+            )?
+            .query_row([self.id], |row| Ok(GitCommit::from_row(row)))
+            .optional()?
+            .transpose()?;
+
+        Ok(commit)
+    }
+
+    pub fn latest_successful_build(
+        &self,
+        conn: &PooledConnection<SqliteConnectionManager>,
+    ) -> AppResult<Option<GitCommit>> {
+        // Get the latest successful build for this branch
+        let commit = conn
+            .prepare(
+                r#"
+                    SELECT c.id, c.sha, c.repo_id, c.message, c.author, c.committer, c.timestamp
+                    FROM git_commit c
+                    JOIN git_commit_branch cb ON c.id = cb.commit_id
+                    JOIN git_commit_build cbuild ON c.id = cbuild.commit_id
+                    WHERE cb.branch_id = ?1
+                    AND cbuild.status = 'Success'
+                    ORDER BY c.timestamp DESC
+                    LIMIT 1
+                    "#,
+            )?
+            .query_row([self.id], |row| Ok(GitCommit::from_row(row)))
+            .optional()?
+            .transpose()?;
+
+        Ok(commit)
     }
 }
 

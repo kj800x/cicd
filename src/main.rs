@@ -76,8 +76,9 @@ mod webhooks;
 // use prometheus::Registry;
 use web::{
     all_recent_builds,
+    deploy_config,
+    // , watchdog
     index,
-    // deploy_config, watchdog
 };
 
 use crate::crab_ext::{initialize_octocrabs, Octocrabs};
@@ -85,10 +86,7 @@ use crate::db::migrations::migrate;
 // use crate::discord::setup_discord;
 use crate::prelude::*;
 use crate::web::{
-    assets,
-    branch_grid_fragment,
-    build_grid_fragment,
-    //  deploy_configs, deploy_preview,
+    assets, branch_grid_fragment, build_grid_fragment, deploy_configs, deploy_preview,
 };
 use crate::webhooks::config_sync::ConfigSyncHandler;
 use crate::webhooks::database::DatabaseHandler;
@@ -135,8 +133,9 @@ async fn start_http(
 
         // Add Kubernetes client data if available
         if let Some(client) = &kube_client {
-            app = app.app_data(Data::new(client.clone()))
-            // .service(deploy_config)
+            app = app
+                .app_data(Data::new(client.clone()))
+                .service(deploy_config)
         }
 
         // Add Discord notifier to app data if available
@@ -161,13 +160,13 @@ async fn start_http(
             // .service(manual_hello)
             // .service(sync_all_deploy_configs)
             // .service(sync_repo_deploy_configs)
-            // .service(deploy_configs)
+            .service(deploy_configs)
             .service(index)
             .service(branch_grid_fragment)
             .service(build_grid_fragment)
             .service(all_recent_builds)
             // .service(watchdog)
-            // .service(deploy_preview)
+            .service(deploy_preview)
             // .service(graphql_api)
             // .service(graphiql_page)
             .service(assets())

@@ -67,3 +67,13 @@ pub enum DeploymentState {
         config: ShaMaybeBranch,
     },
 }
+
+impl DeploymentState {
+    pub fn artifact_branch(&self) -> Option<&str> {
+        match self {
+            DeploymentState::DeployedWithArtifact { artifact, .. } => artifact.branch.as_deref(),
+            DeploymentState::DeployedOnlyConfig { config, .. } => config.branch.as_deref(),
+            DeploymentState::Undeployed => None,
+        }
+    }
+}
