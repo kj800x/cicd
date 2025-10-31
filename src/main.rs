@@ -254,7 +254,7 @@ async fn main() -> std::io::Result<()> {
         std::env::var("WEBSOCKET_URL").expect("WEBSOCKET_URL must be set"),
         std::env::var("CLIENT_SECRET").expect("CLIENT_SECRET must be set"),
     );
-    webhook_manager.add_handler(LogHandler::new());
+    // webhook_manager.add_handler(LogHandler::new());
     webhook_manager.add_handler(DatabaseHandler::new(pool.clone(), octocrabs.clone()));
     webhook_manager.add_handler(ConfigSyncHandler::new(
         pool.clone(),
