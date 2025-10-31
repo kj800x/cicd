@@ -55,6 +55,8 @@ pub fn migrate(mut conn: PooledConnection<SqliteConnectionManager>) -> AppResult
               check_name TEXT NOT NULL,
               status TEXT NOT NULL,
               url TEXT NOT NULL,
+              start_time INTEGER,
+              settle_time INTEGER,
               PRIMARY KEY(repo_id, commit_id, check_name),
               FOREIGN KEY(repo_id) REFERENCES git_repo(id),
               FOREIGN KEY(commit_id) REFERENCES git_commit(id)
@@ -89,7 +91,7 @@ pub fn migrate(mut conn: PooledConnection<SqliteConnectionManager>) -> AppResult
               FOREIGN KEY(name) REFERENCES deploy_config(name)
           );
 
-          CREATE TABLE DeployEvent (
+          CREATE TABLE deploy_event (
               name TEXT NOT NULL,
               timestamp INTEGER NOT NULL,
               initiator TEXT NOT NULL,

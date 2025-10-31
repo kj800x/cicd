@@ -332,7 +332,7 @@ pub async fn deploy_preview(
 
     // FIXME: expect_used for now
     #[allow(clippy::expect_used)]
-    let selected_config = match get_deploy_config(&client, &namespace, &name)
+    let selected_config = match get_deploy_config(&client, &name)
         .await
         .expect("Failed to get deploy config")
     {

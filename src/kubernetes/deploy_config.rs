@@ -142,6 +142,11 @@ impl DeployConfig {
         self.spec.spec.artifact.clone()
     }
 
+    /// Get a Repository struct for the config
+    pub fn config_repository(&self) -> Repository {
+        self.spec.spec.config.clone()
+    }
+
     /// Get fully qualified name (namespace/name)
     pub fn qualified_name(&self) -> String {
         format!(

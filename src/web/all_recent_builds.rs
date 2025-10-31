@@ -1,5 +1,3 @@
-use itertools::Itertools;
-
 use crate::db::functions::get_commits_since;
 use crate::db::git_repo::GitRepo;
 use crate::prelude::*;

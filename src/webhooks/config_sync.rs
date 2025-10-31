@@ -17,6 +17,7 @@ use crate::{
         deploy_config::DeployConfig as DbDeployConfig, deploy_config_version::DeployConfigVersion,
         git_repo::GitRepo,
     },
+    error::{AppError, AppResult},
     kubernetes::{
         deploy_config::{
             DeployConfig, DeployConfigSpec, DeployConfigSpecFields, DeployConfigStatus,
@@ -155,14 +156,30 @@ struct GitHubDeployConfig {
     namespace: String,
 }
 
+pub async fn fetch_deploy_config_by_sha(
+    octocrabs: &Octocrabs,
+    repository: impl IRepo,
+    sha: &str,
+    config_name: &str,
+) -> AppResult<Option<DeployConfig>> {
+    let configs = fetch_deploy_configs_by_sha(octocrabs, repository, sha).await?;
+    println!("configs: {:#?}", configs);
+    let config = configs
+        .into_iter()
+        .find(|config| config.name_any() == config_name);
+    Ok(config)
+}
+
 pub async fn fetch_current_deploy_configs(
     octocrabs: &Octocrabs,
-    repository: webhooks::models::Repository,
-) -> Result<Vec<DeployConfig>, anyhow::Error> {
+    repository: impl IRepo,
+) -> AppResult<Vec<DeployConfig>> {
     let result = octocrabs.crab_for(&repository).await;
 
     let Some(crab) = result else {
-        return Err(anyhow::anyhow!("No octocrab found for this repo"));
+        return Err(AppError::NotFound(
+            "No octocrab found for this repo".to_owned(),
+        ));
     };
 
     let owner = repository.owner().to_string();
@@ -191,10 +208,29 @@ pub async fn fetch_current_deploy_configs(
         Err(_) => return Ok(vec![]),
     };
 
+    fetch_deploy_configs_by_sha(octocrabs, repository, &sha).await
+}
+
+pub async fn fetch_deploy_configs_by_sha(
+    octocrabs: &Octocrabs,
+    repository: impl IRepo,
+    sha: &str,
+) -> AppResult<Vec<DeployConfig>> {
+    let result = octocrabs.crab_for(&repository).await;
+
+    let Some(crab) = result else {
+        return Err(AppError::NotFound(
+            "No octocrab found for this repo".to_owned(),
+        ));
+    };
+
+    let owner = repository.owner().to_string();
+    let repo = repository.repo().to_string();
+
     let content = match crab
         .repos(&owner, &repo)
         .get_content()
-        .r#ref(&sha)
+        .r#ref(sha)
         .path(".deploy")
         .send()
         .await
@@ -233,7 +269,10 @@ pub async fn fetch_current_deploy_configs(
                 .send()
                 .await
             else {
-                return Err(anyhow::anyhow!("Failed to read .deploy/{}", config_name));
+                return Err(AppError::NotFound(format!(
+                    "Failed to read .deploy/{}",
+                    config_name
+                )));
             };
 
             let files = content_items.items;
@@ -248,17 +287,18 @@ pub async fn fetch_current_deploy_configs(
                     .send()
                     .await
                 else {
-                    return Err(anyhow::anyhow!(
+                    return Err(AppError::NotFound(format!(
                         "Failed to read .deploy/{}/{}",
-                        config_name,
-                        file.name
-                    ));
+                        config_name, file.name
+                    )));
                 };
 
                 let contents = content.take_items();
                 let c = &contents[0];
                 let Some(decoded_content) = c.decoded_content() else {
-                    return Err(anyhow::anyhow!("Failed to decode child file content"));
+                    return Err(AppError::Internal(
+                        "Failed to decode child file content".to_owned(),
+                    ));
                 };
                 result.push(decoded_content);
             }
@@ -275,28 +315,27 @@ pub async fn fetch_current_deploy_configs(
             .send()
             .await
         else {
-            return Err(anyhow::anyhow!(
+            return Err(AppError::NotFound(format!(
                 "Failed to read .deploy/{}.yaml",
                 config_name
-            ));
+            )));
         };
 
         let config_content = config_content.take_items();
         let c = &config_content[0];
         let Some(config_content) = c.decoded_content() else {
-            return Err(anyhow::anyhow!("Failed to decode config content"));
+            return Err(AppError::Internal(
+                "Failed to decode config content".to_owned(),
+            ));
         };
 
-        let config: GitHubDeployConfig = serde_yaml::from_str(&config_content)
-            .map_err(|e| anyhow::anyhow!("Failed to parse config as GitHubDeployConfig: {}", e))?;
+        let config: GitHubDeployConfig =
+            serde_yaml::from_str(&config_content).map_err(AppError::Yaml)?;
 
         let child_files: Vec<Value> = child_files
             .into_iter()
-            .map(|file| {
-                serde_yaml::from_str(&file)
-                    .map_err(|e| anyhow::anyhow!("Failed to parse child file as yaml: {}", e))
-            })
-            .collect::<Result<Vec<Value>, anyhow::Error>>()?;
+            .map(|file| serde_yaml::from_str(&file).map_err(AppError::Yaml))
+            .collect::<Result<Vec<Value>, AppError>>()?;
 
         let dc = DeployConfig {
             spec: DeployConfigSpec {

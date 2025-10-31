@@ -1,4 +1,5 @@
-use crate::error::AppResult;
+use crate::{error::AppResult, kubernetes::deploy_handlers::DeployAction};
+use chrono::Utc;
 use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::params;
@@ -24,20 +25,46 @@ impl DeployEvent {
         })
     }
 
-    pub fn insert(
-        event: &DeployEvent,
-        conn: &PooledConnection<SqliteConnectionManager>,
-    ) -> AppResult<Self> {
+    pub fn from_user_deploy_action(action: &DeployAction) -> AppResult<Option<Self>> {
+        match action {
+            DeployAction::Deploy {
+                name,
+                artifact,
+                config,
+            } => Ok(Some(DeployEvent {
+                name: name.clone(),
+                timestamp: Utc::now().timestamp_millis(),
+                initiator: "USER".to_string(),
+                config_sha: Some(config.sha.clone()),
+                artifact_sha: artifact.as_ref().map(|a| a.sha.clone()),
+                artifact_branch: artifact.as_ref().and_then(|a| a.branch.clone()),
+            })),
+            DeployAction::Undeploy { name } => Ok(Some(DeployEvent {
+                name: name.clone(),
+                timestamp: Utc::now().timestamp_millis(),
+                initiator: "USER".to_string(),
+                config_sha: None,
+                artifact_sha: None,
+                artifact_branch: None,
+            })),
+            DeployAction::ToggleAutodeploy { .. } => {
+                // No event
+                Ok(None)
+            }
+        }
+    }
+
+    pub fn insert(&self, conn: &PooledConnection<SqliteConnectionManager>) -> AppResult<Self> {
         conn.prepare("INSERT INTO deploy_event (name, timestamp, initiator, config_sha, artifact_sha, artifact_branch) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")?
-          .execute(params![event.name, event.timestamp, event.initiator, event.config_sha, event.artifact_sha, event.artifact_branch])?;
+          .execute(params![self.name, self.timestamp, self.initiator, self.config_sha, self.artifact_sha, self.artifact_branch])?;
 
         Ok(Self {
-            name: event.name.clone(),
-            timestamp: event.timestamp,
-            initiator: event.initiator.clone(),
-            config_sha: event.config_sha.clone(),
-            artifact_sha: event.artifact_sha.clone(),
-            artifact_branch: event.artifact_branch.clone(),
+            name: self.name.clone(),
+            timestamp: self.timestamp,
+            initiator: self.initiator.clone(),
+            config_sha: self.config_sha.clone(),
+            artifact_sha: self.artifact_sha.clone(),
+            artifact_branch: self.artifact_branch.clone(),
         })
     }
 

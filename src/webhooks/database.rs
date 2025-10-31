@@ -144,6 +144,8 @@ impl WebhookHandler for DatabaseHandler {
                 check_name: "default".to_string(), // FIXME: Why can't we get the check name? Do we have to fetch it separately?
                 status: build_status.into(),
                 url: payload.check_run.details_url.clone(),
+                start_time: Some(Utc::now().timestamp_millis() as u64),
+                settle_time: None,
             };
             GitCommitBuild::upsert(&commit_build, &conn).context("Error upserting commit build")?;
         }
@@ -185,6 +187,8 @@ impl WebhookHandler for DatabaseHandler {
                 check_name: "default".to_string(), // FIXME: Why can't we get the check name? Do we have to fetch it separately?
                 status: build_status.into(),
                 url: build_url,
+                start_time: None,
+                settle_time: Some(Utc::now().timestamp_millis() as u64),
             };
             GitCommitBuild::upsert(&commit_build, &conn).context("Error upserting commit build")?;
         }

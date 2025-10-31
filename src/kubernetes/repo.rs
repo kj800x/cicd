@@ -1,9 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub trait IRepo {
-    fn owner(&self) -> &str;
-    fn repo(&self) -> &str;
-}
+use crate::crab_ext::IRepo;
 
 impl IRepo for Repository {
     fn owner(&self) -> &str {

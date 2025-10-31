@@ -71,6 +71,13 @@ impl GitRepo {
         }
     }
 
+    pub fn get(
+        repository: impl IRepo,
+        conn: &PooledConnection<SqliteConnectionManager>,
+    ) -> AppResult<Option<Self>> {
+        Self::get_by_name(repository.owner(), repository.repo(), conn)
+    }
+
     pub fn get_by_name(
         owner_name: &str,
         name: &str,

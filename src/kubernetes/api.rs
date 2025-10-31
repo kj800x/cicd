@@ -1,3 +1,4 @@
+use crate::kubernetes::{DeployConfig, DeployConfigStatusBuilder};
 use crate::prelude::*;
 use kube::api::{DeleteParams, GroupVersionKind, TypeMeta};
 use kube::discovery::pinned_kind;
@@ -149,19 +150,41 @@ pub async fn list_namespace_objects(
     Ok(out)
 }
 
-// /// Update the DeployConfig status according to the given status builder
-// pub async fn update_deploy_config_status(
-//     client: &Client,
-//     namespace: &str,
-//     name: &str,
-//     update: DeployConfigStatusBuilder,
-// ) -> Result<(), Error> {
-//     let api: Api<DeployConfig> = Api::namespaced(client.clone(), namespace);
+pub async fn set_deploy_config_specs(
+    client: &Client,
+    namespace: &str,
+    name: &str,
+    specs: Vec<serde_json::Value>,
+) -> AppResult<()> {
+    let api: Api<DeployConfig> = Api::namespaced(client.clone(), namespace);
+    let patch = Patch::Merge(serde_json::json!({ "spec": { "specs": specs } }));
+    let params = PatchParams::default();
+    api.patch(name, &params, &patch)
+        .await
+        .map_err(|e| AppError::Kubernetes(e))?;
 
-//     let status: Value = update.into();
-//     let patch = Patch::Merge(&status);
-//     let params = PatchParams::default();
-//     api.patch_status(name, &params, &patch).await?;
+    Ok(())
+}
 
-//     Ok(())
-// }
+/// Update the DeployConfig status according to the given status builder
+pub async fn update_deploy_config_status(
+    client: &Client,
+    namespace: &str,
+    name: &str,
+    update: DeployConfigStatusBuilder,
+) -> AppResult<()> {
+    let api: Api<DeployConfig> = Api::namespaced(client.clone(), namespace);
+
+    let status: serde_json::Value = update.into();
+    let patch = Patch::Merge(&status);
+    let params = PatchParams::default();
+    api.patch_status(name, &params, &patch).await?;
+
+    Ok(())
+}
+
+pub async fn delete_deploy_config(client: &Client, namespace: &str, name: &str) -> AppResult<()> {
+    let api: Api<DeployConfig> = Api::namespaced(client.clone(), namespace);
+    api.delete(name, &DeleteParams::default()).await?;
+    Ok(())
+}

@@ -1,23 +1,16 @@
 #![allow(clippy::expect_used)]
 
+use crate::crab_ext::Octocrabs;
+use crate::db::deploy_event::DeployEvent;
 use crate::db::git_branch::GitBranch;
 use crate::db::git_commit::GitCommit;
 use crate::db::git_repo::GitRepo;
-// use crate::db::{get_latest_build, get_latest_completed_build, insert_deploy_event, DeployEvent};
-use crate::kubernetes::deploy_handlers::get_all_deploy_configs;
-use crate::kubernetes::repo::DeploymentState;
-use crate::kubernetes::{
-    DeployConfig,
-    // DeployConfigStatusBuilder
-};
+use crate::kubernetes::deploy_handlers::{get_all_deploy_configs, get_deploy_config, DeployAction};
+use crate::kubernetes::repo::{DeploymentState, ShaMaybeBranch};
+use crate::kubernetes::DeployConfig;
 use crate::prelude::*;
 use crate::web::{build_status, deploy_status, header};
 use kube::{Client, ResourceExt};
-// use kube::{
-//     api::{Api, Patch, PatchParams},
-//     client::Client,
-//     ResourceExt,
-// };
 use maud::{html, Markup, Render};
 use std::collections::HashMap;
 
@@ -135,10 +128,27 @@ impl ResolvedVersion {
             DeploymentState::DeployedWithArtifact { artifact, .. } => {
                 match artifact.branch {
                     Some(branch) => {
-                        ResolvedVersion::BranchTracked {
-                            sha: artifact.sha,
-                            branch,
-                            build_time: 0, // FIXME: Get build time
+                        let build_time: Option<u64> = || -> Option<u64> {
+                            let artifact_repository = config.artifact_repository()?;
+                            let repo = GitRepo::get(artifact_repository, conn).ok().flatten()?;
+                            let commit = GitCommit::get_by_sha(&artifact.sha, repo.id, conn)
+                                .ok()
+                                .flatten()?;
+
+                            // FIXME: This isn't build time, it's commit time
+                            Some(commit.timestamp as u64)
+
+                            // let build = commit.get_build_status(conn).ok().flatten();
+                            // Some(build.timestamp as u64)
+                        }();
+
+                        match build_time {
+                            Some(build_time) => ResolvedVersion::BranchTracked {
+                                sha: artifact.sha,
+                                branch,
+                                build_time,
+                            },
+                            None => ResolvedVersion::UnknownSha { sha: artifact.sha },
                         }
                     }
                     None => ResolvedVersion::UnknownSha { sha: artifact.sha },
@@ -187,6 +197,7 @@ impl ResolvedVersion {
                     Some(commit) => ResolvedVersion::BranchTracked {
                         sha: commit.sha,
                         branch: branch.name.clone(),
+                        // FIXME: This isn't build time, it's commit time
                         build_time: commit.timestamp as u64,
                     },
                     None => ResolvedVersion::ResolutionFailed,
@@ -826,174 +837,147 @@ pub async fn deploy_configs(
         .body(markup.into_string())
 }
 
-/// Handler for updating the wanted SHA of a DeployConfig
+/// Handler for updating a DeployConfig
 #[post("/api/deploy/{namespace}/{name}")]
 pub async fn deploy_config(
     path: web::Path<(String, String)>,
     client: Option<web::Data<Client>>,
     pool: web::Data<Pool<SqliteConnectionManager>>,
     form: web::Form<HashMap<String, String>>,
+    octocrabs: web::Data<Octocrabs>,
 ) -> impl Responder {
-    todo!();
-    // let conn = match pool.get() {
-    //     Ok(c) => c,
-    //     Err(e) => {
-    //         log::error!("Failed to get database connection: {}", e);
-    //         return HttpResponse::InternalServerError().body("Failed to connect to database");
-    //     }
-    // };
-    // let action = Action::from_query(&form);
-    // let (namespace, name) = path.into_inner();
+    let conn = match pool.get() {
+        Ok(c) => c,
+        Err(e) => {
+            log::error!("Failed to get database connection: {}", e);
+            return HttpResponse::InternalServerError().body("Failed to connect to database");
+        }
+    };
+    let action = Action::from_query(&form);
+    let (namespace, name) = path.into_inner();
 
-    // // Check if Kubernetes client is available
-    // let client = match client {
-    //     Some(client) => client,
-    //     None => {
-    //         return HttpResponse::ServiceUnavailable()
-    //             .content_type("text/html; charset=utf-8")
-    //             .body("Kubernetes client is not available. Deploy functionality is disabled.");
-    //     }
-    // };
+    // Check if Kubernetes client is available
+    let client = match client {
+        Some(client) => client,
+        None => {
+            return HttpResponse::ServiceUnavailable()
+                .content_type("text/html; charset=utf-8")
+                .body("Kubernetes client is not available. Deploy functionality is disabled.");
+        }
+    };
 
-    // // Get the DeployConfig
-    // let deploy_configs_api: Api<DeployConfig> =
-    //     Api::namespaced(client.get_ref().clone(), &namespace);
+    // Get the DeployConfig
+    let config = match get_deploy_config(&client, &name).await {
+        Ok(Some(config)) => config,
+        Ok(None) => {
+            return HttpResponse::NotFound()
+                .body(format!("DeployConfig {}/{} not found.", namespace, name));
+        }
+        Err(e) => {
+            log::error!("Failed to get DeployConfig {}/{}: {}", namespace, name, e);
+            return HttpResponse::NotFound()
+                .body(format!("DeployConfig {}/{} not found.", namespace, name));
+        }
+    };
 
-    // let config = match deploy_configs_api.get(&name).await {
-    //     Ok(config) => config,
-    //     Err(e) => {
-    //         log::error!("Failed to get DeployConfig {}/{}: {}", namespace, name, e);
-    //         return HttpResponse::NotFound()
-    //             .content_type("text/html; charset=utf-8")
-    //             .body(format!("DeployConfig {}/{} not found.", namespace, name));
-    //     }
-    // };
+    let return_url = format!(
+        "/deploy?selected={}/{}&action={}&branch={}&sha={}",
+        namespace,
+        name,
+        form.get("action").unwrap_or(&"".to_string()),
+        form.get("branch").unwrap_or(&"".to_string()),
+        form.get("sha").unwrap_or(&"".to_string())
+    );
 
-    // let return_url = format!(
-    //     "/deploy?selected={}/{}&action={}&branch={}&sha={}",
-    //     namespace,
-    //     name,
-    //     form.get("action").unwrap_or(&"".to_string()),
-    //     form.get("branch").unwrap_or(&"".to_string()),
-    //     form.get("sha").unwrap_or(&"".to_string())
-    // );
+    let resolved_version =
+        ResolvedVersion::from_action(&action, &config, &conn, BuildFilter::Successful);
 
-    // let resolved_version =
-    //     ResolvedVersion::from_action(&action, &config, &conn, BuildFilter::Successful);
+    let deploy_action = match &action {
+        Action::DeployLatest | Action::DeployBranch { .. } | Action::DeployCommit { .. } => {
+            match resolved_version {
+                ResolvedVersion::UnknownSha { sha }
+                | ResolvedVersion::TrackedSha { sha, build_time: _ } => DeployAction::Deploy {
+                    name: name.to_string(),
+                    artifact: Some(ShaMaybeBranch {
+                        sha: sha.clone(),
+                        branch: None,
+                    }),
+                    config: ShaMaybeBranch {
+                        sha: sha.clone(),
+                        branch: None,
+                    },
+                },
 
-    // let status = match &action {
-    //     Action::DeployLatest | Action::DeployBranch { .. } | Action::DeployCommit { .. } => {
-    //         match resolved_version {
-    //             ResolvedVersion::UnknownSha { sha }
-    //             | ResolvedVersion::TrackedSha { sha, build_time: _ } => {
-    //                 DeployConfigStatusBuilder::new()
-    //                     .with_artifact_wanted_sha(sha.clone())
-    //                     .with_artifact_branch("".to_string())
-    //                     .with_artifact_latest_sha("".to_string())
-    //             }
+                ResolvedVersion::BranchTracked {
+                    sha,
+                    branch,
+                    build_time: _,
+                } => DeployAction::Deploy {
+                    name: name.to_string(),
+                    artifact: Some(ShaMaybeBranch {
+                        sha: sha.clone(),
+                        branch: Some(branch.clone()),
+                    }),
+                    config: ShaMaybeBranch {
+                        sha: sha.clone(),
+                        branch: None,
+                    },
+                },
 
-    //             ResolvedVersion::BranchTracked {
-    //                 sha,
-    //                 branch,
-    //                 build_time: _,
-    //             } => DeployConfigStatusBuilder::new()
-    //                 .with_artifact_wanted_sha(sha.clone())
-    //                 .with_artifact_branch(branch.clone())
-    //                 .with_artifact_latest_sha(sha.clone()),
+                ResolvedVersion::Undeployed => DeployAction::Undeploy {
+                    name: name.to_string(),
+                },
 
-    //             ResolvedVersion::Undeployed => {
-    //                 DeployConfigStatusBuilder::new().with_artifact_wanted_sha("".to_string())
-    //             }
+                ResolvedVersion::ResolutionFailed => {
+                    return HttpResponse::BadRequest()
+                        .content_type("text/html; charset=utf-8")
+                        .body("No latest SHA available for deployment.");
+                }
+            }
+        }
 
-    //             ResolvedVersion::ResolutionFailed => {
-    //                 return HttpResponse::BadRequest()
-    //                     .content_type("text/html; charset=utf-8")
-    //                     .body("No latest SHA available for deployment.");
-    //             }
-    //         }
-    //     }
+        Action::ToggleAutodeploy => DeployAction::ToggleAutodeploy {
+            name: name.to_string(),
+        },
 
-    //     Action::ToggleAutodeploy => {
-    //         DeployConfigStatusBuilder::new().with_autodeploy(!config.current_autodeploy())
-    //     }
+        Action::Undeploy => DeployAction::Undeploy {
+            name: name.to_string(),
+        },
+    };
 
-    //     Action::Undeploy => {
-    //         DeployConfigStatusBuilder::new().with_artifact_wanted_sha("".to_string())
-    //     }
-    // };
+    match deploy_action
+        .execute(&client, &octocrabs, config.config_repository())
+        .await
+    {
+        Ok(()) => (),
+        Err(e) => {
+            log::error!("Failed to execute deploy action: {}", e);
+            return HttpResponse::InternalServerError()
+                .content_type("text/html; charset=utf-8")
+                .body("Failed to execute deploy action");
+        }
+    }
 
-    // match action {
-    //     Action::DeployLatest | Action::DeployBranch { .. } | Action::DeployCommit { .. } => {
-    //         let branch: Option<String> = match action {
-    //             Action::DeployLatest => Some(config.tracking_branch().to_string()),
-    //             Action::DeployBranch { branch } => Some(branch.clone()),
-    //             Action::DeployCommit { .. } => None,
-    //             Action::ToggleAutodeploy | Action::Undeploy => {
-    //                 panic!("unreachable")
-    //             }
-    //         };
+    let Ok(maybe_deploy_event) = DeployEvent::from_user_deploy_action(&deploy_action) else {
+        return HttpResponse::InternalServerError()
+            .content_type("text/html; charset=utf-8")
+            .body("Failed to create deploy event");
+    };
+    if let Some(deploy_event) = maybe_deploy_event {
+        match deploy_event.insert(&conn) {
+            Ok(_) => (),
+            Err(e) => {
+                log::error!("Failed to insert deploy event: {}", e);
 
-    //         let sha = status.get_artifact_wanted_sha().map(|s| s.to_string());
+                return HttpResponse::InternalServerError()
+                    .content_type("text/html; charset=utf-8")
+                    .body("Failed to insert deploy event");
+            }
+        }
+    }
 
-    //         match insert_deploy_event(
-    //             &DeployEvent {
-    //                 deploy_config: name.to_string(),
-    //                 team: config.team().to_string(),
-    //                 timestamp: Utc::now().timestamp(),
-    //                 initiator: "USER".to_string(),
-    //                 status: "SUCCESS".to_string(),
-    //                 branch,
-    //                 sha,
-    //             },
-    //             &conn,
-    //         ) {
-    //             Ok(_) => {}
-    //             Err(e) => {
-    //                 log::error!("Failed to insert deploy event: {}", e);
-    //             }
-    //         }
-    //     }
-    //     Action::Undeploy => {
-    //         if let Err(e) = insert_deploy_event(
-    //             &DeployEvent {
-    //                 deploy_config: name.to_string(),
-    //                 team: config.team().to_string(),
-    //                 timestamp: Utc::now().timestamp(),
-    //                 initiator: "USER".to_string(),
-    //                 status: "SUCCESS".to_string(),
-    //                 branch: None,
-    //                 sha: None,
-    //             },
-    //             &conn,
-    //         ) {
-    //             log::error!("Failed to insert deploy event: {}", e);
-    //         }
-    //     }
-    //     Action::ToggleAutodeploy => {
-    //         // No event
-    //     }
-    // }
-
-    // // Apply the status update
-    // let patch: Patch<&Value> = Patch::Merge(&status.into());
-    // log::debug!("Patching DeployConfig status: {:#?}", patch);
-    // let params = PatchParams::default();
-    // match deploy_configs_api
-    //     .patch_status(&name, &params, &patch)
-    //     .await
-    // {
-    //     Ok(_) => (),
-    //     Err(e) => {
-    //         log::error!("Failed to update DeployConfig status: {}", e);
-    //         return HttpResponse::InternalServerError()
-    //             .content_type("text/html; charset=utf-8")
-    //             .body(format!("Failed to update DeployConfig status: {}", e));
-    //     }
-    // };
-
-    // // Redirect back to the DeployConfig page with the selected config
-    // HttpResponse::SeeOther()
-    //     .append_header(("Location", return_url))
-    //     .finish()
-    HttpResponse::Ok().finish()
+    // Redirect back to the DeployConfig page with the selected config
+    HttpResponse::SeeOther()
+        .append_header(("Location", return_url))
+        .finish()
 }
