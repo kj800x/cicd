@@ -70,7 +70,7 @@ pub fn migrate(mut conn: PooledConnection<SqliteConnectionManager>) -> AppResult
               artifact_repo_id INTEGER,
               active BOOLEAN NOT NULL DEFAULT TRUE,
               PRIMARY KEY(name),
-              FOREIGN KEY(config_repo_id) REFERENCES git_repo(id)
+              FOREIGN KEY(config_repo_id) REFERENCES git_repo(id),
               FOREIGN KEY(artifact_repo_id) REFERENCES git_repo(id)
           );
 
