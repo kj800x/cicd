@@ -1,10 +1,10 @@
 pub mod api;
-// pub mod controller;
+pub mod controller;
 pub mod deploy_config;
 pub mod deploy_config_status_builder;
-pub mod repo;
-// pub mod spec_editing;
 pub mod deploy_handlers;
+pub mod repo;
+pub mod spec_editing;
 pub mod webhook_handlers;
 
 pub use api::{apply, delete_dynamic_object, list_namespace_objects};

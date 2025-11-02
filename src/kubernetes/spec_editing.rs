@@ -1,4 +1,4 @@
-use crate::{kubernetes::deploy_config::DEPLOY_CONFIG_KIND, prelude::DeployConfig};
+use crate::kubernetes::{deploy_config::DEPLOY_CONFIG_KIND, DeployConfig};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use kube::{api::DynamicObject, Resource, ResourceExt};
 use std::collections::BTreeMap;
@@ -57,6 +57,7 @@ impl WithVersion for DynamicObject {
             obj.meta_mut().annotations = Some(BTreeMap::new());
         }
 
+        // FIXME: Should we still be trying to set a currentSha annotation after the latest architecture changes?
         #[allow(clippy::expect_used)]
         obj.meta_mut()
             .annotations
@@ -75,42 +76,4 @@ impl WithVersion for DynamicObject {
             None
         }
     }
-}
-
-/// Ensure the labels are set on a resource
-pub fn ensure_labels<T: ResourceExt>(resource: &mut T) {
-    let labels = resource.meta_mut().labels.get_or_insert_with(BTreeMap::new);
-    labels.insert(
-        "app.kubernetes.io/managed-by".to_string(),
-        "cicd-controller".to_string(),
-    );
-}
-
-/// Ensure the owner reference is set on a resource
-pub fn ensure_owner_reference<T: ResourceExt>(resource: &mut T, dc: &DeployConfig) {
-    // Get the current owner references or create an empty vec
-    let owner_refs = resource
-        .meta_mut()
-        .owner_references
-        .get_or_insert_with(Vec::new);
-
-    // Check if owner reference for this DeployConfig already exists
-    let owner_ref_exists = owner_refs.iter().any(|ref_| {
-        ref_.kind == DEPLOY_CONFIG_KIND
-            && ref_.name == dc.name_any()
-            && ref_.api_version == "cicd.coolkev.com/v1"
-    });
-
-    // If it doesn't exist, add it
-    if !owner_ref_exists {
-        owner_refs.push(dc.child_owner_reference());
-    }
-}
-
-pub fn is_owned_by(obj: &DynamicObject, owner: &OwnerReference) -> bool {
-    let Some(owners) = &obj.metadata.owner_references else {
-        return false;
-    };
-
-    owners.iter().any(|or| or.uid == owner.uid)
 }

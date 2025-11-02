@@ -48,7 +48,7 @@ impl ConfigSyncHandler {
 #[async_trait]
 impl WebhookHandler for ConfigSyncHandler {
     async fn handle_push(&self, event: PushEvent) -> Result<(), anyhow::Error> {
-        log::info!("Received push event:\n{:#?}", event);
+        log::debug!("Received push event:\n{:#?}", event);
 
         // Push to default branch, so we need to sync the deploy configs
         if extract_branch_name(&event.r#ref) == Some(event.repository.default_branch.clone()) {
@@ -163,7 +163,7 @@ pub async fn fetch_deploy_config_by_sha(
     config_name: &str,
 ) -> AppResult<Option<DeployConfig>> {
     let configs = fetch_deploy_configs_by_sha(octocrabs, repository, sha).await?;
-    println!("configs: {:#?}", configs);
+    log::trace!("configs: {:#?}", configs);
     let config = configs
         .into_iter()
         .find(|config| config.name_any() == config_name);
@@ -265,6 +265,7 @@ pub async fn fetch_deploy_configs_by_sha(
             let Ok(content_items) = crab
                 .repos(&owner, &repo)
                 .get_content()
+                .r#ref(sha)
                 .path(format!(".deploy/{}", config_name))
                 .send()
                 .await
@@ -283,6 +284,7 @@ pub async fn fetch_deploy_configs_by_sha(
                 let Ok(mut content) = crab
                     .repos(&owner, &repo)
                     .get_content()
+                    .r#ref(sha)
                     .path(format!(".deploy/{}/{}", config_name, file.name))
                     .send()
                     .await
@@ -311,6 +313,7 @@ pub async fn fetch_deploy_configs_by_sha(
         let Ok(mut config_content) = crab
             .repos(&owner, &repo)
             .get_content()
+            .r#ref(sha)
             .path(format!(".deploy/{}.yaml", config_name))
             .send()
             .await

@@ -83,6 +83,7 @@ use web::{
 
 use crate::crab_ext::{initialize_octocrabs, Octocrabs};
 use crate::db::migrations::migrate;
+use crate::kubernetes::controller::start_controller;
 // use crate::discord::setup_discord;
 use crate::prelude::*;
 use crate::web::{
@@ -176,25 +177,25 @@ async fn start_http(
     .await
 }
 
-// async fn start_kubernetes_controller(
-//     pool: Pool<SqliteConnectionManager>,
-//     enable_k8s_controller: bool,
-//     discord_notifier: Option<DiscordNotifier>,
-// ) -> Result<(), Box<dyn std::error::Error>> {
-//     if !enable_k8s_controller {
-//         // FIXME: Hold this future open?
-//     }
+async fn start_kubernetes_controller(
+    pool: Pool<SqliteConnectionManager>,
+    enable_k8s_controller: bool,
+    // discord_notifier: Option<DiscordNotifier>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !enable_k8s_controller {
+        // FIXME: Hold this future open?
+    }
 
-//     log::info!("Starting Kubernetes controller");
+    log::info!("Starting Kubernetes controller");
 
-//     // Initialize Kubernetes client
-//     let client = kube::Client::try_default().await?;
+    // Initialize Kubernetes client
+    let client = kube::Client::try_default().await?;
 
-//     // Start the controller
-//     start_controller(client, pool, discord_notifier).await?;
+    // Start the controller
+    start_controller(client, pool /*, discord_notifier */).await?;
 
-//     Ok(())
-// }
+    Ok(())
+}
 
 #[actix_web::main]
 #[allow(clippy::expect_used)]
@@ -210,6 +211,7 @@ async fn main() -> std::io::Result<()> {
         .filter_module("cicd::discord", log::LevelFilter::Info)
         .filter_module("cicd::kubernetes", log::LevelFilter::Info)
         .filter_module("cicd::web", log::LevelFilter::Info)
+        .filter_module("cicd::kubernetes::deploy_handlers", log::LevelFilter::Debug)
         .parse_default_env()
         .init();
 
@@ -270,11 +272,12 @@ async fn main() -> std::io::Result<()> {
             octocrabs.clone(),
         )) => {},
         _ = Box::pin(webhook_manager.start()) => {},
-    //     _ = Box::pin(start_kubernetes_controller(
-    //         pool.clone(),
-    //         enable_k8s_controller,
-    //         discord_notifier,
-    //     )) => {}
+        _ = Box::pin(start_kubernetes_controller(
+            pool.clone(),
+            true,
+            //enable_k8s_controller,
+            //discord_notifier,
+        )) => {}
     };
 
     Ok(())

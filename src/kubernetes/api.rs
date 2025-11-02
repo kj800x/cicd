@@ -9,30 +9,26 @@ use kube::{
     Discovery,
 };
 
-pub async fn apply(
-    client: &Client,
-    ns: &str,
-    obj: DynamicObject,
-) -> Result<DynamicObject, anyhow::Error> {
+pub async fn apply(client: &Client, ns: &str, obj: DynamicObject) -> AppResult<DynamicObject> {
     // require name + type info
     let name = obj
         .metadata
         .name
         .clone()
-        .ok_or_else(|| anyhow::anyhow!("metadata.name required"))?;
+        .ok_or_else(|| AppError::Internal("metadata.name required".to_string()))?;
     let gvk = GroupVersionKind::try_from(
         obj.types
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("missing types on DynamicObject"))?,
+            .ok_or_else(|| AppError::Internal("missing types on DynamicObject".to_string()))?,
     )
-    .map_err(|e| anyhow::anyhow!("failed parsing GVK: {}", e))?;
+    .map_err(|e| AppError::Internal(format!("failed parsing GVK: {}", e)))?;
 
     log::debug!("Applying {}/{}", ns, name);
 
     // resolve ApiResource and scope
     let (ar, caps) = pinned_kind(client, &gvk)
         .await
-        .map_err(|e| anyhow::anyhow!("GVK {gvk:?} not found via discovery: {}", e))?;
+        .map_err(|e| AppError::Internal(format!("GVK {gvk:?} not found via discovery: {}", e)))?;
 
     let api: Api<DynamicObject> = match caps.scope {
         discovery::Scope::Namespaced => Api::namespaced_with(client.clone(), ns, &ar),
@@ -41,16 +37,16 @@ pub async fn apply(
 
     // SSA upsert
     let pp = PatchParams::apply("cicd-controller").force(); // drop .force() if you prefer conflicts to surface
-    api.patch(&name, &pp, &Patch::Apply(obj))
+    let obj = api
+        .patch(&name, &pp, &Patch::Apply(obj))
         .await
-        .map_err(|e| anyhow::anyhow!("failed to apply object: {}", e))
+        .map_err(|e| AppError::Kubernetes(e))?;
+
+    Ok(obj)
 }
 
 /// Delete a DynamicObject
-pub async fn delete_dynamic_object(
-    client: Client,
-    obj: &DynamicObject,
-) -> Result<(), anyhow::Error> {
+pub async fn delete_dynamic_object(client: Client, obj: &DynamicObject) -> AppResult<()> {
     log::debug!(
         "Deleting {}/{}",
         obj.namespace().unwrap_or_else(|| "default".to_string()),
@@ -62,16 +58,17 @@ pub async fn delete_dynamic_object(
     let gvk = GroupVersionKind::try_from(
         obj.types
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("missing types"))?,
+            .ok_or_else(|| AppError::Internal("missing types".to_string()))?,
     )
-    .map_err(|e| anyhow::anyhow!("failed to parse GVK: {}", e))?;
+    .map_err(|e| AppError::Internal(format!("failed parsing GVK: {}", e)))?;
 
     let (ar, caps) = pinned_kind(&client, &gvk).await?;
 
     let api: Api<DynamicObject> = match caps.scope {
         discovery::Scope::Namespaced => {
-            let ns = ns
-                .ok_or_else(|| anyhow::anyhow!("namespaced resource missing metadata.namespace"))?;
+            let ns = ns.ok_or_else(|| {
+                AppError::Internal("namespaced resource missing metadata.namespace".to_string())
+            })?;
             Api::namespaced_with(client, &ns, &ar)
         }
         discovery::Scope::Cluster => Api::all_with(client, &ar),
@@ -80,15 +77,15 @@ pub async fn delete_dynamic_object(
     let result = api.delete(&name, &DeleteParams::default()).await;
     match result {
         Ok(_) => Ok(()),
-        Err(e) => Err(anyhow::anyhow!("failed to delete object: {}", e)),
+        Err(e) => Err(AppError::Internal(format!(
+            "failed to delete object: {}",
+            e
+        ))),
     }
 }
 
 /// Return all DynamicObjects in `ns`
-pub async fn list_namespace_objects(
-    client: Client,
-    ns: &str,
-) -> Result<Vec<DynamicObject>, anyhow::Error> {
+pub async fn list_namespace_objects(client: Client, ns: &str) -> AppResult<Vec<DynamicObject>> {
     let disc = Discovery::new(client.clone()).run().await?;
     let mut out = Vec::new();
 
@@ -161,7 +158,7 @@ pub async fn set_deploy_config_specs(
     let params = PatchParams::default();
     api.patch(name, &params, &patch)
         .await
-        .map_err(|e| AppError::Kubernetes(e))?;
+        .map_err(AppError::Kubernetes)?;
 
     Ok(())
 }

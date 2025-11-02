@@ -40,10 +40,14 @@ impl DeployAction {
                 artifact,
                 config,
             } => {
+                log::debug!("Updating to config sha: {}", config.sha);
+
                 let desired_config =
                     fetch_deploy_config_by_sha(octocrabs, repository, &config.sha, name)
                         .await?
                         .ok_or(AppError::NotFound("Desired config not found".to_owned()))?;
+
+                // log::debug!("Desired config: {:#?}", desired_config);
 
                 // // FIXME: What if namespace is changed?
                 // let current_config = get_deploy_config(

@@ -1,9 +1,11 @@
+use std::collections::BTreeMap;
+
 use crate::kubernetes::{
     repo::{DeploymentState, RepositoryBranch, ShaMaybeBranch},
     Repository,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
-use kube::{CustomResource, ResourceExt};
+use kube::{api::DynamicObject, CustomResource, ResourceExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -166,5 +168,88 @@ impl DeployConfig {
         let mut hasher = Sha256::new();
         hasher.update(serde_json::to_string(&self.spec.spec).expect("Failed to serialize spec"));
         format!("{:x}", hasher.finalize())
+    }
+
+    pub fn owns(&self, obj: &DynamicObject) -> bool {
+        let Some(owners) = &obj.metadata.owner_references else {
+            return false;
+        };
+
+        #[allow(clippy::expect_used)]
+        owners
+            .iter()
+            .any(|or| or.uid == self.uid().expect("DeployConfig should have a UID"))
+    }
+
+    pub fn child_is_up_to_date(&self, obj: &DynamicObject) -> bool {
+        match self.deployment_state() {
+            DeploymentState::DeployedWithArtifact { artifact, config } => obj
+                .metadata
+                .annotations
+                .as_ref()
+                .map(|a| {
+                    a.get("artifactSha").is_some_and(|sha| sha == &artifact.sha)
+                        && a.get("configSha").is_some_and(|sha| sha == &config.sha)
+                })
+                .unwrap_or(false),
+
+            DeploymentState::DeployedOnlyConfig { config } => obj
+                .metadata
+                .annotations
+                .as_ref()
+                .map(|a| a.get("configSha").is_some_and(|sha| sha == &config.sha))
+                .unwrap_or(false),
+
+            DeploymentState::Undeployed => false,
+        }
+    }
+
+    /// Ensure the annotations are set on a child resource
+    pub fn ensure_annotations<T: ResourceExt>(&self, resource: &mut T) {
+        let annotations = resource
+            .meta_mut()
+            .annotations
+            .get_or_insert_with(BTreeMap::new);
+
+        match self.deployment_state() {
+            DeploymentState::DeployedWithArtifact { artifact, config } => {
+                annotations.insert("artifactSha".to_string(), artifact.sha);
+                annotations.insert("configSha".to_string(), config.sha);
+            }
+            DeploymentState::DeployedOnlyConfig { config } => {
+                annotations.insert("configSha".to_string(), config.sha);
+            }
+            DeploymentState::Undeployed => {}
+        }
+    }
+
+    /// Ensure the labels are set on a child resource
+    pub fn ensure_labels<T: ResourceExt>(&self, resource: &mut T) {
+        let labels = resource.meta_mut().labels.get_or_insert_with(BTreeMap::new);
+        labels.insert(
+            "app.kubernetes.io/managed-by".to_string(),
+            "cicd-controller".to_string(),
+        );
+    }
+
+    /// Ensure the owner reference is set on a child resource
+    pub fn ensure_owner_reference<T: ResourceExt>(&self, resource: &mut T) {
+        // Get the current owner references or create an empty vec
+        let owner_refs = resource
+            .meta_mut()
+            .owner_references
+            .get_or_insert_with(Vec::new);
+
+        // Check if owner reference for this DeployConfig already exists
+        let owner_ref_exists = owner_refs.iter().any(|ref_| {
+            ref_.kind == DEPLOY_CONFIG_KIND
+                && ref_.name == self.name_any()
+                && ref_.api_version == "cicd.coolkev.com/v1"
+        });
+
+        // If it doesn't exist, add it
+        if !owner_ref_exists {
+            owner_refs.push(self.child_owner_reference());
+        }
     }
 }
