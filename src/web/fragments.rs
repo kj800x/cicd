@@ -3,7 +3,7 @@
 use crate::{
     build_status::BuildStatus,
     db::{git_commit::GitCommit, git_repo::GitRepo},
-    kubernetes::{deploy_handlers::get_deploy_config, DeployConfig},
+    kubernetes::{api::get_deploy_config, DeployConfig},
     prelude::*,
     web::{render_preview_content, Action, BuildFilter, HumanTime, ResolvedVersion},
 };

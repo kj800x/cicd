@@ -185,3 +185,24 @@ pub async fn delete_deploy_config(client: &Client, namespace: &str, name: &str) 
     api.delete(name, &DeleteParams::default()).await?;
     Ok(())
 }
+
+pub async fn get_all_deploy_configs(client: &Client) -> AppResult<Vec<DeployConfig>> {
+    // Get all DeployConfigs across all namespaces
+    let deploy_configs_api: Api<DeployConfig> = Api::all(client.clone());
+    let deploy_configs = match deploy_configs_api.list(&Default::default()).await {
+        Ok(list) => list.items,
+        Err(e) => {
+            return Err(AppError::Kubernetes(e));
+        }
+    };
+
+    Ok(deploy_configs)
+}
+
+pub async fn get_deploy_config(client: &Client, name: &str) -> AppResult<Option<DeployConfig>> {
+    let deploy_configs = get_all_deploy_configs(client).await?;
+    let deploy_config = deploy_configs
+        .into_iter()
+        .find(|config| config.name_any() == name);
+    Ok(deploy_config)
+}

@@ -29,3 +29,5 @@
 - Audit and test all `DeployedOnlyConfig` situations
 - FIXME: This isn't build time, it's commit time
 - audit [allow()]
+- ensure all database modules are consistent
+- What's the best way to do imports? Should we put everything into a prelude? But some of our structs share the same name. What's the best practice in rust?
