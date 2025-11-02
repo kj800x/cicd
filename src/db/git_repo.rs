@@ -40,6 +40,7 @@ impl From<WebhookRepository> for GitRepo {
     }
 }
 
+#[allow(unused)]
 pub struct GitRepoEgg {
     pub owner_name: String,
     pub name: String,
@@ -60,6 +61,7 @@ impl GitRepo {
         })
     }
 
+    #[allow(unused)]
     pub fn from_egg(egg: &GitRepoEgg, id: u64) -> Self {
         Self {
             id,

@@ -40,7 +40,7 @@ pub async fn apply(client: &Client, ns: &str, obj: DynamicObject) -> AppResult<D
     let obj = api
         .patch(&name, &pp, &Patch::Apply(obj))
         .await
-        .map_err(|e| AppError::Kubernetes(e))?;
+        .map_err(AppError::Kubernetes)?;
 
     Ok(obj)
 }

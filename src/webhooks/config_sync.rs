@@ -19,14 +19,12 @@ use crate::{
     },
     error::{AppError, AppResult},
     kubernetes::{
-        deploy_config::{
-            DeployConfig, DeployConfigSpec, DeployConfigSpecFields, DeployConfigStatus,
-        },
+        deploy_config::{DeployConfig, DeployConfigSpec, DeployConfigSpecFields},
         repo::RepositoryBranch,
         webhook_handlers::update_deploy_configs_by_defining_repo,
         Repository,
     },
-    webhooks::{self, models::PushEvent, util::extract_branch_name, WebhookHandler},
+    webhooks::{models::PushEvent, util::extract_branch_name, WebhookHandler},
 };
 
 pub struct ConfigSyncHandler {

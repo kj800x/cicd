@@ -75,7 +75,9 @@ pub fn get_branches_with_commits(
             _language,
         ) = row?;
 
+        #[allow(clippy::expect_used)]
         let repo = GitRepo::get_by_id(&(repo_id as u64), conn)?.expect("Expect repo to be found");
+        #[allow(clippy::expect_used)]
         let branch = GitBranch::get_by_id(branch_id, conn)?.expect("Expect branch to be found");
 
         // Get commits for this branch

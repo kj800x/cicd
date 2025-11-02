@@ -1,7 +1,4 @@
-use crate::kubernetes::{deploy_config::DEPLOY_CONFIG_KIND, DeployConfig};
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
-use kube::{api::DynamicObject, Resource, ResourceExt};
-use std::collections::BTreeMap;
+use kube::api::DynamicObject;
 
 pub trait WithInterpolatedVersion {
     fn with_interpolated_version(&self, version: &str) -> Self;
@@ -9,7 +6,6 @@ pub trait WithInterpolatedVersion {
 
 pub trait WithVersion {
     fn with_version(&self, version: &str) -> Self;
-    fn get_sha(&self) -> Option<&str>;
 }
 
 impl WithInterpolatedVersion for serde_json::Value {
@@ -49,31 +45,11 @@ impl WithInterpolatedVersion for serde_json::Map<String, serde_json::Value> {
 }
 
 impl WithVersion for DynamicObject {
-    /// Sets metadata.annotations.currentSha to the given version and interpolates the data with the given version
+    /// Interpolates the data with the given version
     fn with_version(&self, version: &str) -> Self {
         let mut obj = self.clone();
 
-        if obj.meta_mut().annotations.is_none() {
-            obj.meta_mut().annotations = Some(BTreeMap::new());
-        }
-
-        // FIXME: Should we still be trying to set a currentSha annotation after the latest architecture changes?
-        #[allow(clippy::expect_used)]
-        obj.meta_mut()
-            .annotations
-            .as_mut()
-            .expect("Annotations should exist after initialization")
-            .insert("currentSha".to_owned(), version.to_owned());
-
         obj.data = obj.data.with_interpolated_version(version);
         obj
-    }
-
-    fn get_sha(&self) -> Option<&str> {
-        if let Some(annotations) = &self.meta().annotations {
-            annotations.get("currentSha").map(|s| s.as_str())
-        } else {
-            None
-        }
     }
 }

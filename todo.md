@@ -1,0 +1,31 @@
+- Orphaned feature:
+  - orphan a deploy config, and then undeploy it -> should delete when both happen
+  - undeploy a deploy config, and then orphan it -> should delete when both happen
+  - orphan a deploy config, deploy a change to it, and then undeploy it -> should delete at the very end, even with mid deploys? (or should not allow deploying an orphaned config)
+  - Alert box when viewing an orphaned config in the UI
+- UI changes
+  - show kind in dropdowns and on screen
+  - show all child resources (and their statuses?)
+  - don't group by namespace
+  - Group by team (actually hide other team resources)
+  - link to headlamp instead of kube dashboard
+  - Weirdness when deploying exact version (the deploy from-to doesn't work quite right, and also shows "latest built" in a weird place)
+  - Potential weirdness when deploying branches (can't test because branches aren't publishing right with our actions today)
+- Allow users to revert to previous successful deploys
+- Don't mark a deploy as successful unless all subresources get into a healthy state
+- If a deploy doesn't succeed in a particular amount of time, roll it back automatically?
+- Allow the user to configure the config sha separately? Show the config sha separately in the UI? Flag deploys that also include a config change (via configHash) in the UI?
+- Deploying into net new namespaces (do we set up namespaces? How do we set up namespaces?)
+- Fix all error handling, we should only be using the AppError and no more anyhow
+- Make sure that code is in the right file, and make sure that methods on structs are on the right structs (vs bare functions)
+- Deploy configs that change namespaces???
+  - Deploy configs that change spec.config or spec.artifact or spec.team
+  - Test that the currently running spec.specs are not updated when DeployConfigs are synced with master changes
+- What do we do with discord? Are those notifications even helpful?
+- Create a page to show deploy history.
+- Bring back watchdog?
+- `update_deploy_configs_by_defining_repo` needs a better way to track defining repo on DeployConfig objects
+- Audit expects and unwraps, ensure that situations where (i.e. data isn't in the database) are handled properly
+- Audit and test all `DeployedOnlyConfig` situations
+- FIXME: This isn't build time, it's commit time
+- audit [allow()]

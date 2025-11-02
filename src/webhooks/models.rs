@@ -40,6 +40,7 @@ impl From<&CommitAuthor> for String {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[allow(unused)]
 pub struct GhCommit {
     pub id: String, // sha
     pub message: String,

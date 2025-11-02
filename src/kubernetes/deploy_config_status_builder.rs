@@ -1,4 +1,4 @@
-use crate::kubernetes::{repo::ShaMaybeBranch, DeployConfigStatus};
+use crate::kubernetes::repo::ShaMaybeBranch;
 
 /// Builder for patch updates to DeployConfigStatus.
 /// Since the values are optional, we need to use Option<Option<String>> to represent them in this builder.
@@ -10,18 +10,6 @@ pub struct DeployConfigStatusBuilder {
     orphaned: Option<Option<bool>>,
     artifact: Option<Option<ShaMaybeBranch>>,
     config: Option<Option<ShaMaybeBranch>>,
-}
-
-// FIXME: We shouldn't need to do this, because you don't need the existing status to build a patch for a deploy event.
-impl From<&DeployConfigStatus> for DeployConfigStatusBuilder {
-    fn from(val: &DeployConfigStatus) -> Self {
-        Self {
-            autodeploy: Some(val.autodeploy),
-            orphaned: Some(val.orphaned),
-            artifact: Some(val.artifact.clone()),
-            config: Some(val.config.clone()),
-        }
-    }
 }
 
 impl From<DeployConfigStatusBuilder> for serde_json::Value {

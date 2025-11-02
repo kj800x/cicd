@@ -14,6 +14,7 @@ pub struct DeployEvent {
 }
 
 impl DeployEvent {
+    #[allow(unused)]
     pub fn from_row(row: &rusqlite::Row) -> AppResult<Self> {
         Ok(DeployEvent {
             name: row.get(0)?,
@@ -68,6 +69,7 @@ impl DeployEvent {
         })
     }
 
+    #[allow(unused)]
     pub fn update(&self, conn: &PooledConnection<SqliteConnectionManager>) -> AppResult<()> {
         conn.prepare("UPDATE deploy_event SET timestamp = ?2, initiator = ?3, config_sha = ?4, artifact_sha = ?5, artifact_branch = ?6 WHERE name = ?1")?
           .execute(params![self.name, self.timestamp, self.initiator, self.config_sha, self.artifact_sha, self.artifact_branch])?;

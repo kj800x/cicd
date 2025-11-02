@@ -91,7 +91,7 @@ use crate::web::{
 };
 use crate::webhooks::config_sync::ConfigSyncHandler;
 use crate::webhooks::database::DatabaseHandler;
-use crate::webhooks::log::LogHandler;
+// use crate::webhooks::log::LogHandler;
 use crate::webhooks::manager::WebhookManager;
 
 async fn start_http(

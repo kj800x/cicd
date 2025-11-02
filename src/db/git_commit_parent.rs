@@ -9,6 +9,7 @@ pub struct GitCommitParent {
 }
 
 impl GitCommitParent {
+    #[allow(unused)]
     pub fn from_row(row: &rusqlite::Row) -> AppResult<Self> {
         Ok(GitCommitParent {
             commit_id: row.get(0)?,

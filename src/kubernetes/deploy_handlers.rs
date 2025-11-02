@@ -28,6 +28,7 @@ pub enum DeployAction {
 }
 
 impl DeployAction {
+    // FIXME: BUG: Does not properly handle namespace changes
     pub async fn execute(
         &self,
         client: &Client,
@@ -46,17 +47,6 @@ impl DeployAction {
                     fetch_deploy_config_by_sha(octocrabs, repository, &config.sha, name)
                         .await?
                         .ok_or(AppError::NotFound("Desired config not found".to_owned()))?;
-
-                // log::debug!("Desired config: {:#?}", desired_config);
-
-                // // FIXME: What if namespace is changed?
-                // let current_config = get_deploy_config(
-                //     client,
-                //     &desired_config.namespace().unwrap_or_default(),
-                //     name,
-                // )
-                // .await?
-                // .ok_or(AppError::NotFound("Current config not found".to_owned()))?;
 
                 set_deploy_config_specs(
                     client,
@@ -150,7 +140,7 @@ pub async fn get_all_deploy_configs(client: &Client) -> AppResult<Vec<DeployConf
 }
 
 pub async fn get_deploy_config(client: &Client, name: &str) -> AppResult<Option<DeployConfig>> {
-    let deploy_configs = get_all_deploy_configs(&client).await?;
+    let deploy_configs = get_all_deploy_configs(client).await?;
     let deploy_config = deploy_configs
         .into_iter()
         .find(|config| config.name_any() == name);

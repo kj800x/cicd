@@ -61,7 +61,7 @@ impl GitCommit {
     ) -> AppResult<Option<Self>> {
         let commit = conn.prepare("SELECT id, sha, repo_id, message, author, committer, timestamp FROM git_commit WHERE sha = ?1 AND repo_id = ?2")?
           .query_row(params![sha, repo_id], |row| {
-            Ok(GitCommit::from_row(row).map_err(AppError::from))
+            Ok(GitCommit::from_row(row))
           })
           .optional().map_err(AppError::from)?.transpose()?;
 
@@ -133,9 +133,10 @@ impl GitCommit {
             commit.timestamp
         ])?;
 
-        Ok(Self::from_egg(commit, conn.last_insert_rowid() as i64))
+        Ok(Self::from_egg(commit, conn.last_insert_rowid()))
     }
 
+    #[allow(unused)]
     pub fn update(&self, conn: &PooledConnection<SqliteConnectionManager>) -> AppResult<()> {
         conn.prepare("UPDATE git_commit SET sha = ?2, repo_id = ?3, message = ?4, author = ?5, committer = ?6, timestamp = ?7 WHERE id = ?1")?
           .execute(params![self.id, self.sha, self.repo_id, self.message, self.author, self.committer, self.timestamp])?;

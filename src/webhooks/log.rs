@@ -1,3 +1,4 @@
+#![allow(unused)]
 use serenity::async_trait;
 
 use crate::webhooks::{

@@ -24,13 +24,14 @@ impl DeployConfig {
         })
     }
 
+    #[allow(unused)]
     pub fn get_by_name(
         name: &str,
         conn: &PooledConnection<SqliteConnectionManager>,
     ) -> AppResult<Option<Self>> {
         let deploy_config = conn.prepare("SELECT name, team, kind, config_repo_id, artifact_repo_id, active FROM deploy_config WHERE name = ?1")?
           .query_row(params![name], |row| {
-            Ok(DeployConfig::from_row(row).map_err(AppError::from))
+            Ok(DeployConfig::from_row(row))
           })
           .optional().map_err(AppError::from)?.transpose()?;
 
@@ -46,7 +47,7 @@ impl DeployConfig {
         let mut rows = stmt.query(params![config_repo_id])?;
 
         while let Some(row) = rows.next()? {
-            deploy_configs.push(DeployConfig::from_row(&row)?);
+            deploy_configs.push(DeployConfig::from_row(row)?);
         }
 
         Ok(deploy_configs)

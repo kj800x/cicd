@@ -53,7 +53,7 @@ pub struct DeployConfigSpecFields {
     pub config: Repository,
 
     /// Array of Kubernetes resource manifests
-    #[serde(default)] // FIXME: Should this be (default)?
+    #[serde(default)]
     pub specs: Vec<serde_json::Value>,
 }
 
@@ -75,12 +75,13 @@ pub struct DeployConfigSpecFields {
     status = "DeployConfigStatus",
     printcolumn = r#"{"name":"Team", "jsonPath":".spec.team", "type": "string"}"#,
     printcolumn = r#"{"name":"Kind", "jsonPath":".spec.kind", "type": "string"}"#,
-    printcolumn = r#"{"name":"Repo", "jsonPath":".spec.artifact.repo", "type":"string"}"#,
-    printcolumn = r#"{"name":"Branch", "jsonPath":".spec.artifact.branch", "type":"string"}"#,
-    printcolumn = r#"{"name":"Current SHA", "jsonPath":".status.artifact.currentSha", "type":"string"}"#,
-    printcolumn = r#"{"name":"Latest SHA", "jsonPath":".status.artifact.latestSha", "type":"string"}"#,
-    printcolumn = r#"{"name":"Wanted SHA", "jsonPath":".status.artifact.wantedSha", "type":"string"}"#,
-    printcolumn = r#"{"name":"Autodeploy", "jsonPath":".spec.autodeploy", "type":"boolean"}"#
+    printcolumn = r#"{"name":"Artifact Repo", "jsonPath":".spec.artifact.repo", "type":"string"}"#,
+    printcolumn = r#"{"name":"Config Repo", "jsonPath":".spec.config.repo", "type":"string"}"#,
+    printcolumn = r#"{"name":"Config SHA", "jsonPath":".status.config.sha", "type":"string"}"#,
+    printcolumn = r#"{"name":"Artifact SHA", "jsonPath":".status.artifact.sha", "type":"string"}"#,
+    printcolumn = r#"{"name":"Autodeploy", "jsonPath":".spec.autodeploy", "type":"boolean"}"#,
+    printcolumn = r#"{"name":"Age", "jsonPath":".metadata.creationTimestamp", "type":"date"}"#,
+    printcolumn = r#"{"name":"Orphaned", "jsonPath":".status.orphaned", "type":"boolean"}"#
 )]
 pub struct DeployConfigSpec {
     /// Repository information and resource spec
@@ -147,15 +148,6 @@ impl DeployConfig {
     /// Get a Repository struct for the config
     pub fn config_repository(&self) -> Repository {
         self.spec.spec.config.clone()
-    }
-
-    /// Get fully qualified name (namespace/name)
-    pub fn qualified_name(&self) -> String {
-        format!(
-            "{}/{}",
-            self.namespace().unwrap_or_default(),
-            self.name_any()
-        )
     }
 
     /// Get the Kubernetes resource specs

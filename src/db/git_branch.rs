@@ -67,7 +67,7 @@ impl GitBranch {
         conn.prepare("INSERT INTO git_branch (name, head_commit_sha, repo_id, active) VALUES (?1, ?2, ?3, ?4)")?
           .execute(params![branch.name, branch.head_commit_sha, branch.repo_id, branch.active])?;
 
-        Ok(Self::from_egg(branch, conn.last_insert_rowid() as i64))
+        Ok(Self::from_egg(branch, conn.last_insert_rowid()))
     }
 
     pub fn update(&self, conn: &PooledConnection<SqliteConnectionManager>) -> AppResult<()> {

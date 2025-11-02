@@ -179,7 +179,7 @@ impl ResolvedVersion {
                 let deployment_state = config.deployment_state();
                 let branch_name = deployment_state.artifact_branch().unwrap_or("master");
 
-                let branch = GitBranch::get_by_name(&branch_name, repo.id, conn)
+                let branch = GitBranch::get_by_name(branch_name, repo.id, conn)
                     .ok()
                     .flatten();
 
@@ -204,9 +204,7 @@ impl ResolvedVersion {
                 }
             }
             Action::DeployBranch { branch } => {
-                let branch = GitBranch::get_by_name(&branch, repo.id, conn)
-                    .ok()
-                    .flatten();
+                let branch = GitBranch::get_by_name(branch, repo.id, conn).ok().flatten();
 
                 let Some(branch) = branch else {
                     return ResolvedVersion::ResolutionFailed;
@@ -228,7 +226,7 @@ impl ResolvedVersion {
                 }
             }
             Action::DeployCommit { sha } => {
-                let commit = GitCommit::get_by_sha(&sha, repo.id, conn).ok().flatten();
+                let commit = GitCommit::get_by_sha(sha, repo.id, conn).ok().flatten();
 
                 match commit {
                     Some(commit) => ResolvedVersion::TrackedSha {
@@ -397,8 +395,7 @@ fn generate_status_header(config: &DeployConfig, owner: &str, repo: &str) -> Mar
     let current_branch = config
         .status
         .clone()
-        .map(|s| s.artifact.as_ref().and_then(|a| a.branch.clone()))
-        .flatten();
+        .and_then(|s| s.artifact.as_ref().and_then(|a| a.branch.clone()));
 
     html! {
         div class="status-header" {

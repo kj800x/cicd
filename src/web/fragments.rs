@@ -7,13 +7,10 @@ use crate::{
     prelude::*,
     web::{render_preview_content, Action, BuildFilter, HumanTime, ResolvedVersion},
 };
-use k8s_openapi::api::apps::v1::Deployment;
-use k8s_openapi::api::core::v1::Pod;
-use kube::{Api, Client, ResourceExt};
+use kube::Client;
 use maud::{html, Markup};
-use std::time::{SystemTime, UNIX_EPOCH};
 
-pub async fn deploy_status(selected_config: &DeployConfig) -> Vec<Markup> {
+pub async fn deploy_status(__selected_config: &DeployConfig) -> Vec<Markup> {
     // // Initialize Kubernetes client
     // let client = match Client::try_default().await {
     //     Ok(client) => client,
@@ -25,7 +22,7 @@ pub async fn deploy_status(selected_config: &DeployConfig) -> Vec<Markup> {
     // let namespace = selected_config.namespace().unwrap_or_default();
     // let name = selected_config.name_any();
 
-    let mut alerts = Vec::new();
+    // let mut alerts = Vec::new();
 
     // if selected_config.wanted_sha() != selected_config.current_sha() {
     //     let markup = html! {
@@ -208,7 +205,9 @@ pub async fn deploy_status(selected_config: &DeployConfig) -> Vec<Markup> {
     //     }
     // }
 
-    alerts
+    // alerts
+
+    vec![]
 }
 
 pub async fn build_status(
@@ -221,7 +220,7 @@ pub async fn build_status(
         .expect("Failed to get artifact repository");
     let owner = artifact_repository.owner;
     let repo = artifact_repository.repo;
-    let repo = GitRepo::get_by_name(&owner, &repo, &conn).ok().flatten();
+    let repo = GitRepo::get_by_name(&owner, &repo, conn).ok().flatten();
     let Some(repo) = repo else {
         return vec![];
     };

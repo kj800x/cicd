@@ -1,3 +1,4 @@
+#![allow(unused)]
 use crate::error::AppResult;
 use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;

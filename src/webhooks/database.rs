@@ -12,10 +12,10 @@ use crate::{
         git_branch::{GitBranch, GitBranchEgg},
         git_commit::{GitCommit, GitCommitEgg},
         git_commit_build::GitCommitBuild,
-        git_repo::{GitRepo, GitRepoEgg},
+        git_repo::GitRepo,
     },
     webhooks::{
-        models::{CheckRunEvent, CheckSuiteEvent, DeleteEvent, GhCommit, PushEvent},
+        models::{CheckRunEvent, CheckSuiteEvent, DeleteEvent, PushEvent},
         util::extract_branch_name,
         WebhookHandler,
     },
