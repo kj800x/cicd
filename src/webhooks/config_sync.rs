@@ -114,7 +114,6 @@ impl WebhookHandler for ConfigSyncHandler {
                 DbDeployConfig::mark_inactive(deleted_deploy_config_name, &conn)?;
             }
 
-            // FIXME: Also sync with kubernetes
             update_deploy_configs_by_defining_repo(
                 &self.client,
                 &deploy_configs,
@@ -362,15 +361,6 @@ pub async fn fetch_deploy_configs_by_sha(
             },
             status: None,
         };
-
-        // // FIXME: Should this be setting status here?
-        // // I think no, lets see if everything works with this commented out.
-        // dc.status = Some(DeployConfigStatus {
-        //     config: None,
-        //     artifact: None,
-        //     autodeploy: None,
-        //     orphaned: None,
-        // });
 
         final_deploy_configs.push(dc);
     }

@@ -11,10 +11,8 @@ use kube::{
     client::Client,
 };
 
-// MARK: - update_deploy_configs_by_defining_repo
-
 // Goals: sync spec.config, spec.artifact, spec.team, spec.kind, status.orphaned (always false here)
-// NONGOALS: spec.specs (since that is updated ONLY by deploy events)
+// NON-GOALS: spec.specs (since that is updated ONLY by deploy events)
 // TODO: There's some other semantics here that need to be figured out, but lets get this online again first.
 async fn update_deploy_config(
     client: &Client,

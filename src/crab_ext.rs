@@ -1,4 +1,3 @@
-// use crate::kubernetes::repo::IRepo;
 use octocrab::Octocrab;
 
 pub trait IRepo {

@@ -29,13 +29,6 @@ pub fn stylesheet_link() -> Markup {
     }
 }
 
-/*
-Fragment markup:
-
-<div class="build-status-container" hx-get="/fragments/build-status/home-sensors/manual-deploy-config?action=deploy" hx-trigger="load, every 2s"><div class="alert alert-danger"><div class="alert-header">New builds failed</div><div class="alert-content">The following commit failed to build:branch-test:<span><a class="git-ref" href="https://github.com/kj800x/test-repo/tree/ec75d9ddd8dccdcb780e385bd0145f343d862f70">ec75d9d</a></span><commit class="timestamp">Committed at <time datetime="2025-04-07T05:15:48+00:00">April 07 at 01:15 AM ET</time></commit><a href="https://github.com/kj800x/test-repo/commit/ec75d9ddd8dccdcb780e385bd0145f343d862f70/checks">Build log</a><pre class="commit-message">break the build</pre></div></div></div>
-
-*/
-
 /// Common scripts for all pages
 pub fn scripts() -> Markup {
     html! {

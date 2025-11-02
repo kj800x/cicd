@@ -124,9 +124,9 @@ impl GitBranch {
                     SELECT c.id, c.sha, c.repo_id, c.message, c.author, c.committer, c.timestamp
                     FROM git_commit c
                     JOIN git_commit_branch cb ON c.id = cb.commit_id
-                    JOIN git_commit_build cbuild ON c.id = cbuild.commit_id
+                    JOIN git_commit_build cBuild ON c.id = cBuild.commit_id
                     WHERE cb.branch_id = ?1
-                    AND cbuild.status IN ('Success', 'Failure')
+                    AND cBuild.status IN ('Success', 'Failure')
                     ORDER BY c.timestamp DESC
                     LIMIT 1
                     "#,
@@ -149,9 +149,9 @@ impl GitBranch {
                     SELECT c.id, c.sha, c.repo_id, c.message, c.author, c.committer, c.timestamp
                     FROM git_commit c
                     JOIN git_commit_branch cb ON c.id = cb.commit_id
-                    JOIN git_commit_build cbuild ON c.id = cbuild.commit_id
+                    JOIN git_commit_build cBuild ON c.id = cBuild.commit_id
                     WHERE cb.branch_id = ?1
-                    AND cbuild.status = 'Success'
+                    AND cBuild.status = 'Success'
                     ORDER BY c.timestamp DESC
                     LIMIT 1
                     "#,

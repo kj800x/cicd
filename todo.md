@@ -31,3 +31,19 @@
 - audit [allow()]
 - ensure all database modules are consistent
 - What's the best way to do imports? Should we put everything into a prelude? But some of our structs share the same name. What's the best practice in rust?
+- rename deploy_handlers.rs to deploy_action.rs?
+- kube Client instance being reinitialized all over the place? Should this just be set up once in main and tossed into context?
+- Should we set up styles and other resources to use our fancy "baked or live" handlers?
+- Clean up CSS, if that's even possible
+- "Maybe move everything below this to a separate file" - definitely
+- Can we fetch the check_name somehow?
+- Can we conditionally enable the LogHandler in a better way? Env vars?
+- AUTODEPLOY
+- DISCORD
+- GRAPHQL
+- `extract_branch_name` onto PushEvent
+- Endpoints to sync with github (sync all deploy configs, sync all repos and heads of branches)
+
+# Tests
+- Test builds of repos that don't define deploy configs
+- Test deploy configs getting removed from repos
