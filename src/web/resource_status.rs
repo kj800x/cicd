@@ -86,7 +86,6 @@ struct LiteResource {
     kind: HandledResourceKind,
     name: String,
     namespace: String,
-    uid: Option<String>,
 }
 
 impl LiteResource {
@@ -188,15 +187,10 @@ impl TryFrom<&serde_json::Value> for LiteResource {
             })
             .ok_or(AppError::Internal("namespace is required".to_string()))?;
 
-        let uid = value
-            .get("metadata")
-            .and_then(|m| m.get("uid").and_then(|n| n.as_str().map(|n| n.to_string())));
-
         Ok(Self {
             kind,
             name,
             namespace,
-            uid,
         })
     }
 }
