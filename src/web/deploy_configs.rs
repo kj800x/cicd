@@ -305,6 +305,7 @@ impl ResolvedVersion {
 struct DeployTransition {
     from: ResolvedVersion,
     to: ResolvedVersion,
+    current_config: DeployConfig,
 }
 
 impl DeployTransition {
@@ -334,7 +335,8 @@ impl DeployTransition {
         if self.from == self.to {
             if self.from.is_undeployed() {
                 html! {
-                    "Already undeployed"
+                    span { "Already undeployed"}
+                    (self.current_config.resource_status())
                 }
             } else {
                 html! {
@@ -347,6 +349,7 @@ impl DeployTransition {
                         }
                         ")"
                     }
+                    (self.current_config.resource_status())
                 }
             }
         } else {
@@ -380,6 +383,7 @@ impl DeployTransition {
                         "[compare]"
                     }
                 }
+                (self.current_config.resource_status())
             }
         }
     }
@@ -471,6 +475,7 @@ pub async fn render_preview_content(
                 conn,
                 BuildFilter::Successful,
             ),
+            current_config: selected_config.clone(),
         }
         .format(&owner, &repo),
         Action::ToggleAutodeploy => {
