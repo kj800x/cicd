@@ -10,7 +10,7 @@ use crate::kubernetes::deploy_handlers::DeployAction;
 use crate::kubernetes::repo::{DeploymentState, ShaMaybeBranch};
 use crate::kubernetes::DeployConfig;
 use crate::prelude::*;
-use crate::web::{build_status, deploy_status, header};
+use crate::web::{build_status, deploy_status, header, ResourceStatuses};
 use kube::{Client, ResourceExt};
 use maud::{html, Markup, Render};
 use std::collections::HashMap;
@@ -302,13 +302,14 @@ impl ResolvedVersion {
 }
 
 /// Represents a transition between two resolved versions
-struct DeployTransition {
+struct DeployTransition<'a> {
     from: ResolvedVersion,
     to: ResolvedVersion,
     current_config: DeployConfig,
+    client: &'a Client,
 }
 
-impl DeployTransition {
+impl<'a> DeployTransition<'a> {
     fn compare_url(&self, owner: &str, repo: &str) -> Option<String> {
         match (&self.from, &self.to) {
             (
@@ -331,12 +332,12 @@ impl DeployTransition {
     }
 
     /// Formats the transition for display
-    fn format(&self, owner: &str, repo: &str) -> Markup {
+    async fn format(&self, owner: &str, repo: &str) -> Markup {
         if self.from == self.to {
             if self.from.is_undeployed() {
                 html! {
                     span { "Already undeployed"}
-                    (self.current_config.resource_status())
+                    (self.current_config.format(self.client).await)
                 }
             } else {
                 html! {
@@ -349,7 +350,7 @@ impl DeployTransition {
                         }
                         ")"
                     }
-                    (self.current_config.resource_status())
+                    (self.current_config.format(self.client).await)
                 }
             }
         } else {
@@ -383,7 +384,7 @@ impl DeployTransition {
                         "[compare]"
                     }
                 }
-                (self.current_config.resource_status())
+                (self.current_config.format(self.client).await)
             }
         }
     }
@@ -451,6 +452,7 @@ pub async fn render_preview_content(
     selected_config: &DeployConfig,
     action: &Action,
     conn: &PooledConnection<SqliteConnectionManager>,
+    client: &Client,
 ) -> Markup {
     let owner = selected_config
         .artifact_repository()
@@ -467,17 +469,21 @@ pub async fn render_preview_content(
         Action::DeployLatest
         | Action::DeployBranch { .. }
         | Action::DeployCommit { .. }
-        | Action::Undeploy => DeployTransition {
-            from: ResolvedVersion::from_config(selected_config, conn),
-            to: ResolvedVersion::from_action(
-                action,
-                selected_config,
-                conn,
-                BuildFilter::Successful,
-            ),
-            current_config: selected_config.clone(),
+        | Action::Undeploy => {
+            DeployTransition {
+                from: ResolvedVersion::from_config(selected_config, conn),
+                to: ResolvedVersion::from_action(
+                    action,
+                    selected_config,
+                    conn,
+                    BuildFilter::Successful,
+                ),
+                current_config: selected_config.clone(),
+                client,
+            }
+            .format(&owner, &repo)
+            .await
         }
-        .format(&owner, &repo),
         Action::ToggleAutodeploy => {
             html! {
                 "Autodeploy "
@@ -524,6 +530,7 @@ async fn generate_preview(
     selected_config: &DeployConfig,
     action: &Action,
     conn: &PooledConnection<SqliteConnectionManager>,
+    client: &Client,
 ) -> Markup {
     let owner = selected_config
         .artifact_repository()
@@ -543,7 +550,7 @@ async fn generate_preview(
                 (generate_status_header(selected_config, &owner, &repo))
 
                 div.preview-content-poll-wrapper hx-get=(format!("/fragments/deploy-preview/{}/{}?{}", selected_config.namespace().unwrap_or("default".to_string()), selected_config.name_any(), action.as_params())) hx-trigger="load, every 2s" hx-swap="morph:innerHTML" {
-                    (render_preview_content(selected_config, action, conn).await)
+                    (render_preview_content(selected_config, action, conn, client).await)
                 }
             }
         }
@@ -825,7 +832,7 @@ pub async fn deploy_configs(
                                             (format!("{}/{}", selected_config.namespace().unwrap_or_default(), selected_config.name_any()))
                                         }
                                     }
-                                    (generate_preview(selected_config, &action, &conn).await)
+                                    (generate_preview(selected_config, &action, &conn, &client).await)
                                 }
                             }
                         }

@@ -344,7 +344,7 @@ pub async fn deploy_preview(
     };
 
     let action = Action::from_query(&action_params);
-    let markup = render_preview_content(&selected_config, &action, &conn).await;
+    let markup = render_preview_content(&selected_config, &action, &conn, &client).await;
 
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")

@@ -84,8 +84,17 @@ pub async fn delete_dynamic_object(client: Client, obj: &DynamicObject) -> AppRe
     }
 }
 
+pub enum ListMode {
+    All,
+    Owned,
+}
+
 /// Return all DynamicObjects in `ns`
-pub async fn list_namespace_objects(client: Client, ns: &str) -> AppResult<Vec<DynamicObject>> {
+pub async fn list_namespace_objects(
+    client: Client,
+    ns: &str,
+    mode: ListMode,
+) -> AppResult<Vec<DynamicObject>> {
     let disc = Discovery::new(client.clone()).run().await?;
     let mut out = Vec::new();
 
@@ -104,9 +113,12 @@ pub async fn list_namespace_objects(client: Client, ns: &str) -> AppResult<Vec<D
 
             // Paginate to avoid truncation on large lists
             // only what *we* manage
-            let mut lp = ListParams::default()
-                .labels("app.kubernetes.io/managed-by=cicd-controller")
-                .limit(500);
+            let mut lp = match mode {
+                ListMode::All => ListParams::default().limit(500),
+                ListMode::Owned => ListParams::default()
+                    .labels("app.kubernetes.io/managed-by=cicd-controller")
+                    .limit(500),
+            };
             let mut continue_token: Option<String> = None;
 
             loop {
@@ -145,6 +157,65 @@ pub async fn list_namespace_objects(client: Client, ns: &str) -> AppResult<Vec<D
     }
 
     Ok(out)
+}
+
+pub async fn get_dynamic_object(
+    client: &Client,
+    ns: &str,
+    name: &str,
+    gvk: GroupVersionKind,
+) -> AppResult<DynamicObject> {
+    // resolve ApiResource and scope
+    let (ar, caps) = pinned_kind(client, &gvk)
+        .await
+        .map_err(|e| AppError::Internal(format!("GVK {gvk:?} not found via discovery: {}", e)))?;
+
+    let api: Api<DynamicObject> = match caps.scope {
+        discovery::Scope::Namespaced => Api::namespaced_with(client.clone(), ns, &ar),
+        discovery::Scope::Cluster => Api::all_with(client.clone(), &ar),
+    };
+
+    let obj = api.get(name).await?;
+    Ok(obj)
+}
+
+pub async fn list_children(client: &Client, obj: &DynamicObject) -> AppResult<Vec<DynamicObject>> {
+    let Some(obj_uid) = &obj.metadata.uid else {
+        return Ok(vec![]);
+    };
+
+    let namespaced_objs = list_namespace_objects(
+        client.clone(),
+        &obj.namespace().unwrap_or_else(|| "default".to_string()),
+        ListMode::All,
+    )
+    .await?;
+
+    // log::info!(
+    //     "Got {} objects in namespace {}",
+    //     namespaced_objs.len(),
+    //     obj.namespace().unwrap_or_else(|| "default".to_string())
+    // );
+
+    // log::info!("Found namespaced objs {:#?}", namespaced_objs);
+
+    let children: Vec<DynamicObject> = namespaced_objs
+        .into_iter()
+        .filter(|o| {
+            o.metadata
+                .owner_references
+                .as_ref()
+                .unwrap_or(&Vec::new())
+                .iter()
+                .any(|or| or.uid == *obj_uid)
+        })
+        .collect();
+
+    // log::info!("Found children {:#?}", children);
+
+    // panic!("Stopping here");
+
+    Ok(children)
 }
 
 pub async fn set_deploy_config_specs(
