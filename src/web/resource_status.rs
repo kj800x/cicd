@@ -4,12 +4,18 @@ use std::{
 };
 
 use futures_util::future::BoxFuture;
+use k8s_openapi::api::{
+    apps::v1::{Deployment, ReplicaSet},
+    core::v1::Pod,
+};
 use maud::{html, Markup};
 
 use kube::{
     api::{DynamicObject, GroupVersionKind},
     Client,
 };
+use serde::de::DeserializeOwned;
+use serde_json::Value;
 use serenity::FutureExt;
 
 use crate::{
@@ -19,6 +25,14 @@ use crate::{
         DeployConfig,
     },
 };
+
+fn from_dynamic_object<T: DeserializeOwned>(obj: &DynamicObject) -> Result<T, AppError> {
+    let value: Value = serde_json::to_value(obj)
+        .map_err(|e| AppError::Internal(format!("Failed to serialize DynamicObject: {}", e)))?;
+    serde_json::from_value(value)
+        .map_err(|e| AppError::Internal(format!("Failed to deserialize DynamicObject: {}", e)))
+        .map_err(|e| AppError::Internal(format!("Failed to deserialize DynamicObject: {}", e)))
+}
 
 #[derive(Clone)]
 enum HandledResourceKind {
@@ -81,6 +95,54 @@ impl TryInto<GroupVersionKind> for &HandledResourceKind {
     }
 }
 
+impl HandledResourceKind {
+    #[allow(clippy::expect_used)]
+    pub async fn format_status(&self, obj: &DynamicObject) -> Markup {
+        match self {
+            HandledResourceKind::Deployment => {
+                let deployment = from_dynamic_object::<Deployment>(obj)
+                    .expect("Failed to deserialize Deployment");
+
+                deployment
+                    .status
+                    .as_ref()
+                    .map(|status| {
+                        html! {
+                            span.m-left-2 {
+                                "("
+                                (status.ready_replicas.unwrap_or(0))
+                                " / "
+                                (deployment.spec.as_ref().map(|spec| spec.replicas.unwrap_or(0)).unwrap_or(0))
+                                ")"
+                            }
+                        }
+                    })
+                    .unwrap_or_else(|| html! { "" })
+            }
+            HandledResourceKind::ReplicaSet => html! { "" },
+            HandledResourceKind::Pod => {
+                let pod = from_dynamic_object::<Pod>(obj).expect("Failed to deserialize Pod");
+
+                pod.status
+                    .as_ref()
+                    .map(|status| {
+                        html! {
+                            span.m-left-2 {
+                                "("
+                                (status.phase.clone().unwrap_or("Unknown".to_string()))
+                                ")"
+                            }
+                        }
+                    })
+                    .unwrap_or_else(|| html! { "" })
+            }
+            HandledResourceKind::Ingress => html! { "" },
+            HandledResourceKind::Other(_) => html! { "" },
+            HandledResourceKind::Service => html! { "" },
+        }
+    }
+}
+
 #[derive(Clone)]
 struct LiteResource {
     kind: HandledResourceKind,
@@ -124,12 +186,29 @@ impl LiteResource {
             .collect()
     }
 
-    fn format_self(&self) -> Markup {
+    async fn format_self_status(&self, client: &Client) -> Markup {
+        let gvk: GroupVersionKind = match (&self.kind).try_into() {
+            Ok(gvk) => gvk,
+            Err(_) => return html! {},
+        };
+
+        let obj = match get_dynamic_object(client, &self.namespace, &self.name, gvk).await {
+            Ok(obj) => obj,
+            Err(_) => return html! {},
+        };
+
+        self.kind.format_status(&obj).await
+    }
+
+    async fn format_self(&self, client: &Client) -> Markup {
+        let status = self.format_self_status(client).await;
+
         html! {
             span {
                 b { (self.kind) }
                 ": "
                 (self.name)
+                (status)
             }
         }
     }
@@ -155,7 +234,7 @@ impl LiteResource {
     async fn format(&self, client: &Client) -> Markup {
         html! {
             li {
-                (self.format_self())
+                (self.format_self(client).await)
                 (self.format_children(client).await)
             }
         }

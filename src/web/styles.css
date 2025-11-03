@@ -30,6 +30,10 @@ body {
   line-height: 1.5;
 }
 
+.m-left-2 {
+  margin-left: 8px;
+}
+
 .content {
   padding: 24px;
 }
