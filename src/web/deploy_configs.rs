@@ -337,7 +337,7 @@ impl<'a> DeployTransition<'a> {
             if self.from.is_undeployed() {
                 html! {
                     span { "Already undeployed"}
-                    (self.current_config.format(self.client).await)
+                    (self.current_config.format_resources(self.client).await)
                 }
             } else {
                 html! {
@@ -350,7 +350,7 @@ impl<'a> DeployTransition<'a> {
                         }
                         ")"
                     }
-                    (self.current_config.format(self.client).await)
+                    (self.current_config.format_resources(self.client).await)
                 }
             }
         } else {
@@ -384,7 +384,7 @@ impl<'a> DeployTransition<'a> {
                         "[compare]"
                     }
                 }
-                (self.current_config.format(self.client).await)
+                (self.current_config.format_resources(self.client).await)
             }
         }
     }

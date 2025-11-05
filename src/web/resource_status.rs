@@ -3,27 +3,19 @@ use std::{
     str::FromStr,
 };
 
-use futures_util::future::BoxFuture;
-use k8s_openapi::api::{
-    apps::v1::{Deployment, ReplicaSet},
-    core::v1::Pod,
-};
+use k8s_openapi::api::{apps::v1::Deployment, core::v1::Pod};
 use maud::{html, Markup};
 
 use kube::{
     api::{DynamicObject, GroupVersionKind},
-    Client,
+    Client, ResourceExt,
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use serenity::FutureExt;
 
 use crate::{
     error::{format_error_chain, AppError},
-    kubernetes::{
-        api::{get_dynamic_object, list_children},
-        DeployConfig,
-    },
+    kubernetes::{api::ListMode, list_namespace_objects, DeployConfig},
 };
 
 fn from_dynamic_object<T: DeserializeOwned>(obj: &DynamicObject) -> Result<T, AppError> {
@@ -31,7 +23,25 @@ fn from_dynamic_object<T: DeserializeOwned>(obj: &DynamicObject) -> Result<T, Ap
         .map_err(|e| AppError::Internal(format!("Failed to serialize DynamicObject: {}", e)))?;
     serde_json::from_value(value)
         .map_err(|e| AppError::Internal(format!("Failed to deserialize DynamicObject: {}", e)))
-        .map_err(|e| AppError::Internal(format!("Failed to deserialize DynamicObject: {}", e)))
+}
+
+fn list_children(obj: &DynamicObject, namespaced_objs: &[DynamicObject]) -> Vec<DynamicObject> {
+    let Some(obj_uid) = &obj.metadata.uid else {
+        return vec![];
+    };
+
+    namespaced_objs
+        .iter()
+        .filter(|o| {
+            o.metadata
+                .owner_references
+                .as_ref()
+                .unwrap_or(&Vec::new())
+                .iter()
+                .any(|or| or.uid == *obj_uid)
+        })
+        .cloned()
+        .collect()
 }
 
 #[derive(Clone)]
@@ -97,7 +107,7 @@ impl TryInto<GroupVersionKind> for &HandledResourceKind {
 
 impl HandledResourceKind {
     #[allow(clippy::expect_used)]
-    pub async fn format_status(&self, obj: &DynamicObject) -> Markup {
+    pub fn format_status(&self, obj: &DynamicObject) -> Markup {
         match self {
             HandledResourceKind::Deployment => {
                 let deployment = from_dynamic_object::<Deployment>(obj)
@@ -151,57 +161,44 @@ struct LiteResource {
 }
 
 impl LiteResource {
-    async fn children(&self, client: &Client) -> Vec<LiteResource> {
-        // Use the kube client to fetch the children (via owner_references) treating this as a DynamicObject.
-        // Take the children and try them into LiteResource. (assume we implement TryFrom<DynamicObject> for LiteResource)
-        let gvk: GroupVersionKind = match (&self.kind).try_into() {
-            Ok(gvk) => gvk,
-            Err(_) => return vec![],
+    fn children(&self, namespaced_objs: &[DynamicObject]) -> Vec<LiteResource> {
+        // Find this object in the prefetched list
+        let obj = namespaced_objs.iter().find(|o| {
+            o.name_any() == self.name
+                && o.namespace().as_deref() == Some(&self.namespace)
+                && o.types.as_ref().map(|t| t.kind.as_str()) == Some(&self.kind.to_string())
+        });
+
+        let Some(obj) = obj else {
+            return vec![];
         };
 
-        // log::info!(
-        //     "Getting children of {}: {}/{}",
-        //     self.kind,
-        //     self.namespace,
-        //     self.name
-        // );
-
-        let obj = match get_dynamic_object(client, &self.namespace, &self.name, gvk).await {
-            Ok(obj) => obj,
-            Err(_) => return vec![],
-        };
-
-        // log::info!("Got object {:#?}", obj);
-
-        let children = match list_children(client, &obj).await {
-            Ok(children) => children,
-            Err(_) => return vec![],
-        };
-
-        // log::info!("Got children of {:#?}", children);
+        // Get children from prefetched list
+        let children = list_children(obj, namespaced_objs);
 
         children
-            .into_iter()
-            .flat_map(|o| LiteResource::try_from(&o).ok())
+            .iter()
+            .flat_map(|o| LiteResource::try_from(o).ok())
             .collect()
     }
 
-    async fn format_self_status(&self, client: &Client) -> Markup {
-        let gvk: GroupVersionKind = match (&self.kind).try_into() {
-            Ok(gvk) => gvk,
-            Err(_) => return html! {},
+    fn format_self_status(&self, namespaced_objs: &[DynamicObject]) -> Markup {
+        // Find this object in the prefetched list
+        let obj = namespaced_objs.iter().find(|o| {
+            o.name_any() == self.name
+                && o.namespace().as_deref() == Some(&self.namespace)
+                && o.types.as_ref().map(|t| t.kind.as_str()) == Some(&self.kind.to_string())
+        });
+
+        let Some(obj) = obj else {
+            return html! {};
         };
 
-        let obj = match get_dynamic_object(client, &self.namespace, &self.name, gvk).await {
-            Ok(obj) => obj,
-            Err(_) => return html! {},
-        };
-
-        self.kind.format_status(&obj).await
+        self.kind.format_status(obj)
     }
 
-    async fn format_self(&self, client: &Client) -> Markup {
-        let status = self.format_self_status(client).await;
+    fn format_self(&self, namespaced_objs: &[DynamicObject]) -> Markup {
+        let status = self.format_self_status(namespaced_objs);
 
         html! {
             span {
@@ -213,29 +210,23 @@ impl LiteResource {
         }
     }
 
-    fn format_children(&self, client: &Client) -> BoxFuture<'static, Markup> {
-        let self_clone = self.clone();
-        let client = client.clone();
+    fn format_children(&self, namespaced_objs: &[DynamicObject]) -> Markup {
+        let children = self.children(namespaced_objs);
 
-        async move {
-            let children = self_clone.children(&client).await;
-
-            html! {
-                ul {
-                    @for child in children {
-                        (child.format(&client).await)
-                    }
+        html! {
+            ul {
+                @for child in children {
+                    (child.format(namespaced_objs))
                 }
             }
         }
-        .boxed()
     }
 
-    async fn format(&self, client: &Client) -> Markup {
+    fn format(&self, namespaced_objs: &[DynamicObject]) -> Markup {
         html! {
             li {
-                (self.format_self(client).await)
-                (self.format_children(client).await)
+                (self.format_self(namespaced_objs))
+                (self.format_children(namespaced_objs))
             }
         }
     }
@@ -286,17 +277,32 @@ impl TryFrom<&DynamicObject> for LiteResource {
 }
 
 pub trait ResourceStatuses {
-    async fn format(&self, client: &Client) -> Markup;
+    async fn format_resources(&self, client: &Client) -> Markup;
 }
 
 impl ResourceStatuses for DeployConfig {
-    async fn format(&self, client: &Client) -> Markup {
+    async fn format_resources(&self, client: &Client) -> Markup {
+        let namespaced_objs = match list_namespace_objects(
+            client.clone(),
+            &self.namespace().unwrap_or_else(|| "default".to_string()),
+            ListMode::All,
+        )
+        .await
+        {
+            Ok(objs) => objs,
+            Err(e) => {
+                return html! {
+                    span { (format!("Kube spec parse error: {}", format_error_chain(&e))) }
+                };
+            }
+        };
+
         html! {
             ul {
                 @for resource in self.resource_specs() {
                     @match TryInto::<LiteResource>::try_into(resource) {
                         Ok(resource) => {
-                            (resource.format(client).await)
+                            (resource.format(&namespaced_objs))
                         }
                         Err(e) => {
                             li {
