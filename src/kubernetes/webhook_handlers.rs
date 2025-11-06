@@ -62,17 +62,14 @@ async fn create_deploy_config(client: &Client, final_config: &DeployConfig) -> R
 
     api.create(&PostParams::default(), &create_config).await?;
 
-    // FIXME: Does patch-status make sense here?
-    #[allow(clippy::expect_used)]
-    api.replace_status(
+    api.patch_status(
         &name,
-        &PostParams::default(),
-        serde_json::to_vec(&serde_json::json!({
+        &PatchParams::default(),
+        &Patch::Merge(&serde_json::json!({
             "status": {
               "orphaned": false,
             }
-        }))
-        .expect("Should be able to serialize DeployConfig status"),
+        })),
     )
     .await?;
 
@@ -96,17 +93,14 @@ async fn delete_deploy_config(
 
         log::info!("Deleted DeployConfig {}/{}", ns, name);
     } else {
-        // FIXME: Does patch-status make sense here?
-        #[allow(clippy::expect_used)]
-        api.replace_status(
+        api.patch_status(
             &name,
-            &PostParams::default(),
-            serde_json::to_vec(&serde_json::json!({
+            &PatchParams::default(),
+            &Patch::Merge(&serde_json::json!({
                 "status": {
                   "orphaned": true,
                 }
-            }))
-            .expect("Should be able to serialize DeployConfig status"),
+            })),
         )
         .await?;
 
