@@ -147,7 +147,7 @@ struct GitHubArtifactRepo {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct GitHubDeployConfig {
     #[serde(rename = "artifactRepo")]
-    artifact_repo: GitHubArtifactRepo,
+    artifact_repo: Option<GitHubArtifactRepo>,
     team: String,
     kind: String,
     namespace: String,
@@ -340,10 +340,11 @@ pub async fn fetch_deploy_configs_by_sha(
         let dc = DeployConfig {
             spec: DeployConfigSpec {
                 spec: DeployConfigSpecFields {
-                    artifact: Some(RepositoryBranch {
-                        owner: config.artifact_repo.owner.clone(),
-                        repo: config.artifact_repo.repo.clone(),
-                        branch: config.artifact_repo.branch.clone(),
+                    // FIXME: Is GitHubArtifactRepo and RepositoryBranch the exact same struct?
+                    artifact: config.artifact_repo.map(|artifact_repo| RepositoryBranch {
+                        owner: artifact_repo.owner.clone(),
+                        repo: artifact_repo.repo.clone(),
+                        branch: artifact_repo.branch.clone(),
                     }),
                     config: Repository {
                         owner: owner.clone(),
