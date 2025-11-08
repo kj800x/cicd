@@ -36,19 +36,16 @@ mod error;
 mod kubernetes;
 mod web;
 mod webhooks;
-
-use web::{all_recent_builds, deploy_config, index};
-
 use crate::crab_ext::{initialize_octocrabs, Octocrabs};
 use crate::db::migrations::migrate;
 use crate::kubernetes::controller::start_controller;
 use crate::prelude::*;
-use crate::web::{
-    assets, branch_grid_fragment, build_grid_fragment, deploy_configs, deploy_preview,
-};
+use crate::web::{branch_grid_fragment, build_grid_fragment, deploy_configs, deploy_preview};
 use crate::webhooks::config_sync::ConfigSyncHandler;
 use crate::webhooks::database::DatabaseHandler;
 use crate::webhooks::manager::WebhookManager;
+use cicd::serve_static_file;
+use web::{all_recent_builds, deploy_config, index};
 
 async fn start_http(
     registry: prometheus::Registry,
@@ -103,7 +100,10 @@ async fn start_http(
             .service(build_grid_fragment)
             .service(all_recent_builds)
             .service(deploy_preview)
-            .service(assets())
+            .service(serve_static_file!("htmx.min.js"))
+            .service(serve_static_file!("idiomorph.min.js"))
+            .service(serve_static_file!("idiomorph-ext.min.js"))
+            .service(serve_static_file!("styles.css"))
     })
     .bind(("0.0.0.0", 8080))?
     .run()

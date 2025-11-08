@@ -45,6 +45,7 @@ serenity = { version = "0.12.0", default-features = false, features = [
 ] }
 thiserror = "1.0.56"
 anyhow = "1.0.80"
+md5 = "0.7"
 
 # Kubernetes related dependencies
 kube = { version = "0.99.0", features = ["runtime", "derive"] }
