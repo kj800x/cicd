@@ -25,15 +25,15 @@ pub fn render(active_page: &str) -> Markup {
 /// Returns a link tag for the common stylesheet
 pub fn stylesheet_link() -> Markup {
     html! {
-        link rel="stylesheet" href="/assets/styles.css";
+        link rel="stylesheet" href="/res/styles.css";
     }
 }
 
 /// Common scripts for all pages
 pub fn scripts() -> Markup {
     html! {
-        script src="/assets/htmx.min.js" {}
-        script src="/assets/idiomorph.min.js" {}
-        script src="/assets/idiomorph-ext.min.js" {}
+        script src="/res/htmx.min.js" {}
+        script src="/res/idiomorph.min.js" {}
+        script src="/res/idiomorph-ext.min.js" {}
     }
 }
