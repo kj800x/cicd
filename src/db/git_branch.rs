@@ -1,6 +1,7 @@
 use crate::{
     db::{git_commit::GitCommit, ExistenceResult},
     error::{AppError, AppResult},
+    web::BuildFilter,
 };
 use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
@@ -160,6 +161,19 @@ impl GitBranch {
             .optional()?
             .transpose()?;
 
+        Ok(commit)
+    }
+
+    pub fn search_build(
+        &self,
+        conn: &PooledConnection<SqliteConnectionManager>,
+        build_filter: BuildFilter,
+    ) -> AppResult<Option<GitCommit>> {
+        let commit = match build_filter {
+            BuildFilter::Any => self.latest_build(conn).ok().flatten(),
+            BuildFilter::Completed => self.latest_completed_build(conn).ok().flatten(),
+            BuildFilter::Successful => self.latest_successful_build(conn).ok().flatten(),
+        };
         Ok(commit)
     }
 }
