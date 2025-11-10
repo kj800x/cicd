@@ -1,7 +1,6 @@
 use crate::{
     db::{git_commit::GitCommit, ExistenceResult},
     error::{AppError, AppResult},
-    web::BuildFilter,
 };
 use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
