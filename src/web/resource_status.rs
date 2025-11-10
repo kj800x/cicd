@@ -5,11 +5,13 @@ use std::{
 
 use k8s_openapi::api::{
     apps::v1::{Deployment, ReplicaSet as KReplicaSet},
+    batch::v1::Job as KJob,
     core::v1::{Pod, Service as KService},
     networking::v1::Ingress as KIngress,
 };
 use maud::{html, Markup};
 
+use chrono_tz::America::New_York;
 use kube::{
     api::{DynamicObject, GroupVersionKind},
     ResourceExt,
@@ -204,6 +206,12 @@ fn summarize_pod_status_markup(pod: &Pod) -> Option<Markup> {
     }
 
     let status = pod.status.as_ref()?;
+
+    // Completed jobs/cronjobs should be marked as Completed, not NotReady
+    if status.phase.as_deref() == Some("Succeeded") || status.reason.as_deref() == Some("Completed")
+    {
+        return Some(render_state_span("Completed", "neutral"));
+    }
 
     if let Some(r) = &status.reason {
         if r == "Evicted" {
@@ -534,6 +542,18 @@ fn summarize_ingress_status_markup(ing: &KIngress) -> Option<Markup> {
         Some(render_state_span("Ingress", "neutral"))
     }
 }
+fn summarize_job_status_markup(job: &KJob) -> Option<Markup> {
+    if let Some(ts) = job.metadata.creation_timestamp.as_ref() {
+        let ny_time = ts.0.with_timezone(&New_York);
+        let formatted = ny_time.format("%b %-e %Y, %-I:%M %p").to_string();
+        Some(render_state_span(
+            &format!("Enqueued {}", formatted),
+            "neutral",
+        ))
+    } else {
+        Some(render_state_span("Enqueued -", "warn"))
+    }
+}
 fn from_dynamic_object<T: DeserializeOwned>(obj: &DynamicObject) -> Result<T, AppError> {
     let value: Value = serde_json::to_value(obj)
         .map_err(|e| AppError::Internal(format!("Failed to serialize DynamicObject: {}", e)))?;
@@ -567,6 +587,7 @@ enum HandledResourceKind {
     Pod,
     Service,
     Ingress,
+    Job,
     Other(String),
 }
 
@@ -580,6 +601,7 @@ impl FromStr for HandledResourceKind {
             "Pod" => Ok(HandledResourceKind::Pod),
             "Service" => Ok(HandledResourceKind::Service),
             "Ingress" => Ok(HandledResourceKind::Ingress),
+            "Job" => Ok(HandledResourceKind::Job),
             s => Ok(HandledResourceKind::Other(s.to_string())),
         }
     }
@@ -593,6 +615,7 @@ impl Display for HandledResourceKind {
             HandledResourceKind::Pod => write!(f, "Pod"),
             HandledResourceKind::Service => write!(f, "Service"),
             HandledResourceKind::Ingress => write!(f, "Ingress"),
+            HandledResourceKind::Job => write!(f, "Job"),
             HandledResourceKind::Other(s) => write!(f, "{}", s),
         }
     }
@@ -614,6 +637,7 @@ impl TryInto<GroupVersionKind> for &HandledResourceKind {
             HandledResourceKind::Ingress => {
                 Ok(GroupVersionKind::gvk("networking.k8s.io", "v1", "Ingress"))
             }
+            HandledResourceKind::Job => Ok(GroupVersionKind::gvk("batch", "v1", "Job")),
             HandledResourceKind::Other(s) => {
                 Err(AppError::Internal(format!("Unknown resource kind: {}", s)))
             }
@@ -653,12 +677,16 @@ impl HandledResourceKind {
                     from_dynamic_object::<KIngress>(obj).expect("Failed to deserialize Ingress");
                 summarize_ingress_status_markup(&ing).unwrap_or_else(|| html! { "" })
             }
-            HandledResourceKind::Other(_) => html! { "" },
             HandledResourceKind::Service => {
                 let svc =
                     from_dynamic_object::<KService>(obj).expect("Failed to deserialize Service");
                 summarize_service_status_markup(&svc).unwrap_or_else(|| html! { "" })
             }
+            HandledResourceKind::Job => {
+                let job = from_dynamic_object::<KJob>(obj).expect("Failed to deserialize Job");
+                summarize_job_status_markup(&job).unwrap_or_else(|| html! { "" })
+            }
+            HandledResourceKind::Other(_) => html! { "" },
         }
     }
 }
@@ -671,6 +699,22 @@ struct LiteResource {
 }
 
 impl LiteResource {
+    fn creation_timestamp_millis(&self, namespaced_objs: &[DynamicObject]) -> Option<i64> {
+        // Find this object in the prefetched list
+        let obj = namespaced_objs.iter().find(|o| {
+            o.name_any() == self.name
+                && o.namespace().as_deref() == Some(&self.namespace)
+                && o.types.as_ref().map(|t| t.kind.as_str()) == Some(&self.kind.to_string())
+        })?;
+
+        obj.metadata
+            .creation_timestamp
+            .as_ref()
+            .map(|t| t.0.timestamp_millis())
+    }
+    fn is_job(&self) -> bool {
+        matches!(self.kind, HandledResourceKind::Job)
+    }
     fn is_scaled_to_zero_replicaset(&self, namespaced_objs: &[DynamicObject]) -> bool {
         if !matches!(self.kind, HandledResourceKind::ReplicaSet) {
             return false;
@@ -741,26 +785,44 @@ impl LiteResource {
 
     fn format_children(&self, namespaced_objs: &[DynamicObject]) -> Markup {
         let mut children = self.children(namespaced_objs);
-        // Stable sort so ReplicaSets scaled to zero appear last
-        children.sort_by_key(|c| {
-            if c.is_scaled_to_zero_replicaset(namespaced_objs) {
-                1u8
-            } else {
-                0u8
+
+        // Determine the latest Job by creation time (if any), to mute older Jobs
+        let latest_job_name: Option<String> = children
+            .iter()
+            .filter(|c| c.is_job())
+            .max_by(|a, b| {
+                let at = a.creation_timestamp_millis(namespaced_objs).unwrap_or(0);
+                let bt = b.creation_timestamp_millis(namespaced_objs).unwrap_or(0);
+                at.cmp(&bt)
+            })
+            .map(|c| c.name.clone());
+
+        // Sort newest-first, keeping ReplicaSets scaled to zero at the bottom
+        children.sort_by(|a, b| {
+            let a_zero = a.is_scaled_to_zero_replicaset(namespaced_objs);
+            let b_zero = b.is_scaled_to_zero_replicaset(namespaced_objs);
+            match (a_zero, b_zero) {
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                _ => {
+                    let at = a.creation_timestamp_millis(namespaced_objs).unwrap_or(0);
+                    let bt = b.creation_timestamp_millis(namespaced_objs).unwrap_or(0);
+                    bt.cmp(&at)
+                }
             }
         });
 
         html! {
             ul.deployable-item__child-list {
-                @for child in children {
-                    (child.format(namespaced_objs))
+                @for child in children.iter() {
+                    (child.format_with_muted(namespaced_objs, child.is_job() && Some(child.name.as_str()) != latest_job_name.as_deref()))
                 }
             }
         }
     }
 
-    fn format(&self, namespaced_objs: &[DynamicObject]) -> Markup {
-        let muted = self.is_scaled_to_zero_replicaset(namespaced_objs);
+    fn format_with_muted(&self, namespaced_objs: &[DynamicObject], muted_override: bool) -> Markup {
+        let muted = muted_override || self.is_scaled_to_zero_replicaset(namespaced_objs);
         html! {
             @if muted {
                 li.deployables-tree__item.deployables-tree__item--muted {
@@ -774,6 +836,10 @@ impl LiteResource {
                 }
             }
         }
+    }
+
+    fn format(&self, namespaced_objs: &[DynamicObject]) -> Markup {
+        self.format_with_muted(namespaced_objs, false)
     }
 }
 
