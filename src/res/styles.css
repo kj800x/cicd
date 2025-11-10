@@ -22,6 +22,88 @@
   --disabled-color: #e5e7eb;
 }
 
+/* Deploy history page */
+.deploy-history-page {
+  .content {
+    max-width: 900px;
+    margin: 0 auto;
+  }
+
+  .history-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    background: #fff;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+
+  .history-table thead {
+    background-color: var(--bg-light);
+    border-bottom: 1px solid var(--border-color);
+  }
+
+  .history-table thead th {
+    text-align: left;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--secondary-text);
+    padding: 10px 12px;
+    white-space: nowrap;
+  }
+
+  .history-table tbody td {
+    padding: 12px;
+    border-top: 1px solid var(--border-color);
+    font-size: 13px;
+    vertical-align: middle;
+  }
+
+  .history-table tbody tr:hover {
+    background-color: rgba(0, 0, 0, 0.02);
+  }
+
+  .history-table .config-name {
+    color: var(--primary-blue);
+    font-weight: 600;
+  }
+
+  .history-table .sha-cell {
+    font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace;
+    color: var(--text-color);
+  }
+
+  .history-table .initiator-cell {
+    color: var(--primary-blue);
+    font-weight: 600;
+  }
+
+  .history-table .time-cell {
+    color: var(--secondary-text);
+    white-space: nowrap;
+  }
+
+  .history-table .actions-cell {
+    text-align: right;
+    width: 1%;
+    white-space: nowrap;
+  }
+
+  .history-table .link-button {
+    background: none;
+    border: none;
+    color: var(--primary-blue);
+    font-weight: 600;
+    cursor: pointer;
+    padding: 0;
+  }
+
+  .history-table .link-button:hover {
+    text-decoration: underline;
+  }
+}
+
 /* Base Styles */
 body {
   font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -942,6 +1024,7 @@ header {
     width: 16px;
     height: 16px;
     border: 1px solid var(--border-color);
+    background-color: white;
     border-radius: 50%;
     position: relative;
     cursor: pointer;

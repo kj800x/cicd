@@ -1,17 +1,19 @@
 mod all_recent_builds;
 mod build_status_helpers;
 mod deploy_configs;
+mod deploy_history;
 mod formatting;
 mod fragments;
 mod header;
 mod index;
 mod resource_status;
+mod settings;
 pub mod team_prefs;
-mod teams;
 
 pub use all_recent_builds::*;
 pub use deploy_configs::*;
+pub use deploy_history::*;
 pub use fragments::*;
 pub use index::*;
 pub use resource_status::*;
-pub use teams::*;
+pub use settings::*;

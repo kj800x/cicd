@@ -34,8 +34,8 @@ fn render_team_row(team: &str, is_member: bool) -> Markup {
     }
 }
 
-#[get("/teams")]
-pub async fn teams_index(req: actix_web::HttpRequest) -> impl Responder {
+#[get("/settings")]
+pub async fn settings_index(req: actix_web::HttpRequest) -> impl Responder {
     // Initialize Kubernetes client
     let client = match Client::try_default().await {
         Ok(client) => client,
@@ -72,7 +72,7 @@ pub async fn teams_index(req: actix_web::HttpRequest) -> impl Responder {
             head {
                 meta charset="UTF-8";
                 meta name="viewport" content="width=device-width, initial-scale=1.0";
-                title { "Teams" }
+                title { "Settings" }
                 (header::stylesheet_link())
                 (header::scripts())
             }
@@ -80,7 +80,8 @@ pub async fn teams_index(req: actix_web::HttpRequest) -> impl Responder {
                 (header::render("teams"))
                 div class="content" {
                     header {
-                        h1 { "Teams" }
+                        h1 { "Settings" }
+                        h3 { "Team visibility" }
                         div class="subtitle" { "Choose which teams' deploy configs to show" }
                     }
 
