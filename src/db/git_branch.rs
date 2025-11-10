@@ -163,19 +163,6 @@ impl GitBranch {
 
         Ok(commit)
     }
-
-    pub fn search_build(
-        &self,
-        conn: &PooledConnection<SqliteConnectionManager>,
-        build_filter: BuildFilter,
-    ) -> AppResult<Option<GitCommit>> {
-        let commit = match build_filter {
-            BuildFilter::Any => self.latest_build(conn).ok().flatten(),
-            BuildFilter::Completed => self.latest_completed_build(conn).ok().flatten(),
-            BuildFilter::Successful => self.latest_successful_build(conn).ok().flatten(),
-        };
-        Ok(commit)
-    }
 }
 
 impl GitBranchEgg {
