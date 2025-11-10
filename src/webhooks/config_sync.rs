@@ -356,7 +356,7 @@ pub async fn fetch_deploy_configs_by_sha(
                 },
             },
             metadata: ObjectMeta {
-                name: Some(format!("{}-{}", config.team.clone(), config_name)),
+                name: Some(config_name.to_owned()),
                 namespace: Some(config.namespace),
                 ..ObjectMeta::default()
             },

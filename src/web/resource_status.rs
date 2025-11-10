@@ -118,7 +118,7 @@ impl HandledResourceKind {
                     .as_ref()
                     .map(|status| {
                         html! {
-                            span.m-left-2 {
+                            span.m-left-2.deployable-state {
                                 "("
                                 (status.ready_replicas.unwrap_or(0))
                                 " / "
@@ -137,7 +137,7 @@ impl HandledResourceKind {
                     .as_ref()
                     .map(|status| {
                         html! {
-                            span.m-left-2 {
+                            span.m-left-2.deployable-state {
                                 "("
                                 (status.phase.clone().unwrap_or("Unknown".to_string()))
                                 ")"
@@ -214,7 +214,7 @@ impl LiteResource {
         let children = self.children(namespaced_objs);
 
         html! {
-            ul {
+            ul.deployable-item__child-list {
                 @for child in children {
                     (child.format(namespaced_objs))
                 }
@@ -224,7 +224,7 @@ impl LiteResource {
 
     fn format(&self, namespaced_objs: &[DynamicObject]) -> Markup {
         html! {
-            li {
+            li.deployables-tree__item {
                 (self.format_self(namespaced_objs))
                 (self.format_children(namespaced_objs))
             }
@@ -298,14 +298,14 @@ impl ResourceStatuses for DeployConfig {
         };
 
         html! {
-            ul {
+            ul.deployable-item__child-list {
                 @for resource in self.resource_specs() {
                     @match TryInto::<LiteResource>::try_into(resource) {
                         Ok(resource) => {
                             (resource.format(&namespaced_objs))
                         }
                         Err(e) => {
-                            li {
+                            li.deployables-tree__item {
                                 (format!("Kube spec parse error: {}", format_error_chain(&e)))
                             }
                         }

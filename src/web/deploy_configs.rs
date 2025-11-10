@@ -5,15 +5,18 @@ use crate::db::deploy_event::DeployEvent;
 use crate::db::git_branch::GitBranch;
 use crate::db::git_commit::GitCommit;
 use crate::db::git_repo::GitRepo;
-use crate::kubernetes::api::{get_all_deploy_configs, get_deploy_config};
+use crate::kubernetes::api::{get_all_deploy_configs, get_deploy_config, get_namespace_uid};
 use crate::kubernetes::deploy_handlers::DeployAction;
 use crate::kubernetes::repo::{DeploymentState, ShaMaybeBranch};
 use crate::kubernetes::DeployConfig;
 use crate::prelude::*;
-use crate::web::{build_status, deploy_status, header, ResourceStatuses};
+use crate::web::{build_status, header, ResourceStatuses};
 use kube::{Client, ResourceExt};
 use maud::{html, Markup, Render};
 use std::collections::HashMap;
+
+// FIXME: Make this configurable.
+const HEADLAMP_URL: &str = "https://headlamp.home.coolkev.com";
 
 struct PreviewArrow;
 
@@ -23,7 +26,7 @@ impl Render for PreviewArrow {
     }
 }
 
-struct GitRef(String, String, String, bool);
+struct GitRef(String, String, String, bool, Option<String>);
 
 impl Render for GitRef {
     fn render(&self) -> Markup {
@@ -31,6 +34,7 @@ impl Render for GitRef {
         let repo = self.2.clone();
         let sha = self.0.clone();
         let disable_prefixing = self.3;
+        let file_path = self.4.clone();
 
         let sha_prefix = if !disable_prefixing && sha.len() >= 7 {
             &sha[..7]
@@ -40,7 +44,7 @@ impl Render for GitRef {
 
         html!(
             span {
-                a.git-ref href=(format!("https://github.com/{}/{}/tree/{}", owner, repo, sha)) {
+                a.git-ref href=(format!("https://github.com/{}/{}/tree/{}{}", owner, repo, sha, file_path.map(|path| format!("/{}", path)).unwrap_or_default())) target="_blank" {
                     (sha_prefix)
                 }
             }
@@ -259,10 +263,26 @@ impl ResolvedVersion {
     pub fn format(&self, other: Option<&ResolvedVersion>, owner: &str, repo: &str) -> Markup {
         match self {
             ResolvedVersion::UnknownSha { sha } => {
-                html!((GitRef(sha.clone(), owner.to_string(), repo.to_string(), false)))
+                html!(
+                    (GitRef(
+                        sha.clone(),
+                        owner.to_string(),
+                        repo.to_string(),
+                        false,
+                        None
+                    ))
+                )
             }
             ResolvedVersion::TrackedSha { sha, build_time: _ } => {
-                html!((GitRef(sha.clone(), owner.to_string(), repo.to_string(), false)))
+                html!(
+                    (GitRef(
+                        sha.clone(),
+                        owner.to_string(),
+                        repo.to_string(),
+                        false,
+                        None
+                    ))
+                )
             }
             ResolvedVersion::BranchTracked {
                 sha,
@@ -281,10 +301,19 @@ impl ResolvedVersion {
                             owner.to_string(),
                             repo.to_string(),
                             false,
+                            None,
                         ))
                     )
                 } else {
-                    html!((GitRef(sha.clone(), owner.to_string(), repo.to_string(), false)))
+                    html!(
+                        (GitRef(
+                            sha.clone(),
+                            owner.to_string(),
+                            repo.to_string(),
+                            false,
+                            None
+                        ))
+                    )
                 }
             }
             ResolvedVersion::Undeployed => {
@@ -302,17 +331,17 @@ impl ResolvedVersion {
 }
 
 trait FormatStates {
-    fn format_config(&self, owner: &str, repo: &str) -> Markup;
+    fn format_config(&self, owner: &str, repo: &str, config_name: &str) -> Markup;
     fn format_artifact(&self, owner: &str, repo: &str) -> Markup;
 }
 
 impl FormatStates for DeploymentState {
-    fn format_config(&self, owner: &str, repo: &str) -> Markup {
+    fn format_config(&self, owner: &str, repo: &str, config_name: &str) -> Markup {
         match self {
             DeploymentState::DeployedWithArtifact { config, .. }
             | DeploymentState::DeployedOnlyConfig { config } => {
                 html! {
-                    (GitRef(config.sha.clone(), owner.to_string(), repo.to_string(), false))
+                    (GitRef(config.sha.clone(), owner.to_string(), repo.to_string(), false, Some(format!(".deploy/{}", config_name))))
                 }
             }
             DeploymentState::Undeployed => html! { "Undeployed" },
@@ -323,7 +352,7 @@ impl FormatStates for DeploymentState {
         match self {
             DeploymentState::DeployedWithArtifact { artifact, .. } => {
                 html! {
-                    (GitRef(artifact.sha.clone(), owner.to_string(), repo.to_string(), false))
+                    (GitRef(artifact.sha.clone(), owner.to_string(), repo.to_string(), false, None))
                 }
             }
             DeploymentState::DeployedOnlyConfig { .. } => {
@@ -337,9 +366,9 @@ impl FormatStates for DeploymentState {
 }
 
 impl FormatStates for AppResult<DeploymentState> {
-    fn format_config(&self, owner: &str, repo: &str) -> Markup {
+    fn format_config(&self, owner: &str, repo: &str, config_name: &str) -> Markup {
         match self {
-            Ok(deployment_state) => deployment_state.format_config(owner, repo),
+            Ok(deployment_state) => deployment_state.format_config(owner, repo, config_name),
             Err(_) => {
                 html! {
                     span { "[resolution failed]" }
@@ -391,70 +420,75 @@ impl<'a> DeployTransition<'a> {
             match self.from.clone() {
                 DeploymentState::Undeployed => {
                     html! {
-                        span { "Already undeployed"}
-                        (self.current_config.format_resources(self.client).await)
+                        div { "Already undeployed"}
                     }
                 }
                 DeploymentState::DeployedWithArtifact { artifact, config } => {
                     html! {
-                        ul {
-                            li {
-                                "Artifact: "
-                                (GitRef(artifact.sha.clone(), owner.to_string(), repo.to_string(), false))
+                        div {
+                            .icon {
+                                span.deploy-config__icon.m-right-1 {}
                             }
-                            li {
-                                "Config: "
-                                (GitRef(config.sha.clone(), owner.to_string(), repo.to_string(), false))
-                            }
+                            (GitRef(config.sha.clone(), owner.to_string(), repo.to_string(), false, Some(format!(".deploy/{}", &self.current_config.name_any()))))
                         }
-                        (self.current_config.format_resources(self.client).await)
+                        div {
+                            .icon {
+                                i.octicon.octicon-git-commit {}
+                            }
+                            (GitRef(artifact.sha.clone(), owner.to_string(), repo.to_string(), false, None))
+                        }
                     }
                 }
                 DeploymentState::DeployedOnlyConfig { config } => {
                     html! {
-                        ul {
-                            li {
-                                "Config: "
-                                (GitRef(config.sha.clone(), owner.to_string(), repo.to_string(), false))
+                        div {
+                            .icon {
+                                span.deploy-config__icon.m-right-1 {}
                             }
+                            (GitRef(config.sha.clone(), owner.to_string(), repo.to_string(), false, Some(format!(".deploy/{}", &self.current_config.name_any()))))
                         }
-                        (self.current_config.format_resources(self.client).await)
                     }
                 }
             }
         } else {
             html! {
-                ul {
-                    li {
-                        "Config: "
-                        // FIXME: No guarantee that config repo is the artifact repo (fix this!!!)
-                        // Move repo info as well as build info into some sort of HydratedDeploymentState struct.
-                        (self.from.format_config(owner, repo))
-                        ( PreviewArrow {} )
-                        (self.to.format_config(owner, repo))
+                div {
+                    .icon {
+                        span.deploy-config__icon.m-right-1 {}
                     }
-                    li {
-                        "Artifact: "
-                        (self.from.format_artifact(owner, repo))
-                        ( PreviewArrow {} )
-                        (self.to.format_artifact(owner, repo))
+                    // FIXME: No guarantee that config repo is the artifact repo (fix this!!!)
+                    // Move repo info as well as build info into some sort of HydratedDeploymentState struct.
+                    (self.from.format_config(owner, repo, &self.current_config.name_any()))
+                    ( PreviewArrow {} )
+                    (self.to.format_config(owner, repo, &self.current_config.name_any()))
+                }
+                div {
+                    .icon {
+                        i.octicon.octicon-git-commit {}
+                    }
+                    (self.from.format_artifact(owner, repo))
+                    ( PreviewArrow {} )
+                    (self.to.format_artifact(owner, repo))
 
-                        @if let Some(compare_url) = self.compare_url(owner, repo) {
-                            " "
-                            a.git-ref href=(compare_url) {
-                                "[compare]"
-                            }
+                    @if let Some(compare_url) = self.compare_url(owner, repo) {
+                        " "
+                        a.git-ref href=(compare_url) target="_blank" {
+                            "[compare]"
                         }
                     }
                 }
-                (self.current_config.format_resources(self.client).await)
             }
         }
     }
 }
 
 /// Generate the status header showing current branch and autodeploy status
-fn generate_status_header(config: &DeployConfig, owner: &str, repo: &str) -> Markup {
+async fn generate_status_header(
+    config: &DeployConfig,
+    owner: &str,
+    repo: &str,
+    client: &Client,
+) -> Markup {
     let default_branch = config
         .artifact_repository()
         .unwrap_or_else(|| config.config_repository().with_branch("master"))
@@ -465,6 +499,11 @@ fn generate_status_header(config: &DeployConfig, owner: &str, repo: &str) -> Mar
         .status
         .clone()
         .and_then(|s| s.artifact.as_ref().and_then(|a| a.branch.clone()));
+
+    let namespace = config.namespace().unwrap_or("default".to_string());
+    let namespace_uid = get_namespace_uid(client, &namespace)
+        .await
+        .unwrap_or_default();
 
     html! {
         div class="status-header" {
@@ -478,6 +517,7 @@ fn generate_status_header(config: &DeployConfig, owner: &str, repo: &str) -> Mar
                                 owner.to_string(),
                                 repo.to_string(),
                                 true,
+                                None,
                             ))
                             @if branch != default_branch {
                                 span class="warning-icon" title=(format!("Different from default branch ({})", default_branch)) {
@@ -499,6 +539,14 @@ fn generate_status_header(config: &DeployConfig, owner: &str, repo: &str) -> Mar
                         (AutodeployStatus(true))
                     } @else {
                         (AutodeployStatus(false))
+                    }
+                }
+            }
+            div class="status-item" {
+                "Namespace: "
+                strong {
+                    a href=(format!("{}/c/main/map?group=namespace&node={}", HEADLAMP_URL, namespace_uid)) target="_blank" {
+                        (namespace)
                     }
                 }
             }
@@ -648,20 +696,18 @@ pub async fn render_preview_content(
         .repo
         .to_string();
 
+    let deploy_transition = DeployTransition {
+        from: selected_config.deployment_state(),
+        to: DeploymentState::from_action(action, selected_config, conn),
+        current_config: selected_config.clone(),
+        client,
+    };
+
     let preview_content = match action {
         Action::DeployLatest
         | Action::DeployBranch { .. }
         | Action::DeployCommit { .. }
-        | Action::Undeploy => {
-            DeployTransition {
-                from: selected_config.deployment_state(),
-                to: DeploymentState::from_action(action, selected_config, conn),
-                current_config: selected_config.clone(),
-                client,
-            }
-            .format(&owner, &repo)
-            .await
-        }
+        | Action::Undeploy => deploy_transition.format(&owner, &repo).await,
         Action::ToggleAutodeploy => {
             html! {
                 "Autodeploy "
@@ -679,24 +725,22 @@ pub async fn render_preview_content(
     };
 
     let mut alerts: Vec<Markup> = vec![];
-    // for alert in deploy_status(selected_config).await {
-    //     alerts.push(alert);
-    // }
-    // for alert in build_status(action, selected_config, conn).await {
-    //     alerts.push(alert);
-    // }
+    for alert in build_status(action, selected_config, conn).await {
+        alerts.push(alert);
+    }
 
     html! {
         @for alert in alerts {
             (alert)
         }
         div class="preview-transition" {
-            div class="preview-transition-header" {
+            div class="deployable-item__content" {
                 (selected_config.name_any())
+                .deployable-item-info {
+                    (preview_content)
+                }
             }
-            div class="preview-transition-content" {
-                (preview_content)
-            }
+            (selected_config.format_resources(client).await)
         }
     }
 }
@@ -723,7 +767,7 @@ async fn generate_preview(
     html! {
         div class="preview-container" {
             div class="preview-content" {
-                (generate_status_header(selected_config, &owner, &repo))
+                (generate_status_header(selected_config, &owner, &repo, client).await)
 
                 div.preview-content-poll-wrapper hx-get=(format!("/fragments/deploy-preview/{}/{}?{}", selected_config.namespace().unwrap_or("default".to_string()), selected_config.name_any(), action.as_params())) hx-trigger="load, every 2s" hx-swap="morph:innerHTML" {
                     (render_preview_content(selected_config, action, conn, client).await)
@@ -832,32 +876,21 @@ pub async fn deploy_configs(
     // Sort DeployConfigs by namespace and name for the dropdown
     let mut sorted_deploy_configs = deploy_configs.clone();
     sorted_deploy_configs.sort_by(|a, b| {
-        let a_ns = a.namespace().unwrap_or_default();
-        let b_ns = b.namespace().unwrap_or_default();
         let a_name = a.name_any();
         let b_name = b.name_any();
 
-        (a_ns, a_name).cmp(&(b_ns, b_name))
+        a_name.cmp(&b_name)
     });
 
     // Check if we have a selected config from query parameter
     let selected_config_key = query.get("selected");
 
     // Find the selected deploy config or use the first one as default
-    let selected_config = if let Some(selected_key) = selected_config_key {
-        // Parse the selected_key which is in the format "namespace/name"
-        let parts: Vec<&str> = selected_key.split('/').collect();
-        if parts.len() == 2 {
-            let namespace = parts[0];
-            let name = parts[1];
-
-            // Find the matching config
-            sorted_deploy_configs.iter().find(|config| {
-                config.namespace().unwrap_or_default() == namespace && config.name_any() == name
-            })
-        } else {
-            sorted_deploy_configs.first()
-        }
+    let selected_config = if let Some(name) = selected_config_key {
+        // Find the matching config
+        sorted_deploy_configs
+            .iter()
+            .find(|config| &config.name_any() == name)
     } else {
         sorted_deploy_configs.first()
     };
@@ -902,16 +935,15 @@ pub async fn deploy_configs(
                                 form action="/deploy" method="get" {
                                     select name="selected" onchange="this.form.submit()" {
                                         @for config in &sorted_deploy_configs {
-                                            @let namespace = config.namespace().unwrap_or_default();
                                             @let name = config.name_any();
                                             @let selected = if let Some(default) = selected_config {
-                                                default.namespace().unwrap_or_default() == namespace && default.name_any() == name
+                                                default.name_any() == name
                                             } else {
                                                 false
                                             };
 
-                                            option value=(format!("{}/{}", namespace, name)) selected[selected] {
-                                                (format!("{}/{}", namespace, name))
+                                            option value=(name) selected[selected] {
+                                                (name)
                                             }
                                         }
                                     }
@@ -921,7 +953,7 @@ pub async fn deploy_configs(
                                     @let deployment_state = selected_config.deployment_state();
                                     @let current_branch = deployment_state.artifact_branch();
                                     form action="/deploy" method="get" {
-                                        input type="hidden" name="selected" value=(format!("{}/{}", selected_config.namespace().unwrap_or_default(), selected_config.name_any()));
+                                        input type="hidden" name="selected" value=(selected_config.name_any());
 
                                         div class="action-radio-group" {
                                             h4 { "Action" }
@@ -1005,7 +1037,7 @@ pub async fn deploy_configs(
                                             }
                                         }
                                         strong {
-                                            (format!("{}/{}", selected_config.namespace().unwrap_or_default(), selected_config.name_any()))
+                                            (format!("{}", selected_config.name_any()))
                                         }
                                     }
                                     (generate_preview(selected_config, &action, &conn, &client).await)
@@ -1067,8 +1099,7 @@ pub async fn deploy_config(
     };
 
     let return_url = format!(
-        "/deploy?selected={}/{}&action={}&branch={}&sha={}",
-        namespace,
+        "/deploy?selected={}&action={}&branch={}&sha={}",
         name,
         form.get("action").unwrap_or(&"".to_string()),
         form.get("branch").unwrap_or(&"".to_string()),

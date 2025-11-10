@@ -104,6 +104,7 @@ async fn start_http(
             .service(serve_static_file!("idiomorph.min.js"))
             .service(serve_static_file!("idiomorph-ext.min.js"))
             .service(serve_static_file!("styles.css"))
+            .service(serve_static_file!("deploy.css"))
     })
     .bind(("0.0.0.0", 8080))?
     .run()

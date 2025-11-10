@@ -1,5 +1,6 @@
 use crate::kubernetes::{DeployConfig, DeployConfigStatusBuilder};
 use crate::prelude::*;
+use k8s_openapi::api::core::v1::Namespace;
 use kube::api::{DeleteParams, GroupVersionKind, TypeMeta};
 use kube::discovery::pinned_kind;
 use kube::{
@@ -217,4 +218,19 @@ pub async fn get_deploy_config(client: &Client, name: &str) -> AppResult<Option<
         .into_iter()
         .find(|config| config.name_any() == name);
     Ok(deploy_config)
+}
+
+pub async fn get_namespace_uid(client: &Client, namespace: &str) -> AppResult<String> {
+    let namespaces_api: Api<Namespace> = Api::all(client.clone());
+    let namespace = match namespaces_api.get(namespace).await {
+        Ok(namespace) => namespace,
+        Err(e) => {
+            return Err(AppError::Kubernetes(e));
+        }
+    };
+
+    Ok(namespace
+        .metadata
+        .uid
+        .expect("expect namespaces to all have a uid"))
 }

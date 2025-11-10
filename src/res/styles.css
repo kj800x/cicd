@@ -1,3 +1,5 @@
+@import "deploy.css";
+
 /* CSS Variables */
 :root {
   --success-color: #2ecc71;
@@ -788,7 +790,6 @@ header {
 }
 
 .deploy-page {
-
   .content-container {
     display: flex;
     gap: 40px;
@@ -961,12 +962,12 @@ header {
     cursor: not-allowed;
   }
 
-  .primary-action-button.danger {
+  .primary-action-button.danger-button {
     background-color: var(--danger-color);
     color: white;
   }
 
-  .primary-action-button.danger:hover:not(:disabled) {
+  .primary-action-button.danger-button:hover:not(:disabled) {
     background-color: #e03e45;
   }
 
@@ -1006,7 +1007,14 @@ header {
   }
 
   .preview-transition {
-    margin-top: 8px;
+    ul {
+      margin: 0;
+    }
+  }
+
+  .icon {
+    width: 16px;
+    display: inline-block;
   }
 
   .preview-transition-header {

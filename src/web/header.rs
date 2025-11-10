@@ -26,6 +26,8 @@ pub fn render(active_page: &str) -> Markup {
 pub fn stylesheet_link() -> Markup {
     html! {
         link rel="stylesheet" href="/res/styles.css";
+        link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.4.0/css/font-awesome.css";
+        link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/octicons/3.1.0/octicons.css";
     }
 }
 
