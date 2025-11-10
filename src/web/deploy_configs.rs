@@ -120,53 +120,6 @@ pub enum ResolvedVersion {
 }
 
 impl ResolvedVersion {
-    fn get_build_time(&self) -> Option<u64> {
-        match self {
-            ResolvedVersion::BranchTracked { build_time, .. }
-            | ResolvedVersion::TrackedSha { build_time, .. } => Some(*build_time),
-            _ => None,
-        }
-    }
-
-    fn from_config(
-        config: &DeployConfig,
-        conn: &PooledConnection<SqliteConnectionManager>,
-    ) -> Self {
-        match config.deployment_state() {
-            DeploymentState::DeployedWithArtifact { artifact, .. } => {
-                match artifact.branch {
-                    Some(branch) => {
-                        let build_time: Option<u64> = || -> Option<u64> {
-                            let artifact_repository = config.artifact_repository()?;
-                            let repo = GitRepo::get(artifact_repository, conn).ok().flatten()?;
-                            let commit = GitCommit::get_by_sha(&artifact.sha, repo.id, conn)
-                                .ok()
-                                .flatten()?;
-
-                            // FIXME: This isn't build time, it's commit time
-                            Some(commit.timestamp as u64)
-
-                            // let build = commit.get_build_status(conn).ok().flatten();
-                            // Some(build.timestamp as u64)
-                        }();
-
-                        match build_time {
-                            Some(build_time) => ResolvedVersion::BranchTracked {
-                                sha: artifact.sha,
-                                branch,
-                                build_time,
-                            },
-                            None => ResolvedVersion::UnknownSha { sha: artifact.sha },
-                        }
-                    }
-                    None => ResolvedVersion::UnknownSha { sha: artifact.sha },
-                }
-            }
-            DeploymentState::DeployedOnlyConfig { .. } => todo!(),
-            DeploymentState::Undeployed => ResolvedVersion::Undeployed,
-        }
-    }
-
     pub fn from_action(
         action: &Action,
         config: &DeployConfig,
@@ -326,10 +279,6 @@ impl ResolvedVersion {
                 html!("ERROR: Resolution failed")
             }
         }
-    }
-
-    fn is_undeployed(&self) -> bool {
-        matches!(self, ResolvedVersion::Undeployed)
     }
 }
 

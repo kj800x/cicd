@@ -40,7 +40,7 @@ pub async fn deploy_status(
                 | "ContainerCannotRun"
         )
     }
-    fn build_uid_index<'a>(objs: &'a [DynamicObject]) -> HashMap<String, &'a DynamicObject> {
+    fn build_uid_index(objs: &[DynamicObject]) -> HashMap<String, &DynamicObject> {
         let mut idx = HashMap::new();
         for o in objs {
             if let Some(uid) = &o.metadata.uid {

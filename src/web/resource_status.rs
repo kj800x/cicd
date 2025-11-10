@@ -12,14 +12,14 @@ use maud::{html, Markup};
 
 use kube::{
     api::{DynamicObject, GroupVersionKind},
-    Client, ResourceExt,
+    ResourceExt,
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::{
     error::{format_error_chain, AppError},
-    kubernetes::{api::ListMode, list_namespace_objects, DeployConfig},
+    kubernetes::DeployConfig,
 };
 
 fn render_state_span(text: &str, level: &str) -> Markup {
