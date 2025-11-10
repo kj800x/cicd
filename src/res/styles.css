@@ -390,6 +390,59 @@ header {
   }
 }
 
+/* Teams page */
+.teams-page {
+  .content {
+    max-width: 800px;
+    margin: 0 auto;
+  }
+
+  .teams-list {
+    margin-top: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .team-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 10px 12px;
+    background: #fff;
+  }
+
+  .team-name {
+    font-weight: 600;
+    color: var(--text-color);
+  }
+
+  .team-toggle {
+    padding: 6px 12px;
+    border-radius: 16px;
+    border: 1px solid var(--border-color);
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    background: #f6f8fa;
+    color: var(--text-color);
+  }
+
+  .team-toggle.on {
+    background: #d0fddc;
+    border-color: #86e3a1;
+    color: #00711f;
+  }
+
+  .team-toggle.off {
+    background: #ffeaeb;
+    border-color: #f0b6b9;
+    color: #a70007;
+  }
+}
+
 .index-page {
   .branch-grid {
     display: grid;

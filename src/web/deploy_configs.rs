@@ -12,6 +12,7 @@ use crate::kubernetes::deploy_handlers::DeployAction;
 use crate::kubernetes::repo::{DeploymentState, ShaMaybeBranch};
 use crate::kubernetes::{list_namespace_objects, DeployConfig};
 use crate::prelude::*;
+use crate::web::team_prefs::TeamsCookie;
 use crate::web::{build_status, deploy_status, header, ResourceStatuses};
 use kube::api::DynamicObject;
 use kube::{Client, ResourceExt};
@@ -793,6 +794,7 @@ impl Action {
 /// Handler for the deploy configs page
 #[get("/deploy")]
 pub async fn deploy_configs(
+    req: actix_web::HttpRequest,
     pool: web::Data<Pool<SqliteConnectionManager>>,
     query: web::Query<std::collections::HashMap<String, String>>,
 ) -> impl Responder {
@@ -825,6 +827,9 @@ pub async fn deploy_configs(
                 .body("Failed to get all deploy configs".to_string());
         }
     };
+
+    let teams_cookie = TeamsCookie::from_request(&req);
+    let deploy_configs = teams_cookie.filter_configs(&deploy_configs);
 
     let action = Action::from_query(&query);
 

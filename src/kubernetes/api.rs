@@ -229,6 +229,7 @@ pub async fn get_namespace_uid(client: &Client, namespace: &str) -> AppResult<St
         }
     };
 
+    #[allow(clippy::expect_used)]
     Ok(namespace
         .metadata
         .uid

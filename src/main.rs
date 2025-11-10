@@ -45,7 +45,7 @@ use crate::webhooks::config_sync::ConfigSyncHandler;
 use crate::webhooks::database::DatabaseHandler;
 use crate::webhooks::manager::WebhookManager;
 use cicd::serve_static_file;
-use web::{all_recent_builds, deploy_config, index};
+use web::{all_recent_builds, deploy_config, index, teams_index, toggle_team};
 
 async fn start_http(
     registry: prometheus::Registry,
@@ -99,6 +99,8 @@ async fn start_http(
             .service(branch_grid_fragment)
             .service(build_grid_fragment)
             .service(all_recent_builds)
+            .service(teams_index)
+            .service(toggle_team)
             .service(deploy_preview)
             .service(serve_static_file!("htmx.min.js"))
             .service(serve_static_file!("idiomorph.min.js"))
