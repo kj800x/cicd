@@ -92,7 +92,7 @@ pub enum ListMode {
 
 /// Return all DynamicObjects in `ns`
 pub async fn list_namespace_objects(
-    client: Client,
+    client: &Client,
     ns: &str,
     mode: ListMode,
 ) -> AppResult<Vec<DynamicObject>> {

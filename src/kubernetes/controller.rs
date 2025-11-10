@@ -52,7 +52,7 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> AppRes
 
     // Prune stale resources
     log::debug!("Pruning stale resources...");
-    let objects = list_namespace_objects(client.clone(), &ns, ListMode::Owned).await?;
+    let objects = list_namespace_objects(client, &ns, ListMode::Owned).await?;
     log::debug!("Got objects in namespace {}/{}", ns, name);
     log::trace!("Objects: {objects:#?}");
     let stale_objects: Vec<DynamicObject> = objects

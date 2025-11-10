@@ -5,12 +5,15 @@ use crate::db::deploy_event::DeployEvent;
 use crate::db::git_branch::GitBranch;
 use crate::db::git_commit::GitCommit;
 use crate::db::git_repo::GitRepo;
-use crate::kubernetes::api::{get_all_deploy_configs, get_deploy_config, get_namespace_uid};
+use crate::kubernetes::api::{
+    get_all_deploy_configs, get_deploy_config, get_namespace_uid, ListMode,
+};
 use crate::kubernetes::deploy_handlers::DeployAction;
 use crate::kubernetes::repo::{DeploymentState, ShaMaybeBranch};
-use crate::kubernetes::DeployConfig;
+use crate::kubernetes::{list_namespace_objects, DeployConfig};
 use crate::prelude::*;
-use crate::web::{build_status, header, ResourceStatuses};
+use crate::web::{build_status, deploy_status, header, ResourceStatuses};
+use kube::api::DynamicObject;
 use kube::{Client, ResourceExt};
 use maud::{html, Markup, Render};
 use std::collections::HashMap;
@@ -390,14 +393,13 @@ impl FormatStates for AppResult<DeploymentState> {
 }
 
 /// Represents a transition between two resolved versions
-struct DeployTransition<'a> {
+struct DeployTransition {
     from: DeploymentState,
     to: AppResult<DeploymentState>,
     current_config: DeployConfig,
-    client: &'a Client,
 }
 
-impl<'a> DeployTransition<'a> {
+impl DeployTransition {
     fn compare_url(&self, owner: &str, repo: &str) -> Option<String> {
         match (&self.from, &self.to) {
             (
@@ -495,10 +497,11 @@ async fn generate_status_header(
         .branch;
 
     // FIXME: What about artifactless configs?
-    let current_branch = config
-        .status
-        .clone()
-        .and_then(|s| s.artifact.as_ref().and_then(|a| a.branch.clone()));
+    let current_branch = match config.deployment_state() {
+        DeploymentState::DeployedWithArtifact { artifact, .. } => artifact.branch.clone(),
+        DeploymentState::DeployedOnlyConfig { config } => config.branch.clone(),
+        DeploymentState::Undeployed => None,
+    };
 
     let namespace = config.namespace().unwrap_or("default".to_string());
     let namespace_uid = get_namespace_uid(client, &namespace)
@@ -683,7 +686,7 @@ pub async fn render_preview_content(
     selected_config: &DeployConfig,
     action: &Action,
     conn: &PooledConnection<SqliteConnectionManager>,
-    client: &Client,
+    namespaced_objs: &[DynamicObject],
 ) -> Markup {
     let owner = selected_config
         .artifact_repository()
@@ -700,7 +703,6 @@ pub async fn render_preview_content(
         from: selected_config.deployment_state(),
         to: DeploymentState::from_action(action, selected_config, conn),
         current_config: selected_config.clone(),
-        client,
     };
 
     let preview_content = match action {
@@ -725,6 +727,9 @@ pub async fn render_preview_content(
     };
 
     let mut alerts: Vec<Markup> = vec![];
+    for alert in deploy_status(selected_config, namespaced_objs).await {
+        alerts.push(alert);
+    }
     for alert in build_status(action, selected_config, conn).await {
         alerts.push(alert);
     }
@@ -740,7 +745,7 @@ pub async fn render_preview_content(
                     (preview_content)
                 }
             }
-            (selected_config.format_resources(client).await)
+            (selected_config.format_resources(namespaced_objs).await)
         }
     }
 }
@@ -751,6 +756,7 @@ async fn generate_preview(
     action: &Action,
     conn: &PooledConnection<SqliteConnectionManager>,
     client: &Client,
+    namespaced_objs: &[DynamicObject],
 ) -> Markup {
     let owner = selected_config
         .artifact_repository()
@@ -770,7 +776,7 @@ async fn generate_preview(
                 (generate_status_header(selected_config, &owner, &repo, client).await)
 
                 div.preview-content-poll-wrapper hx-get=(format!("/fragments/deploy-preview/{}/{}?{}", selected_config.namespace().unwrap_or("default".to_string()), selected_config.name_any(), action.as_params())) hx-trigger="load, every 2s" hx-swap="morph:innerHTML" {
-                    (render_preview_content(selected_config, action, conn, client).await)
+                    (render_preview_content(selected_config, action, conn, namespaced_objs).await)
                 }
             }
         }
@@ -893,6 +899,24 @@ pub async fn deploy_configs(
             .find(|config| &config.name_any() == name)
     } else {
         sorted_deploy_configs.first()
+    };
+
+    let namespaced_objs = if let Some(selected_config) = selected_config {
+        match list_namespace_objects(
+            &client,
+            &selected_config.namespace().unwrap_or("default".to_string()),
+            ListMode::All,
+        )
+        .await
+        {
+            Ok(objs) => objs,
+            Err(e) => {
+                log::error!("Failed to get namespaced objects: {}", e);
+                vec![]
+            }
+        }
+    } else {
+        vec![]
     };
 
     // Render the HTML template using Maud
@@ -1040,7 +1064,7 @@ pub async fn deploy_configs(
                                             (format!("{}", selected_config.name_any()))
                                         }
                                     }
-                                    (generate_preview(selected_config, &action, &conn, &client).await)
+                                    (generate_preview(selected_config, &action, &conn, &client, &namespaced_objs).await)
                                 }
                             }
                         }

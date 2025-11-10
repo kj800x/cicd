@@ -822,26 +822,11 @@ impl TryFrom<&DynamicObject> for LiteResource {
 }
 
 pub trait ResourceStatuses {
-    async fn format_resources(&self, client: &Client) -> Markup;
+    async fn format_resources(&self, namespaced_objs: &[DynamicObject]) -> Markup;
 }
 
 impl ResourceStatuses for DeployConfig {
-    async fn format_resources(&self, client: &Client) -> Markup {
-        let namespaced_objs = match list_namespace_objects(
-            client.clone(),
-            &self.namespace().unwrap_or_else(|| "default".to_string()),
-            ListMode::All,
-        )
-        .await
-        {
-            Ok(objs) => objs,
-            Err(e) => {
-                return html! {
-                    span { (format!("Kube spec parse error: {}", format_error_chain(&e))) }
-                };
-            }
-        };
-
+    async fn format_resources(&self, namespaced_objs: &[DynamicObject]) -> Markup {
         html! {
             ul.deployable-item__child-list {
                 @for resource in self.resource_specs() {
