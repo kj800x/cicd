@@ -1132,7 +1132,9 @@ pub async fn deploy_config(
         }
     }
 
-    let Ok(maybe_deploy_event) = DeployEvent::from_user_deploy_action(&deploy_action) else {
+    let Ok(maybe_deploy_event) =
+        DeployEvent::from_user_deploy_action(&deploy_action, &conn, &config)
+    else {
         return HttpResponse::InternalServerError()
             .content_type("text/html; charset=utf-8")
             .body("Failed to create deploy event");

@@ -1,4 +1,5 @@
 use crate::db::deploy_event::DeployEvent;
+use crate::db::git_repo::GitRepo;
 use crate::prelude::*;
 use crate::web::team_prefs::TeamsCookie;
 use crate::web::{formatting, header};
@@ -16,7 +17,7 @@ fn format_et_time(timestamp_ms: i64) -> String {
     local.format("%b %-e, %Y %-I:%M %p").to_string()
 }
 
-fn render_event_row(e: &DeployEvent) -> Markup {
+fn render_event_row(conn: &PooledConnection<SqliteConnectionManager>, e: &DeployEvent) -> Markup {
     let when_abs = format_et_time(e.timestamp);
 
     html! {
@@ -24,15 +25,84 @@ fn render_event_row(e: &DeployEvent) -> Markup {
             td class="config-name" {
                 a href=(format!("/deploy-history?name={}", e.name)) { (e.name.clone()) }
             }
-            td class="sha-cell" {
-                (render_sha_maybe_branch(e.artifact_branch.as_ref(), e.artifact_sha.as_ref()))
-            }
-            td class="sha-cell" {
-                (render_sha_maybe_branch(None, e.config_sha.as_ref()))
-            }
+            (render_artifact_cell(conn, e))
+            (render_config_cell(conn, e))
             td class="time-cell" { (when_abs) }
             td class="actions-cell" {
                 button class="link-button" { "Revert to this deploy" }
+            }
+        }
+    }
+}
+
+fn render_artifact_cell(
+    conn: &PooledConnection<SqliteConnectionManager>,
+    e: &DeployEvent,
+) -> Markup {
+    let content = render_sha_maybe_branch(e.artifact_branch.as_ref(), e.artifact_sha.as_ref());
+    let compare = if let (Some(curr), Some(prev), Some(repo_id)) = (
+        e.artifact_sha.as_ref(),
+        e.prev_artifact_sha.as_ref(),
+        e.artifact_repo_id,
+    ) {
+        if let Ok(repo) = GitRepo::get_by_id(&(repo_id as u64), conn) {
+            repo.map(|repo| {
+                format!(
+                    "https://github.com/{}/{}/compare/{}...{}",
+                    repo.owner_name, repo.name, prev, curr
+                )
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    html! {
+        td class="sha-cell" {
+            (content)
+            @if let Some(url) = compare {
+                " "
+                a class="link-button" href=(url) target="_blank" { "[compare]" }
+            }
+        }
+    }
+}
+
+fn render_config_cell(conn: &PooledConnection<SqliteConnectionManager>, e: &DeployEvent) -> Markup {
+    let content = render_sha_maybe_branch(e.config_branch.as_ref(), e.config_sha.as_ref());
+    let changed = match (&e.config_version_hash, &e.prev_config_version_hash) {
+        (Some(cur), Some(prev)) => cur != prev,
+        _ => false,
+    };
+    let compare = if let (Some(curr), Some(prev), Some(repo_id)) = (
+        e.config_sha.as_ref(),
+        e.prev_config_sha.as_ref(),
+        e.config_repo_id,
+    ) {
+        if let Ok(repo) = GitRepo::get_by_id(&(repo_id as u64), conn) {
+            repo.map(|repo| {
+                format!(
+                    "https://github.com/{}/{}/compare/{}...{}",
+                    repo.owner_name, repo.name, prev, curr
+                )
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    html! {
+        td class="sha-cell" {
+            (content)
+            @if changed {
+                " "
+                span { "[changed]" }
+            }
+            @if let Some(url) = compare {
+                " "
+                a class="link-button" href=(url) target="_blank" { "[compare]" }
             }
         }
     }
@@ -69,19 +139,26 @@ pub async fn deploy_history(
     };
 
     let mut events: Vec<DeployEvent> = Vec::new();
-    match conn.prepare("SELECT name, timestamp, initiator, config_sha, artifact_sha, artifact_branch FROM deploy_event WHERE name = ?1 ORDER BY timestamp DESC") {
+    match conn.prepare("SELECT name, timestamp, initiator, config_sha, artifact_sha, artifact_branch, config_branch, prev_artifact_sha, prev_config_sha, artifact_repo_id, config_repo_id, config_version_hash, prev_config_version_hash FROM deploy_event WHERE name = ?1 ORDER BY timestamp DESC") {
 		Ok(mut stmt) => {
-			let rows = stmt
-				.query_map(params![name], |row| {
-					Ok(DeployEvent {
-						name: row.get(0)?,
-						timestamp: row.get(1)?,
-						initiator: row.get(2)?,
-						config_sha: row.get(3)?,
-						artifact_sha: row.get(4)?,
-						artifact_branch: row.get(5)?,
-					})
-				})
+            let rows = stmt
+                .query_map(params![name], |row| {
+                    Ok(DeployEvent {
+                        name: row.get(0)?,
+                        timestamp: row.get(1)?,
+                        initiator: row.get(2)?,
+                        config_sha: row.get(3)?,
+                        artifact_sha: row.get(4)?,
+                        artifact_branch: row.get(5)?,
+                        config_branch: row.get(6)?,
+                        prev_artifact_sha: row.get(7)?,
+                        prev_config_sha: row.get(8)?,
+                        artifact_repo_id: row.get(9)?,
+                        config_repo_id: row.get(10)?,
+                        config_version_hash: row.get(11)?,
+                        prev_config_version_hash: row.get(12)?,
+                    })
+                })
 				.and_then(|mapped| mapped.collect::<Result<Vec<_>, _>>());
 			match rows {
 				Ok(list) => {
@@ -135,7 +212,7 @@ pub async fn deploy_history(
                                 hx-trigger="load, every 5s"
                                 hx-swap="morph:innerHTML" {
                                 @for e in &events {
-                                    (render_event_row(e))
+                                    (render_event_row(&conn, e))
                                 }
                             }
                         }
@@ -155,17 +232,24 @@ fn fetch_events_for_name(
     name: &str,
 ) -> Vec<DeployEvent> {
     let mut events: Vec<DeployEvent> = Vec::new();
-    match conn.prepare("SELECT name, timestamp, initiator, config_sha, artifact_sha, artifact_branch FROM deploy_event WHERE name = ?1 ORDER BY timestamp DESC") {
+    match conn.prepare("SELECT name, timestamp, initiator, config_sha, artifact_sha, artifact_branch, config_branch, prev_artifact_sha, prev_config_sha, artifact_repo_id, config_repo_id, config_version_hash, prev_config_version_hash FROM deploy_event WHERE name = ?1 ORDER BY timestamp DESC") {
 		Ok(mut stmt) => {
 			let rows = stmt
 				.query_map(params![name], |row| {
-					Ok(DeployEvent {
+                    Ok(DeployEvent {
 						name: row.get(0)?,
 						timestamp: row.get(1)?,
 						initiator: row.get(2)?,
 						config_sha: row.get(3)?,
 						artifact_sha: row.get(4)?,
-						artifact_branch: row.get(5)?,
+                        artifact_branch: row.get(5)?,
+                        config_branch: row.get(6)?,
+                        prev_artifact_sha: row.get(7)?,
+                        prev_config_sha: row.get(8)?,
+                        artifact_repo_id: row.get(9)?,
+                        config_repo_id: row.get(10)?,
+                        config_version_hash: row.get(11)?,
+                        prev_config_version_hash: row.get(12)?,
 					})
 				})
 				.and_then(|mapped| mapped.collect::<Result<Vec<_>, _>>());
@@ -185,19 +269,26 @@ fn fetch_events_for_team(
     team: &str,
 ) -> Vec<DeployEvent> {
     let mut events: Vec<DeployEvent> = Vec::new();
-    match conn.prepare("SELECT de.name, de.timestamp, de.initiator, de.config_sha, de.artifact_sha, de.artifact_branch FROM deploy_event de WHERE de.name IN (SELECT name FROM deploy_config WHERE team = ?1) ORDER BY de.timestamp DESC") {
+    match conn.prepare("SELECT de.name, de.timestamp, de.initiator, de.config_sha, de.artifact_sha, de.artifact_branch, de.config_branch, de.prev_artifact_sha, de.prev_config_sha, de.artifact_repo_id, de.config_repo_id, de.config_version_hash, de.prev_config_version_hash FROM deploy_event de WHERE de.name IN (SELECT name FROM deploy_config WHERE team = ?1) ORDER BY de.timestamp DESC") {
 		Ok(mut stmt) => {
-			let rows = stmt
-				.query_map(params![team], |row| {
-					Ok(DeployEvent {
-						name: row.get(0)?,
-						timestamp: row.get(1)?,
-						initiator: row.get(2)?,
-						config_sha: row.get(3)?,
-						artifact_sha: row.get(4)?,
-						artifact_branch: row.get(5)?,
-					})
-				})
+            let rows = stmt
+                .query_map(params![team], |row| {
+                    Ok(DeployEvent {
+                        name: row.get(0)?,
+                        timestamp: row.get(1)?,
+                        initiator: row.get(2)?,
+                        config_sha: row.get(3)?,
+                        artifact_sha: row.get(4)?,
+                        artifact_branch: row.get(5)?,
+                        config_branch: row.get(6)?,
+                        prev_artifact_sha: row.get(7)?,
+                        prev_config_sha: row.get(8)?,
+                        artifact_repo_id: row.get(9)?,
+                        config_repo_id: row.get(10)?,
+                        config_version_hash: row.get(11)?,
+                        prev_config_version_hash: row.get(12)?,
+                    })
+                })
 				.and_then(|mapped| mapped.collect::<Result<Vec<_>, _>>());
 			if let Ok(list) = rows {
 				events = list;
@@ -291,7 +382,7 @@ pub async fn deploy_history_index(
                                 hx-trigger="load, every 5s"
                                 hx-swap="morph:innerHTML" {
                                 @for e in &events {
-                                    (render_event_row(e))
+                                    (render_event_row(&conn, e))
                                 }
                             }
                         }
@@ -344,7 +435,7 @@ pub async fn deploy_history_fragment(
 
     let fragment = html! {
         @for e in &events {
-            (render_event_row(e))
+            (render_event_row(&conn, e))
         }
     };
 

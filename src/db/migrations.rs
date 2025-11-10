@@ -97,8 +97,16 @@ pub fn migrate(mut conn: PooledConnection<SqliteConnectionManager>) -> AppResult
               initiator TEXT NOT NULL,
               config_sha TEXT,
               artifact_sha TEXT,
-              artifact_branch TEXT
+              artifact_branch TEXT,
+              config_branch TEXT,
+              prev_artifact_sha TEXT,
+              prev_config_sha TEXT,
+              artifact_repo_id INTEGER,
+              config_repo_id INTEGER,
+              config_version_hash TEXT,
+              prev_config_version_hash TEXT
           );
+          CREATE INDEX IF NOT EXISTS idx_deploy_event_name_ts ON deploy_event(name, timestamp);
       "#}),
         // M::up( indoc! { r#"
         //     SQL GOES HERE
