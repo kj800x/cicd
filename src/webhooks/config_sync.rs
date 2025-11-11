@@ -1,10 +1,7 @@
 use std::collections::HashMap;
 
 use kube::{api::ObjectMeta, Client, ResourceExt};
-use octocrab::{
-    models::repos::{Content, Object},
-    params::repos::Reference,
-};
+use octocrab::models::repos::Content;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use serde::{Deserialize, Serialize};
@@ -197,47 +194,6 @@ pub async fn fetch_deploy_config_by_sha(
         .into_iter()
         .find(|config| config.name_any() == config_name);
     Ok(config)
-}
-
-pub async fn fetch_current_deploy_configs(
-    octocrabs: &Octocrabs,
-    repository: impl IRepo,
-) -> AppResult<Vec<DeployConfig>> {
-    let result = octocrabs.crab_for(&repository).await;
-
-    let Some(crab) = result else {
-        return Err(AppError::NotFound(
-            "No octocrab found for this repo".to_owned(),
-        ));
-    };
-
-    let owner = repository.owner().to_string();
-    let repo = repository.repo().to_string();
-    let default_branch = match crab
-        .repos(&owner, &repo)
-        .get()
-        .await
-        .map(|r| r.default_branch)
-    {
-        Ok(Some(default_branch)) => default_branch,
-        Ok(None) => return Ok(vec![]),
-        Err(_) => return Ok(vec![]),
-    };
-
-    let sha = match crab
-        .repos(&owner, &repo)
-        .get_ref(&Reference::Branch(default_branch.to_string()))
-        .await
-    {
-        Ok(r) => match r.object {
-            Object::Commit { sha, .. } => sha,
-            Object::Tag { .. } => return Ok(vec![]),
-            _ => return Ok(vec![]),
-        },
-        Err(_) => return Ok(vec![]),
-    };
-
-    fetch_deploy_configs_by_sha(octocrabs, repository, &sha).await
 }
 
 pub async fn fetch_deploy_configs_by_sha(

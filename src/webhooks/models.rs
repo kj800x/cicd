@@ -40,17 +40,6 @@ impl From<&CommitAuthor> for String {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-#[allow(unused)]
-pub struct GhCommit {
-    pub id: String, // sha
-    pub message: String,
-    pub timestamp: String, // "2024-05-12T15:35:17-04:00",
-    pub author: CommitAuthor,
-    pub committer: CommitAuthor,
-    pub parent_shas: Option<Vec<String>>, // Parent commit SHAs
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CheckSuite {
     pub id: u64,
     pub head_sha: String,
@@ -69,13 +58,6 @@ pub struct CheckRun {
 pub struct CheckRunEvent {
     pub action: String,
     pub check_run: CheckRun,
-    pub repository: Repository,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct PingEvent {
-    pub zen: String,
     pub repository: Repository,
 }
 
@@ -116,22 +98,4 @@ pub struct CheckSuiteEvent {
     pub action: String,
     pub check_suite: CheckSuite,
     pub repository: Repository,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct WorkflowRunEvent {
-    pub action: String,
-    pub workflow_run: WorkflowRun,
-    pub repository: Repository,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct WorkflowRun {
-    pub id: u64,
-    pub head_sha: String,
-    pub status: String,
-    pub conclusion: Option<String>,
-    pub html_url: String,
 }

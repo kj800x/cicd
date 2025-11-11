@@ -271,10 +271,6 @@ impl BootstrapMode {
         }
     }
 
-    fn scan_all_branches(&self) -> bool {
-        matches!(self, BootstrapMode::Repo { .. })
-    }
-
     fn name(&self) -> &str {
         match self {
             BootstrapMode::Quick => "Quick Scan",
@@ -580,7 +576,7 @@ async fn run_owner_bootstrap_impl(
                                     &pool,
                                     &repo.owner_name,
                                     &repo.name,
-                                    repo.id as u64,
+                                    repo.id,
                                     &head_commit.sha,
                                 )
                                 .await
@@ -590,7 +586,7 @@ async fn run_owner_bootstrap_impl(
                                             "repo {}/{}: synced deploy configs for HEAD of default branch ({})",
                                             repo.owner_name,
                                             repo.name,
-                                            head_commit.sha[..7].to_string()
+                                            &head_commit.sha[..7]
                                         ));
                                     }
                                     Err(e) => {
@@ -924,7 +920,7 @@ async fn run_repo_bootstrap_impl(
                                 "repo {}/{}: synced deploy configs for HEAD of default branch ({})",
                                 owner,
                                 repo_name,
-                                head_commit[..7].to_string()
+                                &head_commit[..7]
                             ));
                         }
                         Err(e) => {
@@ -1059,7 +1055,7 @@ pub async fn bootstrap_repo(
     // Validate that the repo exists
     let mut repo_found = false;
     for crab in octocrabs.iter() {
-        if let Ok(_) = crab.repos(&req.owner, &req.repo).get().await {
+        if (crab.repos(&req.owner, &req.repo).get().await).is_ok() {
             repo_found = true;
             break;
         }

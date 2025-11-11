@@ -25,25 +25,6 @@ pub struct DeployEvent {
 }
 
 impl DeployEvent {
-    #[allow(unused)]
-    pub fn from_row(row: &rusqlite::Row) -> AppResult<Self> {
-        Ok(DeployEvent {
-            name: row.get(0)?,
-            timestamp: row.get(1)?,
-            initiator: row.get(2)?,
-            config_sha: row.get(3)?,
-            artifact_sha: row.get(4)?,
-            artifact_branch: row.get(5)?,
-            config_branch: row.get(6)?,
-            prev_artifact_sha: row.get(7)?,
-            prev_config_sha: row.get(8)?,
-            artifact_repo_id: row.get(9)?,
-            config_repo_id: row.get(10)?,
-            config_version_hash: row.get(11)?,
-            prev_config_version_hash: row.get(12)?,
-        })
-    }
-
     pub fn from_user_deploy_action(
         action: &DeployAction,
         conn: &PooledConnection<SqliteConnectionManager>,
@@ -73,19 +54,15 @@ impl DeployEvent {
 
                 // Resolve repo ids from current DeployConfig
                 let cfg_repo = config.config_repository();
-                if let Ok(maybe_repo) = GitRepo::get_by_name(&cfg_repo.owner, &cfg_repo.repo, conn)
+                if let Ok(Some(repo)) = GitRepo::get_by_name(&cfg_repo.owner, &cfg_repo.repo, conn)
                 {
-                    if let Some(repo) = maybe_repo {
-                        event.config_repo_id = Some(repo.id as i64);
-                    }
+                    event.config_repo_id = Some(repo.id as i64);
                 }
                 if let Some(artifact_repo) = config.artifact_repository() {
-                    if let Ok(maybe_repo) =
+                    if let Ok(Some(repo)) =
                         GitRepo::get_by_name(&artifact_repo.owner, &artifact_repo.repo, conn)
                     {
-                        if let Some(repo) = maybe_repo {
-                            event.artifact_repo_id = Some(repo.id as i64);
-                        }
+                        event.artifact_repo_id = Some(repo.id as i64);
                     }
                 }
 
@@ -97,7 +74,7 @@ impl DeployEvent {
                      ORDER BY timestamp DESC
                      LIMIT 1",
                 ) {
-                    if let Ok(prev) = stmt
+                    if let Ok(Some((prev_cfg_sha, prev_art_sha, prev_cfg_hash))) = stmt
                         .query_row(params![event.name], |row| {
                             Ok((
                                 row.get::<_, Option<String>>(0)?,
@@ -107,11 +84,9 @@ impl DeployEvent {
                         })
                         .optional()
                     {
-                        if let Some((prev_cfg_sha, prev_art_sha, prev_cfg_hash)) = prev {
-                            event.prev_config_sha = prev_cfg_sha;
-                            event.prev_artifact_sha = prev_art_sha;
-                            event.prev_config_version_hash = prev_cfg_hash;
-                        }
+                        event.prev_config_sha = prev_cfg_sha;
+                        event.prev_artifact_sha = prev_art_sha;
+                        event.prev_config_version_hash = prev_cfg_hash;
                     }
                 }
 
@@ -154,19 +129,15 @@ impl DeployEvent {
                 };
                 // Resolve repo ids for consistency
                 let cfg_repo = config.config_repository();
-                if let Ok(maybe_repo) = GitRepo::get_by_name(&cfg_repo.owner, &cfg_repo.repo, conn)
+                if let Ok(Some(repo)) = GitRepo::get_by_name(&cfg_repo.owner, &cfg_repo.repo, conn)
                 {
-                    if let Some(repo) = maybe_repo {
-                        event.config_repo_id = Some(repo.id as i64);
-                    }
+                    event.config_repo_id = Some(repo.id as i64);
                 }
                 if let Some(artifact_repo) = config.artifact_repository() {
-                    if let Ok(maybe_repo) =
+                    if let Ok(Some(repo)) =
                         GitRepo::get_by_name(&artifact_repo.owner, &artifact_repo.repo, conn)
                     {
-                        if let Some(repo) = maybe_repo {
-                            event.artifact_repo_id = Some(repo.id as i64);
-                        }
+                        event.artifact_repo_id = Some(repo.id as i64);
                     }
                 }
                 Ok(Some(event))
@@ -211,27 +182,5 @@ impl DeployEvent {
             config_version_hash: self.config_version_hash.clone(),
             prev_config_version_hash: self.prev_config_version_hash.clone(),
         })
-    }
-
-    #[allow(unused)]
-    pub fn update(&self, conn: &PooledConnection<SqliteConnectionManager>) -> AppResult<()> {
-        conn.prepare("UPDATE deploy_event SET timestamp = ?2, initiator = ?3, config_sha = ?4, artifact_sha = ?5, artifact_branch = ?6, config_branch = ?7, prev_artifact_sha = ?8, prev_config_sha = ?9, artifact_repo_id = ?10, config_repo_id = ?11, config_version_hash = ?12, prev_config_version_hash = ?13 WHERE name = ?1")?
-          .execute(params![
-            self.name,
-            self.timestamp,
-            self.initiator,
-            self.config_sha,
-            self.artifact_sha,
-            self.artifact_branch,
-            self.config_branch,
-            self.prev_artifact_sha,
-            self.prev_config_sha,
-            self.artifact_repo_id,
-            self.config_repo_id,
-            self.config_version_hash,
-            self.prev_config_version_hash
-          ])?;
-
-        Ok(())
     }
 }

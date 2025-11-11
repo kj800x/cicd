@@ -95,7 +95,6 @@ impl Render for AutodeployStatus {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
 pub enum BuildFilter {
     Any,
     Completed,

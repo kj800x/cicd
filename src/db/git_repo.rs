@@ -40,15 +40,6 @@ impl From<WebhookRepository> for GitRepo {
     }
 }
 
-#[allow(unused)]
-pub struct GitRepoEgg {
-    pub owner_name: String,
-    pub name: String,
-    pub default_branch: String,
-    pub private: bool,
-    pub language: Option<String>,
-}
-
 impl GitRepo {
     pub fn from_row(row: &rusqlite::Row) -> AppResult<Self> {
         Ok(GitRepo {
@@ -59,18 +50,6 @@ impl GitRepo {
             private: row.get(4)?,
             language: row.get(5)?,
         })
-    }
-
-    #[allow(unused)]
-    pub fn from_egg(egg: &GitRepoEgg, id: u64) -> Self {
-        Self {
-            id,
-            owner_name: egg.owner_name.clone(),
-            name: egg.name.clone(),
-            default_branch: egg.default_branch.clone(),
-            private: egg.private,
-            language: egg.language.clone(),
-        }
     }
 
     pub fn get(

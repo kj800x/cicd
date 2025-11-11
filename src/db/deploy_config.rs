@@ -1,7 +1,7 @@
-use crate::error::{AppError, AppResult};
+use crate::error::AppResult;
 use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::params;
 
 pub struct DeployConfig {
     pub name: String,
@@ -22,20 +22,6 @@ impl DeployConfig {
             artifact_repo_id: row.get(4)?,
             active: row.get(5)?,
         })
-    }
-
-    #[allow(unused)]
-    pub fn get_by_name(
-        name: &str,
-        conn: &PooledConnection<SqliteConnectionManager>,
-    ) -> AppResult<Option<Self>> {
-        let deploy_config = conn.prepare("SELECT name, team, kind, config_repo_id, artifact_repo_id, active FROM deploy_config WHERE name = ?1")?
-          .query_row(params![name], |row| {
-            Ok(DeployConfig::from_row(row))
-          })
-          .optional().map_err(AppError::from)?.transpose()?;
-
-        Ok(deploy_config)
     }
 
     pub fn get_by_config_repo_id(

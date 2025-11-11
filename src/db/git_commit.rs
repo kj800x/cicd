@@ -42,18 +42,6 @@ impl GitCommit {
         })
     }
 
-    pub fn from_egg(egg: &GitCommitEgg, id: i64) -> Self {
-        Self {
-            id,
-            sha: egg.sha.clone(),
-            repo_id: egg.repo_id,
-            message: egg.message.clone(),
-            author: egg.author.clone(),
-            committer: egg.committer.clone(),
-            timestamp: egg.timestamp,
-        }
-    }
-
     pub fn get_by_sha(
         sha: &str,
         repo_id: u64,
@@ -142,17 +130,10 @@ impl GitCommit {
         ])?;
 
         // Fetch the row to get its stable id
-        let updated = Self::get_by_sha(&commit.sha, commit.repo_id, conn)?
-            .ok_or(AppError::Internal("Failed to fetch upserted commit".to_string()))?;
+        let updated = Self::get_by_sha(&commit.sha, commit.repo_id, conn)?.ok_or(
+            AppError::Internal("Failed to fetch upserted commit".to_string()),
+        )?;
         Ok(updated)
-    }
-
-    #[allow(unused)]
-    pub fn update(&self, conn: &PooledConnection<SqliteConnectionManager>) -> AppResult<()> {
-        conn.prepare("UPDATE git_commit SET sha = ?2, repo_id = ?3, message = ?4, author = ?5, committer = ?6, timestamp = ?7 WHERE id = ?1")?
-          .execute(params![self.id, self.sha, self.repo_id, self.message, self.author, self.committer, self.timestamp])?;
-
-        Ok(())
     }
 
     pub fn add_branch(
