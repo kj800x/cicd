@@ -1,6 +1,5 @@
 use std::ops::Deref;
 
-pub mod autodeploy_state;
 pub mod deploy_config;
 pub mod deploy_config_version;
 pub mod deploy_event;

@@ -84,13 +84,6 @@ pub fn migrate(mut conn: PooledConnection<SqliteConnectionManager>) -> AppResult
               FOREIGN KEY(config_repo_id) REFERENCES git_repo(id)
           );
 
-          CREATE TABLE autodeploy_state (
-              name TEXT NOT NULL,
-              enabled BOOLEAN NOT NULL DEFAULT TRUE,
-              PRIMARY KEY(name),
-              FOREIGN KEY(name) REFERENCES deploy_config(name)
-          );
-
           CREATE TABLE deploy_event (
               name TEXT NOT NULL,
               timestamp INTEGER NOT NULL,

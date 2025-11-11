@@ -281,20 +281,37 @@ The application uses SQLite with the following tables:
 - `git_commit_branch`: Junction table tracking which commits belong to which branches
 - `git_commit_parent`: Junction table tracking parent-child relationships between commits
 
-## Future Roadmap
+## Known Limitations
 
-1. Discord Integration:
-   - Send notifications about build status changes
-   - Configurable alerts for build failures
+### Namespace Changes Not Supported
+Changing a DeployConfig's namespace is not currently supported. If you need to move a deployment to a different namespace:
 
-2. Kubernetes Integration:
-   - Track container deployments
-   - Identify pods running outdated builds
-   - Provide recommendations for updates
+1. Undeploy from the current namespace
+2. Update the `.deploy/*.yaml` file with the new namespace
+3. Push to master branch to sync the configuration
+4. Deploy to the new namespace
 
-3. Multi-user Support:
-   - Track repositories across multiple GitHub users
-   - Role-based access controls for the dashboard
+The limitation exists because deploy operations reference the existing config's namespace rather than the desired namespace from the updated configuration.
+
+## Roadmap
+
+### Immediate Priorities (Post-Cutover)
+1. **Autodeploy Automation** - Implement webhook handler to automatically deploy on successful builds
+2. **Deleted Config Cleanup** - Fix bug where deleted configs aren't properly cleaned up
+3. **Orphaned Feature Completion** - Add UI alerts and test edge cases
+
+### Planned Features
+- **Enhanced Resource Diff View** - Show YAML diffs and change indicators before deploying
+- **Health-Based Deploy Success** - Only mark deploys successful when all resources are healthy
+- **Auto-Rollback** - Automatically rollback failed deploys after timeout
+- **Deploy Revert** - One-click revert to previous successful deploys
+- **Watchdog Dashboard** - System-wide health summary (builds, deploys, pods)
+
+### Under Consideration
+- **GraphQL API** - Query language for build/deploy data (not currently a priority)
+- **Discord Notifications** - Build/deploy notifications (previous version was too noisy)
+
+For detailed status and implementation notes, see [todo.md](./todo.md).
 
 ## License
 

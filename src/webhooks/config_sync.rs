@@ -73,11 +73,14 @@ pub async fn sync_deploy_configs_for_commit(
         .collect::<Vec<String>>();
 
     for deploy_config in deploy_configs.clone() {
-        // FIXME: Cases - artifact_repo defined and present in db, artifact_repo defined and not present in db, artifact_repo is null in the deploy config spec
-        // Right now we're treating "can't find artifact repo" as "no artifact repo", which is not correct.
         let artifact_repo_id = match deploy_config.artifact_repository() {
             Some(repository) => {
-                GitRepo::get_by_name(&repository.owner, &repository.repo, &conn)?.map(|r| r.id)
+                let repo = GitRepo::get_by_name(&repository.owner, &repository.repo, &conn)?
+                    .ok_or_else(|| AppError::NotFound(format!(
+                        "Artifact repository {}/{} not found in database. Use the bootstrap feature to sync this repository first.",
+                        repository.owner, repository.repo
+                    )))?;
+                Some(repo.id)
             }
             None => None,
         };

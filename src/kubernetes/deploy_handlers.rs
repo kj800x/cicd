@@ -28,7 +28,18 @@ pub enum DeployAction {
 }
 
 impl DeployAction {
-    // FIXME: BUG: Does not properly handle namespace changes
+    // KNOWN LIMITATION: Changing a DeployConfig's namespace is not supported.
+    // The deploy operation applies resources to the namespace in the current config,
+    // not the new namespace specified in the updated .deploy/*.yaml file.
+    //
+    // To change a config's namespace:
+    // 1. Undeploy the config from its current namespace
+    // 2. Update the .deploy/*.yaml file with the new namespace
+    // 3. Push to master to sync the config
+    // 4. Deploy to the new namespace
+    //
+    // This limitation exists because the DeployAction executor uses the existing
+    // config's namespace, not the desired config's namespace.
     pub async fn execute(
         &self,
         client: &Client,
