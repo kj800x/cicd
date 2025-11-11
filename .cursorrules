@@ -1,0 +1,230 @@
+# CI/CD Dashboard - Cursor Rules
+
+## Project Overview
+Rust-based CI/CD dashboard with Actix Web backend, Maud HTML templating, HTMX frontend, SQLite database, and Kubernetes integration.
+
+## Code Style & Standards
+
+### Error Handling
+- **ALWAYS** use `AppError` and `AppResult` types, never `anyhow::Error`
+- Use `?` operator for propagating errors
+- Avoid `.unwrap()` and `.expect()` (lint enforced: `unwrap_used = "deny"`, `expect_used = "warn"`)
+- Only use `expect()` in truly fatal situations with clear explanatory messages
+
+### Rust Conventions
+- Follow standard Rust naming: `snake_case` for functions/variables, `PascalCase` for types
+- Use `clippy` recommendations (some warnings acceptable if intentional)
+- Prefer explicit types over `_` when clarity helps
+- Keep functions focused and reasonably sized
+
+## Architecture Patterns
+
+### Database Layer (`src/db/`)
+- Each entity has its own module with struct + impl block
+- Use Repository/DAO pattern (not bare functions)
+- Database structs should have:
+  - `from_row()` - Convert rusqlite::Row to struct
+  - `get()` / `get_by_*()` - Retrieve records
+  - `upsert()` / `insert()` / `update()` - Modify records
+- Use `r2d2::PooledConnection<SqliteConnectionManager>` for connections
+- All database functions return `AppResult<T>`
+- Migrations go in `src/db/migrations.rs` using `rusqlite_migration` crate
+
+### Web Layer (`src/web/`)
+- **Pattern**: Separate page and fragment endpoints
+  - Page endpoint: Returns full HTML page with `<!DOCTYPE>`, `<head>`, `<body>`
+  - Fragment endpoint: Returns partial HTML for HTMX swapping
+  - Use HTMX polling on fragments: `hx-get="/endpoint" hx-trigger="load, every 5s" hx-swap="morph:innerHTML"`
+- Use Maud `html!` macro for templating
+- Actix Web handlers: `#[get("/path")]` or `#[post("/path")]`
+- Extract dependencies via `web::Data<T>` and `web::Query<T>`
+- Return `impl Responder` from handlers
+
+### Frontend (Maud + HTMX)
+- **Templating**: Use Maud's `html!` macro (NOT string concatenation)
+- **Interactivity**: HTMX attributes for dynamic updates
+- **Polling pattern**:
+  ```rust
+  tbody hx-get="/fragment"
+       hx-trigger="load, every 5s"
+       hx-swap="morph:innerHTML"
+       hx-ext="morph" { /* content */ }
+  ```
+- Prefer Idiomorph for morphing DOM updates
+
+### CSS Organization (`src/res/*.css`)
+- **Namespace CSS under page selectors** unless there's a compelling reason otherwise
+- Pattern:
+  ```css
+  .page-name {
+    /* page-level styles */
+  }
+  .page-name .component { }
+  .page-name .component__element { }
+  ```
+- Use BEM-like naming for components: `.block__element--modifier`
+- Keep global styles minimal (layout utilities, resets)
+
+### Kubernetes Integration (`src/kubernetes/`)
+- Use `kube` crate for API interactions
+- Custom Resource Definitions in `kubernetes/crds/`
+- Controller pattern: reconcile loops in `controller.rs`
+- Webhook handlers for config sync in `webhook_handlers.rs`
+- Deploy actions in `deploy_handlers.rs`
+
+### Webhooks (`src/webhooks/`)
+- Handler trait pattern: implement `WebhookHandler` trait
+- Multiple handlers registered in `manager.rs`
+- Process GitHub push events and check runs
+
+## File Organization
+
+```
+src/
+├── db/               # Database layer (SQLite via rusqlite)
+│   ├── mod.rs
+│   ├── migrations.rs # Schema definitions
+│   └── *.rs          # One file per table/entity
+├── web/              # HTTP handlers (Actix Web + Maud)
+│   ├── mod.rs
+│   └── *.rs          # One file per page/feature
+├── kubernetes/       # Kube client, CRD, controller
+├── webhooks/         # GitHub webhook processing
+├── res/              # Static resources (CSS, JS)
+├── error.rs          # AppError definitions
+├── lib.rs            # Library root
+└── main.rs           # Binary entry point
+```
+
+## Naming Conventions
+
+### Endpoints
+- Pages: `/page-name` (returns full HTML)
+- Fragments: `/page-name-fragment` (returns partial HTML for HTMX)
+- Actions: `/action-name` (POST endpoints)
+- API: `/api/endpoint` (for JSON APIs if needed)
+
+### Database
+- Tables: `snake_case` (e.g., `deploy_config`, `git_commit_build`)
+- Columns: `snake_case`
+- Junction tables: `{table1}_{table2}` (e.g., `git_commit_branch`)
+
+### Rust Modules
+- Modules: `snake_case` (e.g., `deploy_config.rs`)
+- Structs: `PascalCase` (e.g., `DeployConfig`, `GitCommit`)
+- Functions: `snake_case` (e.g., `get_by_name`, `upsert`)
+
+## Common Patterns
+
+### Database Query Pattern
+```rust
+pub fn get_by_name(
+    name: &str,
+    conn: &PooledConnection<SqliteConnectionManager>,
+) -> AppResult<Option<Self>> {
+    let result = conn.prepare("SELECT ... FROM table WHERE name = ?1")?
+        .query_row(params![name], |row| {
+            Ok(Self::from_row(row))
+        })
+        .optional()?
+        .transpose()?;
+    Ok(result)
+}
+```
+
+### Web Handler Pattern
+```rust
+#[get("/page")]
+pub async fn page_handler(
+    pool: web::Data<Pool<SqliteConnectionManager>>,
+    query: web::Query<HashMap<String, String>>,
+) -> impl Responder {
+    let conn = match pool.get() {
+        Ok(c) => c,
+        Err(e) => {
+            log::error!("Failed to get connection: {}", e);
+            return HttpResponse::InternalServerError().body("...");
+        }
+    };
+
+    // ... business logic ...
+
+    let markup = html! { /* maud template */ };
+    HttpResponse::Ok()
+        .content_type("text/html; charset=utf-8")
+        .body(markup.into_string())
+}
+```
+
+### HTMX Page + Fragment Pattern
+```rust
+// Full page
+#[get("/deploys")]
+pub async fn deploy_page(/*...*/) -> impl Responder {
+    html! {
+        (DOCTYPE)
+        html {
+            head { /* ... */ }
+            body {
+                div hx-get="/deploys-fragment"
+                    hx-trigger="load, every 5s"
+                    hx-swap="morph:innerHTML" { }
+            }
+        }
+    }
+}
+
+// Fragment (updates via HTMX)
+#[get("/deploys-fragment")]
+pub async fn deploy_fragment(/*...*/) -> impl Responder {
+    html! {
+        @for item in items {
+            div { (item.name) }
+        }
+    }
+}
+```
+
+## Dependencies & Features
+
+### Core Stack
+- **Web**: `actix-web`, `actix-session`
+- **Database**: `rusqlite`, `r2d2`, `r2d2_sqlite`, `rusqlite_migration`
+- **Templating**: `maud`
+- **Kubernetes**: `kube`, `k8s-openapi`
+- **GitHub**: `octocrab`
+- **Error Handling**: Custom `AppError` (wraps various error types)
+- **Serialization**: `serde`, `serde_json`, `serde_yaml`
+
+### Feature Flags
+- `test-crd`: Enables TestDeployConfig instead of DeployConfig (for testing)
+
+## Known Limitations
+
+- Namespace changes not supported (must undeploy + redeploy)
+- Schema validation disabled on CRD (intentional for flexibility)
+- Foreign keys avoided in some places (personal preference for easier migrations)
+
+## Best Practices
+
+1. **Run before commit**: `cargo check && cargo clippy`
+2. **Test locally**: Ensure bootstrap, deploy, and undeploy flows work
+3. **Document limitations**: Add comments for known issues or edge cases
+4. **Use TODO comments**: For future improvements, but mark with FIXME if it's a bug
+5. **Log liberally**: Use `log::info!`, `log::warn!`, `log::error!` appropriately
+6. **Keep functions small**: Break up large functions into smaller, focused ones
+7. **Avoid unwrap/expect**: Use proper error propagation with `?`
+
+## Migration Strategy
+
+Database migrations are append-only in `src/db/migrations.rs`:
+```rust
+let migrations: Migrations = Migrations::new(vec![
+    M::up(indoc! { r#" /* initial schema */ "#}),
+    M::up(indoc! { r#" /* migration 1 */ "#}),
+    // Add new migrations here
+]);
+```
+
+NEVER modify existing migrations. Always add new ones.
+
