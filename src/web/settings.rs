@@ -98,6 +98,17 @@ pub async fn settings_index(req: actix_web::HttpRequest) -> impl Responder {
                         }
                     }
 
+                    div class="rate-limits-section" {
+                        h3 { "GitHub API Rate Limits" }
+                        div class="subtitle" { "Current rate limit status for configured tokens." }
+                        div class="rate-limits-display"
+                            id="rate-limits"
+                            hx-get="/rate-limits"
+                            hx-trigger="load, every 5s"
+                            hx-swap="innerHTML"
+                        { }
+                    }
+
                     div class="bootstrap-section" {
                         h3 { "Bootstrap" }
                         div class="subtitle" { "Initialize the database by scanning all accessible GitHub repositories." }
@@ -108,14 +119,12 @@ pub async fn settings_index(req: actix_web::HttpRequest) -> impl Responder {
                                 hx-swap="none"
                             { "Run bootstrap" }
                         }
-                        div class="bootstrap-log-box" {
-                            pre id="bootstrap-log"
-                                hx-get="/bootstrap/log"
-                                hx-trigger="load, every 1s"
-                                hx-swap="innerHTML"
-                                hx-on="htmx:afterSwap: this.scrollTop = this.scrollHeight"
-                            { }
-                        }
+                        div class="bootstrap-log-box"
+                            id="bootstrap-log"
+                            hx-get="/bootstrap/log"
+                            hx-trigger="load, every 1s"
+                            hx-swap="innerHTML"
+                        { }
                     }
                 }
             }

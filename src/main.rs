@@ -47,8 +47,7 @@ use crate::webhooks::manager::WebhookManager;
 use cicd::serve_static_file;
 use web::{
     all_recent_builds, bootstrap, deploy_config, deploy_history, deploy_history_index, index,
-    settings_index,
-    toggle_team,
+    settings_index, toggle_team,
 };
 
 async fn start_http(
@@ -109,6 +108,7 @@ async fn start_http(
             .service(settings_index)
             .service(bootstrap)
             .service(web::bootstrap_log)
+            .service(web::rate_limits)
             .service(toggle_team)
             .service(deploy_preview)
             .service(serve_static_file!("htmx.min.js"))
@@ -149,7 +149,7 @@ async fn main() -> std::io::Result<()> {
         .filter_module("kube_runtime::controller", log::LevelFilter::Warn) // Kubernetes controller logs every reconciliation at info level
         .filter_module("cicd::discord", log::LevelFilter::Info)
         .filter_module("cicd::kubernetes", log::LevelFilter::Info)
-        .filter_module("cicd::web", log::LevelFilter::Info)
+        .filter_module("cicd::web", log::LevelFilter::Debug)
         .filter_module("cicd::kubernetes::deploy_handlers", log::LevelFilter::Debug)
         .parse_default_env()
         .init();

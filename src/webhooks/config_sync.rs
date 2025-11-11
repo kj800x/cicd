@@ -43,6 +43,91 @@ impl ConfigSyncHandler {
     }
 }
 
+/// Sync deploy configs for a repository at a specific commit SHA.
+/// This is idempotent - calling multiple times with the same SHA won't create duplicates.
+pub async fn sync_deploy_configs_for_commit(
+    octocrabs: &Octocrabs,
+    client: &Client,
+    pool: &Pool<SqliteConnectionManager>,
+    repo_owner: &str,
+    repo_name: &str,
+    repo_id: u64,
+    commit_sha: &str,
+) -> Result<(), anyhow::Error> {
+    let repository = Repository {
+        owner: repo_owner.to_string(),
+        repo: repo_name.to_string(),
+    };
+
+    let deploy_configs =
+        fetch_deploy_configs_by_sha(octocrabs, repository.clone(), commit_sha).await?;
+
+    // Get connection after async work is done
+    let conn = pool.get()?;
+
+    let existing_deploy_configs = DbDeployConfig::get_by_config_repo_id(repo_id, &conn)?;
+
+    let current_deploy_config_names = deploy_configs
+        .iter()
+        .map(|dc| dc.name_any())
+        .collect::<Vec<String>>();
+
+    for deploy_config in deploy_configs.clone() {
+        // FIXME: Cases - artifact_repo defined and present in db, artifact_repo defined and not present in db, artifact_repo is null in the deploy config spec
+        // Right now we're treating "can't find artifact repo" as "no artifact repo", which is not correct.
+        let artifact_repo_id = match deploy_config.artifact_repository() {
+            Some(repository) => {
+                GitRepo::get_by_name(&repository.owner, &repository.repo, &conn)?.map(|r| r.id)
+            }
+            None => None,
+        };
+
+        let db_config = DbDeployConfig {
+            name: deploy_config.name_any(),
+            team: deploy_config.team().to_string(),
+            kind: deploy_config.kind().to_string(),
+            config_repo_id: repo_id,
+            artifact_repo_id,
+            active: true,
+        };
+
+        DbDeployConfig::upsert(&db_config, &conn)?;
+
+        DeployConfigVersion::upsert(
+            &DeployConfigVersion {
+                name: deploy_config.name_any(),
+                config_repo_id: repo_id,
+                config_commit_sha: commit_sha.to_string(),
+                hash: deploy_config.spec_hash(),
+            },
+            &conn,
+        )?;
+    }
+
+    let deleted_deploy_config_names = existing_deploy_configs
+        .iter()
+        .filter(|dc| !current_deploy_config_names.contains(&dc.name))
+        .map(|dc| dc.name.clone())
+        .collect::<Vec<String>>();
+
+    for deleted_deploy_config_name in &deleted_deploy_config_names {
+        DbDeployConfig::mark_inactive(deleted_deploy_config_name, &conn)?;
+    }
+
+    // Drop connection before async work
+    drop(conn);
+
+    update_deploy_configs_by_defining_repo(
+        client,
+        &deploy_configs,
+        &deleted_deploy_config_names,
+        &repository,
+    )
+    .await?;
+
+    Ok(())
+}
+
 #[async_trait]
 impl WebhookHandler for ConfigSyncHandler {
     async fn handle_push(&self, event: PushEvent) -> Result<(), anyhow::Error> {
@@ -50,78 +135,22 @@ impl WebhookHandler for ConfigSyncHandler {
 
         // Push to default branch, so we need to sync the deploy configs
         if extract_branch_name(&event.r#ref) == Some(event.repository.default_branch.clone()) {
-            let conn = self.pool.get()?;
+            #[allow(clippy::expect_used)]
+            let config_commit_sha = event
+                .head_commit
+                .as_ref()
+                .expect("Head commit should be present")
+                .id
+                .clone();
 
-            let deploy_configs =
-                fetch_current_deploy_configs(&self.octocrabs, event.repository.clone()).await?;
-
-            let existing_deploy_configs =
-                DbDeployConfig::get_by_config_repo_id(event.repository.id, &conn)?;
-
-            let current_deploy_config_names = deploy_configs
-                .iter()
-                .map(|dc| dc.name_any())
-                .collect::<Vec<String>>();
-
-            for deploy_config in deploy_configs.clone() {
-                // FIXME: Cases - artifact_repo defined and present in db, artifact_repo defined and not present in db, artifact_repo is null in the deploy config spec
-                // Right now we're treating "can't find artifact repo" as "no artifact repo", which is not correct.
-                let artifact_repo_id = match deploy_config.artifact_repository() {
-                    Some(repository) => {
-                        GitRepo::get_by_name(&repository.owner, &repository.repo, &conn)?
-                            .map(|r| r.id)
-                    }
-                    None => None,
-                };
-
-                let db_config = DbDeployConfig {
-                    name: deploy_config.name_any(),
-                    team: deploy_config.team().to_string(),
-                    kind: deploy_config.kind().to_string(),
-                    config_repo_id: event.repository.id,
-                    artifact_repo_id,
-                    active: true,
-                };
-
-                DbDeployConfig::upsert(&db_config, &conn)?;
-
-                #[allow(clippy::expect_used)]
-                let config_commit_sha = event
-                    .head_commit
-                    .as_ref()
-                    .expect("Head commit should be present")
-                    .id
-                    .clone();
-
-                DeployConfigVersion::upsert(
-                    &DeployConfigVersion {
-                        name: deploy_config.name_any(),
-                        config_repo_id: event.repository.id,
-                        config_commit_sha,
-                        hash: deploy_config.spec_hash(),
-                    },
-                    &conn,
-                )?;
-            }
-
-            let deleted_deploy_config_names = existing_deploy_configs
-                .iter()
-                .filter(|dc| !current_deploy_config_names.contains(&dc.name))
-                .map(|dc| dc.name.clone())
-                .collect::<Vec<String>>();
-
-            for deleted_deploy_config_name in &deleted_deploy_config_names {
-                DbDeployConfig::mark_inactive(deleted_deploy_config_name, &conn)?;
-            }
-
-            update_deploy_configs_by_defining_repo(
+            sync_deploy_configs_for_commit(
+                &self.octocrabs,
                 &self.client,
-                &deploy_configs,
-                &deleted_deploy_config_names,
-                &Repository {
-                    owner: event.repository.owner.login.clone(),
-                    repo: event.repository.name.clone(),
-                },
+                &self.pool,
+                &event.repository.owner.login,
+                &event.repository.name,
+                event.repository.id,
+                &config_commit_sha,
             )
             .await?;
         }

@@ -4,12 +4,14 @@ use crate::db::{
     git_repo::GitRepo,
 };
 use crate::prelude::*;
+use crate::webhooks::config_sync::sync_deploy_configs_for_commit;
 use actix_web::http::StatusCode;
 use chrono::Utc;
+use kube::Client;
 use octocrab::Octocrab;
 use std::sync::{Arc, Mutex, OnceLock};
 
-const BOOTSTRAP_COMMITS_PER_BRANCH: u8 = 10;
+const BOOTSTRAP_COMMITS_PER_BRANCH: u8 = 1;
 const PER_PAGE: u8 = 100;
 
 static BOOTSTRAP_LOG: OnceLock<Arc<Mutex<String>>> = OnceLock::new();
@@ -34,7 +36,7 @@ fn log_append(line: impl AsRef<str>) {
     log::info!("{}", line.as_ref());
 }
 
-async fn log_rate_limit(crab: &Octocrab, label: &str) {
+async fn log_rate_limit(crab: &Octocrab, label: &str) -> Option<usize> {
     // According to GitHub docs, GET /rate_limit doesn't count against primary rate limit
     // but can count against secondary rate limit, so use sparingly
     match crab.ratelimit().get().await {
@@ -47,10 +49,12 @@ async fn log_rate_limit(crab: &Octocrab, label: &str) {
                 rate_info.resources.core.limit,
                 reset_time
             ));
+            Some(rate_info.resources.core.remaining)
         }
         Err(e) => {
             log::warn!("Failed to fetch rate limit for {}: {:?}", label, e);
             log_append(format!("Failed to fetch rate limit for {}: {:?}", label, e));
+            None
         }
     }
 }
@@ -124,36 +128,92 @@ async fn get_status_state_for_sha(
     repo: &str,
     sha: &str,
 ) -> anyhow::Result<Option<String>> {
-    let resp = crab
+    let mut any_error_or_failure = false;
+    let mut any_pending = false;
+    let mut any_success = false;
+
+    // Check the older Statuses API
+    match crab
         .repos(owner, repo)
         .list_statuses(sha.to_string())
         .per_page(100)
         .page(1u32)
         .send()
-        .await?;
+        .await
+    {
+        Ok(resp) => {
+            for st in resp.items {
+                let state_str = format!("{:?}", st.state).to_lowercase();
+                match state_str.as_str() {
+                    "error" | "failure" => any_error_or_failure = true,
+                    "pending" => any_pending = true,
+                    "success" => any_success = true,
+                    _ => {}
+                }
+            }
+        }
+        Err(e) => {
+            log::debug!("Failed to fetch statuses for {}: {:?}", sha, e);
+        }
+    }
 
-    let mut any_error_or_failure = false;
-    let mut any_pending = false;
-    let mut any_success = false;
-
-    for st in resp.items {
-        let state_str = format!("{:?}", st.state).to_lowercase();
-        match state_str.as_str() {
-            "error" | "failure" => any_error_or_failure = true,
-            "pending" => any_pending = true,
-            "success" => any_success = true,
-            _ => {}
+    // Check the newer Checks API (used by GitHub Actions and most modern CI)
+    match crab
+        .checks(owner, repo)
+        .list_check_suites_for_git_ref(octocrab::params::repos::Commitish(sha.to_string()))
+        .per_page(100)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            log::debug!(
+                "Check suites for {}: found {} suites",
+                &sha[..7],
+                resp.check_suites.len()
+            );
+            for suite in resp.check_suites {
+                // status can be "queued", "in_progress", or "completed"
+                // conclusion can be "success", "failure", "neutral", "cancelled", "timed_out", "action_required", "skipped", null
+                log::debug!(
+                    "Check suite for {}: status={:?}, conclusion={:?}",
+                    &sha[..7],
+                    suite.status,
+                    suite.conclusion
+                );
+                match (suite.status.as_deref(), suite.conclusion.as_deref()) {
+                    (Some("completed"), Some("success")) => any_success = true,
+                    (Some("completed"), Some("failure" | "timed_out" | "action_required")) => {
+                        any_error_or_failure = true
+                    }
+                    (Some("queued" | "in_progress"), _) => any_pending = true,
+                    // Treat neutral, cancelled, and skipped as success for display purposes
+                    (Some("completed"), Some("neutral" | "cancelled" | "skipped")) => {
+                        any_success = true
+                    }
+                    _ => {
+                        log::debug!(
+                            "Unhandled check suite state for {}: status={:?}, conclusion={:?}",
+                            &sha[..7],
+                            suite.status,
+                            suite.conclusion
+                        );
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            log::debug!("Failed to fetch check suites for {}: {:?}", &sha[..7], e);
         }
     }
 
     let combined = if any_error_or_failure {
-        "Failure"
+        "failure"
     } else if any_pending {
-        "Pending"
+        "pending"
     } else if any_success {
-        "Success"
+        "success"
     } else {
-        "None"
+        return Ok(None); // No status information found
     };
     Ok(Some(combined.to_string()))
 }
@@ -167,7 +227,7 @@ fn map_state_to_status(state: &str) -> String {
     }
 }
 
-async fn run_bootstrap(pool: Pool<SqliteConnectionManager>, octocrabs: Octocrabs) {
+async fn run_bootstrap(pool: Pool<SqliteConnectionManager>, octocrabs: Octocrabs, client: Client) {
     tokio::spawn(async move {
         log_clear();
         log_append("Starting bootstrap scan");
@@ -181,8 +241,9 @@ async fn run_bootstrap(pool: Pool<SqliteConnectionManager>, octocrabs: Octocrabs
             }
         };
 
-        for crab in &octocrabs {
-            log_rate_limit(crab, "before-list-repos").await;
+        for (idx, crab) in octocrabs.iter().enumerate() {
+            let token_label = format!("token-{}", idx + 1);
+            let start_remaining = log_rate_limit(crab, &format!("start-{}", token_label)).await;
             match list_all_repos(crab).await {
                 Ok(repos) => {
                     log_append(format!("Discovered {} repositories", repos.len()));
@@ -425,6 +486,39 @@ async fn run_bootstrap(pool: Pool<SqliteConnectionManager>, octocrabs: Octocrabs
                                         ));
                                     }
                                 }
+
+                                // Sync deploy configs for this commit (idempotent)
+                                match sync_deploy_configs_for_commit(
+                                    &octocrabs,
+                                    &client,
+                                    &pool,
+                                    &repo.owner_name,
+                                    &repo.name,
+                                    repo.id as u64,
+                                    &c.sha,
+                                )
+                                .await
+                                {
+                                    Ok(_) => {
+                                        log_append(format!(
+                                            "repo {}/{}: synced deploy configs for {}",
+                                            repo.owner_name,
+                                            repo.name,
+                                            c.sha[..7].to_string()
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        log::debug!(
+                                            "Bootstrap: sync deploy configs for {}/{} @ {} failed: {:?}",
+                                            repo.owner_name,
+                                            repo.name,
+                                            c.sha,
+                                            e
+                                        );
+                                        // Don't fail the entire bootstrap if deploy config sync fails
+                                        // Some repos may not have .deploy directories
+                                    }
+                                }
                             }
                         } else {
                             log_append(format!(
@@ -433,7 +527,17 @@ async fn run_bootstrap(pool: Pool<SqliteConnectionManager>, octocrabs: Octocrabs
                             ));
                         }
                     }
-                    log_rate_limit(crab, "after-all-repos").await;
+                    let end_remaining = log_rate_limit(crab, &format!("end-{}", token_label)).await;
+
+                    // Calculate usage if we have both start and end measurements
+                    if let (Some(start), Some(end)) = (start_remaining, end_remaining) {
+                        let used = start.saturating_sub(end);
+                        log_append(format!(
+                            "Bootstrap used approximately {} API requests for {}",
+                            used, token_label
+                        ));
+                    }
+
                     log_append("Bootstrap completed");
                 }
                 Err(e) => {
@@ -449,8 +553,14 @@ async fn run_bootstrap(pool: Pool<SqliteConnectionManager>, octocrabs: Octocrabs
 pub async fn bootstrap(
     pool: web::Data<Pool<SqliteConnectionManager>>,
     octocrabs: web::Data<Octocrabs>,
+    client: web::Data<Client>,
 ) -> impl Responder {
-    run_bootstrap(pool.get_ref().clone(), octocrabs.get_ref().clone()).await;
+    run_bootstrap(
+        pool.get_ref().clone(),
+        octocrabs.get_ref().clone(),
+        client.get_ref().clone(),
+    )
+    .await;
 
     HttpResponse::build(StatusCode::ACCEPTED)
         .content_type("text/html; charset=utf-8")
@@ -459,12 +569,80 @@ pub async fn bootstrap(
 
 #[get("/bootstrap/log")]
 pub async fn bootstrap_log() -> impl Responder {
-    let body = get_bootstrap_log()
+    let log_text = get_bootstrap_log()
         .lock()
         .map(|s| s.clone())
         .unwrap_or_else(|_| "log unavailable".to_string());
 
+    // Split into lines and reverse for flex-direction: column-reverse
+    let lines: Vec<&str> = log_text.lines().collect();
+
+    let markup = maud::html! {
+        @for line in lines.iter().rev() {
+            div class="log-line" { (line) }
+        }
+    };
+
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
-        .body(maud::html! { (body) }.into_string())
+        .body(markup.into_string())
+}
+
+#[get("/rate-limits")]
+pub async fn rate_limits(octocrabs: web::Data<Octocrabs>) -> impl Responder {
+    let mut results = Vec::new();
+
+    for (idx, crab) in octocrabs.iter().enumerate() {
+        let token_num = idx + 1;
+        match crab.ratelimit().get().await {
+            Ok(rate_info) => {
+                // Convert Unix timestamp to New York time
+                use chrono::{TimeZone, Utc};
+                use chrono_tz::America::New_York;
+                let reset_dt = Utc
+                    .timestamp_opt(rate_info.resources.core.reset as i64, 0)
+                    .single()
+                    .map(|dt| {
+                        let ny_time = dt.with_timezone(&New_York);
+                        ny_time.format("%Y-%m-%d %H:%M:%S %Z").to_string()
+                    })
+                    .unwrap_or_else(|| "Unknown".to_string());
+
+                results.push((
+                    token_num,
+                    Some(rate_info.resources.core.remaining),
+                    Some(rate_info.resources.core.limit),
+                    Some(reset_dt),
+                ));
+            }
+            Err(e) => {
+                log::debug!(
+                    "Failed to fetch rate limit for token {}: {:?}",
+                    token_num,
+                    e
+                );
+                results.push((token_num, None, None, None));
+            }
+        }
+    }
+
+    let markup = maud::html! {
+        @for (token_num, remaining, limit, reset) in results {
+            div class="rate-limit-row" {
+                div class="rate-limit-token" { "Token " (token_num) }
+                @if let (Some(rem), Some(lim), Some(rst)) = (remaining, limit, reset) {
+                    div class="rate-limit-usage" {
+                        span class="rate-limit-numbers" { (rem) " / " (lim) }
+                        span class="rate-limit-reset" { " (resets at " (rst) ")" }
+                    }
+                } @else {
+                    div class="rate-limit-error" { "Unable to fetch" }
+                }
+            }
+        }
+    };
+
+    HttpResponse::Ok()
+        .content_type("text/html; charset=utf-8")
+        .body(markup.into_string())
 }
