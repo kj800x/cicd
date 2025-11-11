@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: cicd
+  name: cicd
+  namespace: cicd
+spec:
+  replicas: 1
+  revisionHistoryLimit: 1
+  selector:
+    matchLabels:
+      app: cicd
+  template:
+    metadata:
+      labels:
+        app: cicd
+    spec:
+      containers:
+        - command:
+            - cicd
+          env:
+            - name: WEBSOCKET_URL
+              value: ws://apps.coolkev.com:8080/ws
+            - name: ENABLE_K8S_CONTROLLER
+              value: 'true'
+            - name: DATABASE_PATH
+              value: /data/db.db
+            - name: GITHUB_PATS
+              valueFrom:
+                secretKeyRef:
+                  key: GITHUB_PATS
+                  name: cicd-auth
+            - name: CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  key: CLIENT_SECRET
+                  name: cicd-auth
+            - name: DISCORD_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: DISCORD_BOT_TOKEN
+                  name: cicd-auth
+            - name: DISCORD_CHANNEL_ID
+              valueFrom:
+                secretKeyRef:
+                  key: DISCORD_CHANNEL_ID
+                  name: cicd-auth
+          image: ghcr.io/kj800x/cicd:commit-$SHA
+          name: cicd
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /data
+              name: cicd-data
+          workingDir: /usr/src/cicd
+      imagePullSecrets:
+        - name: ghcr-kj800x
+      serviceAccountName: cicd-operator
+      volumes:
+        - name: cicd-data
+          nfs:
+            path: /data/services/cicd
+            server: 10.60.1.15

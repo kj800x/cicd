@@ -1,0 +1,8 @@
+artifactRepo:
+  owner: kj800x
+  repo: cicd
+  branch: master
+
+team: cluster-infra
+kind: service
+namespace: cicd

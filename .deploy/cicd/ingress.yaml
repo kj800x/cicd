@@ -1,0 +1,23 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  labels:
+    app.kubernetes.io/instance: cicd
+  annotations:
+    external-dns.alpha.kubernetes.io/hostname: cicd.home.coolkev.com
+    traefik.ingress.kubernetes.io/router.tls.certresolver: letsencrypt
+  name: cicd
+  namespace: cicd
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: cicd.home.coolkev.com
+      http:
+        paths:
+          - backend:
+              service:
+                name: cicd
+                port:
+                  number: 80
+            path: /
+            pathType: Prefix
