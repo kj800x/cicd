@@ -147,6 +147,20 @@ pub async fn settings_index(req: actix_web::HttpRequest) -> impl Responder {
                             }
                         }
 
+                        div class="bootstrap-mode" {
+                            h4 { "Repo Resync" }
+                            div class="bootstrap-description" { "Quick resync: fetch latest commit from default branch and update deploy configs" }
+                            div class="repo-input-group" {
+                                input type="text" id="resync-owner" placeholder="owner" class="repo-input" {}
+                                span class="repo-separator" { "/" }
+                                input type="text" id="resync-repo" placeholder="repo" class="repo-input" {}
+                                button
+                                    class="bootstrap-button"
+                                    onclick="fetch('/bootstrap/repo/resync', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ owner: document.getElementById('resync-owner').value, repo: document.getElementById('resync-repo').value }) })"
+                                { "Resync Repo" }
+                            }
+                        }
+
                         div class="bootstrap-log-box"
                             id="bootstrap-log"
                             hx-get="/bootstrap/log"

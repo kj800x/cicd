@@ -110,6 +110,7 @@ async fn start_http(
             .service(web::bootstrap_quick)
             .service(web::bootstrap_owner)
             .service(web::bootstrap_repo)
+            .service(web::bootstrap_repo_resync)
             .service(web::bootstrap_log)
             .service(web::rate_limits)
             .service(toggle_team)
