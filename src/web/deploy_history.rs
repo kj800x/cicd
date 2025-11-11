@@ -29,7 +29,7 @@ fn render_event_row(conn: &PooledConnection<SqliteConnectionManager>, e: &Deploy
             (render_config_cell(conn, e))
             td class="time-cell" { (when_abs) }
             td class="actions-cell" {
-                button class="link-button" { "Revert to this deploy" }
+                button class="link-button" onclick="alert('todo, not implemented yet')" { "Revert to this deploy" }
             }
         }
     }
