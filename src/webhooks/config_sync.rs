@@ -224,10 +224,6 @@ pub async fn fetch_deploy_configs_by_sha(
         Err(__e) => {
             // FIXME: Should actually confirm that this is a 404 before saying Ok(())
             return Ok(vec![]);
-            // if e.source().is_some_and(|e| e.to_string().contains("404")) {
-            // } else {
-            //     return Err(anyhow::anyhow!("Failed to read .deploy: {}", e));
-            // }
         }
     };
 

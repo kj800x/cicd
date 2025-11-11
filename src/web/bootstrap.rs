@@ -513,11 +513,6 @@ async fn run_owner_bootstrap_impl(
                             }
 
                             // Best-effort: fetch combined status
-                            // log_rate_limit(
-                            //     crab,
-                            //     &format!("before-status-{}", commit.sha[..7].to_string()),
-                            // )
-                            // .await;
                             match get_status_state_for_sha(
                                 crab,
                                 &repo.owner_name,
@@ -862,11 +857,6 @@ async fn run_repo_bootstrap_impl(
                     }
 
                     // Fetch build status for each commit
-                    // log_rate_limit(
-                    //     crab,
-                    //     &format!("before-status-{}", commit.sha[..7].to_string()),
-                    // )
-                    // .await;
                     match get_status_state_for_sha(crab, &owner, &repo_name, &commit.sha).await {
                         Ok(Some(cs)) => {
                             let status = map_state_to_status(&cs);

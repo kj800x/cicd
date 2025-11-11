@@ -30,7 +30,6 @@ impl IRepo for Repository {
 pub struct CommitAuthor {
     pub name: String,
     pub email: String,
-    // pub username: String,
 }
 
 impl From<&CommitAuthor> for String {

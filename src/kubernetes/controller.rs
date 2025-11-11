@@ -18,9 +18,6 @@ use std::{sync::Arc, time::Duration};
 pub struct ControllerContext {
     /// Kubernetes client
     client: Client,
-    // /// Discord notifier (if enabled)
-    // #[allow(dead_code)]
-    // discord_notifier: Option<DiscordNotifier>,
 }
 
 /// The reconciliation function for DeployConfig resources
