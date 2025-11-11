@@ -525,6 +525,56 @@ header {
   }
 }
 
+.settings-page {
+  .content {
+    max-width: 800px;
+    margin: 0 auto;
+  }
+
+  .bootstrap-section {
+    margin-top: 32px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border-color);
+  }
+
+  .bootstrap-actions {
+    margin: 8px 0 12px 0;
+  }
+
+  .bootstrap-button {
+    padding: 8px 16px;
+    font-size: 14px;
+    font-weight: 600;
+    color: white;
+    background-color: var(--primary-blue);
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+
+  .bootstrap-button:hover {
+    background-color: #0a5ec3;
+  }
+
+  .bootstrap-log-box {
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: #fff;
+    padding: 8px 12px;
+    max-height: 280px;
+    overflow: auto;
+  }
+
+  .bootstrap-log-box pre {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace;
+  }
+}
+
 .index-page {
   .branch-grid {
     display: grid;

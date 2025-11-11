@@ -76,8 +76,8 @@ pub async fn settings_index(req: actix_web::HttpRequest) -> impl Responder {
                 (header::stylesheet_link())
                 (header::scripts())
             }
-            body.teams-page hx-ext="morph" {
-                (header::render("teams"))
+            body.settings-page hx-ext="morph" {
+                (header::render("settings"))
                 div class="content" {
                     header {
                         h1 { "Settings" }
@@ -95,6 +95,26 @@ pub async fn settings_index(req: actix_web::HttpRequest) -> impl Responder {
                             @for t in &all_teams {
                                 (render_team_row(t, memberships.is_member(t)))
                             }
+                        }
+                    }
+
+                    div class="bootstrap-section" {
+                        h3 { "Bootstrap" }
+                        div class="subtitle" { "Initialize the database by scanning all accessible GitHub repositories." }
+                        div class="bootstrap-actions" {
+                            button
+                                class="bootstrap-button"
+                                hx-post="/bootstrap"
+                                hx-swap="none"
+                            { "Run bootstrap" }
+                        }
+                        div class="bootstrap-log-box" {
+                            pre id="bootstrap-log"
+                                hx-get="/bootstrap/log"
+                                hx-trigger="load, every 1s"
+                                hx-swap="innerHTML"
+                                hx-on="htmx:afterSwap: this.scrollTop = this.scrollHeight"
+                            { }
                         }
                     }
                 }

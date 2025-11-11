@@ -46,7 +46,8 @@ use crate::webhooks::database::DatabaseHandler;
 use crate::webhooks::manager::WebhookManager;
 use cicd::serve_static_file;
 use web::{
-    all_recent_builds, deploy_config, deploy_history, deploy_history_index, index, settings_index,
+    all_recent_builds, bootstrap, deploy_config, deploy_history, deploy_history_index, index,
+    settings_index,
     toggle_team,
 };
 
@@ -106,6 +107,8 @@ async fn start_http(
             .service(deploy_history_index)
             .service(web::deploy_history_fragment)
             .service(settings_index)
+            .service(bootstrap)
+            .service(web::bootstrap_log)
             .service(toggle_team)
             .service(deploy_preview)
             .service(serve_static_file!("htmx.min.js"))

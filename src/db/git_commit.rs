@@ -122,7 +122,15 @@ impl GitCommit {
         conn: &PooledConnection<SqliteConnectionManager>,
     ) -> AppResult<Self> {
         conn.prepare(
-            "INSERT OR REPLACE INTO git_commit (sha, repo_id, message, author, committer, timestamp) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            r#"
+            INSERT INTO git_commit (sha, repo_id, message, author, committer, timestamp)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(sha, repo_id) DO UPDATE SET
+              message=excluded.message,
+              author=excluded.author,
+              committer=excluded.committer,
+              timestamp=excluded.timestamp
+            "#,
         )?
         .execute(params![
             commit.sha,
@@ -133,7 +141,10 @@ impl GitCommit {
             commit.timestamp
         ])?;
 
-        Ok(Self::from_egg(commit, conn.last_insert_rowid()))
+        // Fetch the row to get its stable id
+        let updated = Self::get_by_sha(&commit.sha, commit.repo_id, conn)?
+            .ok_or(AppError::Internal("Failed to fetch upserted commit".to_string()))?;
+        Ok(updated)
     }
 
     #[allow(unused)]
