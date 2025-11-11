@@ -1,5 +1,6 @@
-use crate::kubernetes::{controller::Error, DeployConfigStatusBuilder};
+use crate::kubernetes::{DeployConfig, DeployConfigStatusBuilder};
 use crate::prelude::*;
+use k8s_openapi::api::core::v1::Namespace;
 use kube::api::{DeleteParams, GroupVersionKind, TypeMeta};
 use kube::discovery::pinned_kind;
 use kube::{
@@ -8,32 +9,27 @@ use kube::{
     core::discovery,
     Discovery,
 };
-use serde_json::Value;
 
-pub async fn apply(
-    client: &Client,
-    ns: &str,
-    obj: DynamicObject,
-) -> Result<DynamicObject, anyhow::Error> {
+pub async fn apply(client: &Client, ns: &str, obj: DynamicObject) -> AppResult<DynamicObject> {
     // require name + type info
     let name = obj
         .metadata
         .name
         .clone()
-        .ok_or_else(|| anyhow::anyhow!("metadata.name required"))?;
+        .ok_or_else(|| AppError::Internal("metadata.name required".to_string()))?;
     let gvk = GroupVersionKind::try_from(
         obj.types
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("missing types on DynamicObject"))?,
+            .ok_or_else(|| AppError::Internal("missing types on DynamicObject".to_string()))?,
     )
-    .map_err(|e| anyhow::anyhow!("failed parsing GVK: {}", e))?;
+    .map_err(|e| AppError::Internal(format!("failed parsing GVK: {}", e)))?;
 
     log::debug!("Applying {}/{}", ns, name);
 
     // resolve ApiResource and scope
     let (ar, caps) = pinned_kind(client, &gvk)
         .await
-        .map_err(|e| anyhow::anyhow!("GVK {gvk:?} not found via discovery: {}", e))?;
+        .map_err(|e| AppError::Internal(format!("GVK {gvk:?} not found via discovery: {}", e)))?;
 
     let api: Api<DynamicObject> = match caps.scope {
         discovery::Scope::Namespaced => Api::namespaced_with(client.clone(), ns, &ar),
@@ -42,16 +38,16 @@ pub async fn apply(
 
     // SSA upsert
     let pp = PatchParams::apply("cicd-controller").force(); // drop .force() if you prefer conflicts to surface
-    api.patch(&name, &pp, &Patch::Apply(obj))
+    let obj = api
+        .patch(&name, &pp, &Patch::Apply(obj))
         .await
-        .map_err(|e| anyhow::anyhow!("failed to apply object: {}", e))
+        .map_err(AppError::Kubernetes)?;
+
+    Ok(obj)
 }
 
 /// Delete a DynamicObject
-pub async fn delete_dynamic_object(
-    client: Client,
-    obj: &DynamicObject,
-) -> Result<(), anyhow::Error> {
+pub async fn delete_dynamic_object(client: Client, obj: &DynamicObject) -> AppResult<()> {
     log::debug!(
         "Deleting {}/{}",
         obj.namespace().unwrap_or_else(|| "default".to_string()),
@@ -63,16 +59,17 @@ pub async fn delete_dynamic_object(
     let gvk = GroupVersionKind::try_from(
         obj.types
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("missing types"))?,
+            .ok_or_else(|| AppError::Internal("missing types".to_string()))?,
     )
-    .map_err(|e| anyhow::anyhow!("failed to parse GVK: {}", e))?;
+    .map_err(|e| AppError::Internal(format!("failed parsing GVK: {}", e)))?;
 
     let (ar, caps) = pinned_kind(&client, &gvk).await?;
 
     let api: Api<DynamicObject> = match caps.scope {
         discovery::Scope::Namespaced => {
-            let ns = ns
-                .ok_or_else(|| anyhow::anyhow!("namespaced resource missing metadata.namespace"))?;
+            let ns = ns.ok_or_else(|| {
+                AppError::Internal("namespaced resource missing metadata.namespace".to_string())
+            })?;
             Api::namespaced_with(client, &ns, &ar)
         }
         discovery::Scope::Cluster => Api::all_with(client, &ar),
@@ -81,15 +78,24 @@ pub async fn delete_dynamic_object(
     let result = api.delete(&name, &DeleteParams::default()).await;
     match result {
         Ok(_) => Ok(()),
-        Err(e) => Err(anyhow::anyhow!("failed to delete object: {}", e)),
+        Err(e) => Err(AppError::Internal(format!(
+            "failed to delete object: {}",
+            e
+        ))),
     }
+}
+
+pub enum ListMode {
+    All,
+    Owned,
 }
 
 /// Return all DynamicObjects in `ns`
 pub async fn list_namespace_objects(
-    client: Client,
+    client: &Client,
     ns: &str,
-) -> Result<Vec<DynamicObject>, anyhow::Error> {
+    mode: ListMode,
+) -> AppResult<Vec<DynamicObject>> {
     let disc = Discovery::new(client.clone()).run().await?;
     let mut out = Vec::new();
 
@@ -108,9 +114,12 @@ pub async fn list_namespace_objects(
 
             // Paginate to avoid truncation on large lists
             // only what *we* manage
-            let mut lp = ListParams::default()
-                .labels("app.kubernetes.io/managed-by=cicd-controller")
-                .limit(500);
+            let mut lp = match mode {
+                ListMode::All => ListParams::default().limit(500),
+                ListMode::Owned => ListParams::default()
+                    .labels("app.kubernetes.io/managed-by=cicd-controller")
+                    .limit(500),
+            };
             let mut continue_token: Option<String> = None;
 
             loop {
@@ -151,19 +160,78 @@ pub async fn list_namespace_objects(
     Ok(out)
 }
 
+pub async fn set_deploy_config_specs(
+    client: &Client,
+    namespace: &str,
+    name: &str,
+    specs: Vec<serde_json::Value>,
+) -> AppResult<()> {
+    let api: Api<DeployConfig> = Api::namespaced(client.clone(), namespace);
+    let patch = Patch::Merge(serde_json::json!({ "spec": { "specs": specs } }));
+    let params = PatchParams::default();
+    api.patch(name, &params, &patch)
+        .await
+        .map_err(AppError::Kubernetes)?;
+
+    Ok(())
+}
+
 /// Update the DeployConfig status according to the given status builder
 pub async fn update_deploy_config_status(
     client: &Client,
     namespace: &str,
     name: &str,
     update: DeployConfigStatusBuilder,
-) -> Result<(), Error> {
+) -> AppResult<()> {
     let api: Api<DeployConfig> = Api::namespaced(client.clone(), namespace);
 
-    let status: Value = update.into();
+    let status: serde_json::Value = update.into();
     let patch = Patch::Merge(&status);
     let params = PatchParams::default();
     api.patch_status(name, &params, &patch).await?;
 
     Ok(())
+}
+
+pub async fn delete_deploy_config(client: &Client, namespace: &str, name: &str) -> AppResult<()> {
+    let api: Api<DeployConfig> = Api::namespaced(client.clone(), namespace);
+    api.delete(name, &DeleteParams::default()).await?;
+    Ok(())
+}
+
+pub async fn get_all_deploy_configs(client: &Client) -> AppResult<Vec<DeployConfig>> {
+    // Get all DeployConfigs across all namespaces
+    let deploy_configs_api: Api<DeployConfig> = Api::all(client.clone());
+    let deploy_configs = match deploy_configs_api.list(&Default::default()).await {
+        Ok(list) => list.items,
+        Err(e) => {
+            return Err(AppError::Kubernetes(e));
+        }
+    };
+
+    Ok(deploy_configs)
+}
+
+pub async fn get_deploy_config(client: &Client, name: &str) -> AppResult<Option<DeployConfig>> {
+    let deploy_configs = get_all_deploy_configs(client).await?;
+    let deploy_config = deploy_configs
+        .into_iter()
+        .find(|config| config.name_any() == name);
+    Ok(deploy_config)
+}
+
+pub async fn get_namespace_uid(client: &Client, namespace: &str) -> AppResult<String> {
+    let namespaces_api: Api<Namespace> = Api::all(client.clone());
+    let namespace = match namespaces_api.get(namespace).await {
+        Ok(namespace) => namespace,
+        Err(e) => {
+            return Err(AppError::Kubernetes(e));
+        }
+    };
+
+    #[allow(clippy::expect_used)]
+    Ok(namespace
+        .metadata
+        .uid
+        .expect("expect namespaces to all have a uid"))
 }

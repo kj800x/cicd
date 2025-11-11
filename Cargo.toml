@@ -6,6 +6,8 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+indoc = "2"
+async-trait = "0.1"
 env_logger = "0.10"
 futures-util = { version = "0.3.17", default-features = false, features = [
   "std",
@@ -43,6 +45,7 @@ serenity = { version = "0.12.0", default-features = false, features = [
 ] }
 thiserror = "1.0.56"
 anyhow = "1.0.80"
+md5 = "0.7"
 
 # Kubernetes related dependencies
 kube = { version = "0.99.0", features = ["runtime", "derive"] }

@@ -41,6 +41,12 @@ pub fn format_anyhow_chain(err: &anyhow::Error) -> String {
     output
 }
 
+impl PartialEq for AppError {
+    fn eq(&self, _other: &Self) -> bool {
+        false
+    }
+}
+
 /// Central application error type
 #[derive(Error, Debug)]
 pub enum AppError {

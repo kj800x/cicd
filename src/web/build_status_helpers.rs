@@ -1,4 +1,4 @@
-use crate::db::BuildStatus;
+use crate::build_status::BuildStatus;
 
 /// Get the CSS class for a build status indicator
 pub fn build_status_class(status: &BuildStatus) -> &'static str {

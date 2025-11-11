@@ -1,16 +1,21 @@
 mod all_recent_builds;
 mod build_status_helpers;
 mod deploy_configs;
+mod deploy_history;
 mod formatting;
 mod fragments;
 mod header;
-mod htmx;
 mod index;
-mod watchdog;
+mod bootstrap;
+mod resource_status;
+mod settings;
+pub mod team_prefs;
 
 pub use all_recent_builds::*;
 pub use deploy_configs::*;
+pub use deploy_history::*;
 pub use fragments::*;
-pub use htmx::*;
 pub use index::*;
-pub use watchdog::*;
+pub use bootstrap::*;
+pub use resource_status::*;
+pub use settings::*;

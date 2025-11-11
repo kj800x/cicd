@@ -1,15 +1,26 @@
-use crate::db::{get_latest_build, get_latest_completed_build, insert_deploy_event, DeployEvent};
-use crate::kubernetes::DeployConfigStatusBuilder;
-use crate::prelude::*;
-use crate::web::{build_status, deploy_status, header};
-use kube::{
-    api::{Api, Patch, PatchParams},
-    client::Client,
-    ResourceExt,
+#![allow(clippy::expect_used)]
+
+use crate::crab_ext::Octocrabs;
+use crate::db::deploy_event::DeployEvent;
+use crate::db::git_branch::GitBranch;
+use crate::db::git_commit::GitCommit;
+use crate::db::git_repo::GitRepo;
+use crate::kubernetes::api::{
+    get_all_deploy_configs, get_deploy_config, get_namespace_uid, ListMode,
 };
+use crate::kubernetes::deploy_handlers::DeployAction;
+use crate::kubernetes::repo::{DeploymentState, ShaMaybeBranch};
+use crate::kubernetes::{list_namespace_objects, DeployConfig};
+use crate::prelude::*;
+use crate::web::team_prefs::TeamsCookie;
+use crate::web::{build_status, deploy_status, header, ResourceStatuses};
+use kube::api::DynamicObject;
+use kube::{Client, ResourceExt};
 use maud::{html, Markup, Render};
-use serde_json::Value;
 use std::collections::HashMap;
+
+// FIXME: Make this configurable.
+const HEADLAMP_URL: &str = "https://headlamp.home.coolkev.com";
 
 struct PreviewArrow;
 
@@ -19,7 +30,7 @@ impl Render for PreviewArrow {
     }
 }
 
-struct GitRef(String, String, String, bool);
+struct GitRef(String, String, String, bool, Option<String>);
 
 impl Render for GitRef {
     fn render(&self) -> Markup {
@@ -27,6 +38,7 @@ impl Render for GitRef {
         let repo = self.2.clone();
         let sha = self.0.clone();
         let disable_prefixing = self.3;
+        let file_path = self.4.clone();
 
         let sha_prefix = if !disable_prefixing && sha.len() >= 7 {
             &sha[..7]
@@ -36,7 +48,7 @@ impl Render for GitRef {
 
         html!(
             span {
-                a.git-ref href=(format!("https://github.com/{}/{}/tree/{}", owner, repo, sha)) {
+                a.git-ref href=(format!("https://github.com/{}/{}/tree/{}{}", owner, repo, sha, file_path.map(|path| format!("/{}", path)).unwrap_or_default())) target="_blank" {
                     (sha_prefix)
                 }
             }
@@ -109,125 +121,74 @@ pub enum ResolvedVersion {
 }
 
 impl ResolvedVersion {
-    fn get_build_time(&self) -> Option<u64> {
-        match self {
-            ResolvedVersion::BranchTracked { build_time, .. }
-            | ResolvedVersion::TrackedSha { build_time, .. } => Some(*build_time),
-            _ => None,
-        }
-    }
-
-    fn from_config(
-        config: &DeployConfig,
-        conn: &PooledConnection<SqliteConnectionManager>,
-    ) -> Self {
-        match &config.status {
-            None => ResolvedVersion::Undeployed,
-            Some(status) => match &status.artifact.as_ref().and_then(|a| a.wanted_sha.as_ref()) {
-                Some(sha) => {
-                    let commit = get_commit_by_sha(sha, conn).ok().flatten();
-
-                    // FIXME: Technically we don't know if the commit was selected as part of a tracking branch or not
-                    match commit {
-                        Some(commit) => ResolvedVersion::BranchTracked {
-                            sha: sha.to_string(),
-                            branch: config.tracking_branch().to_string(),
-                            build_time: commit.timestamp as u64,
-                        },
-                        None => ResolvedVersion::UnknownSha {
-                            sha: sha.to_string(),
-                        },
-                    }
-                }
-                None => ResolvedVersion::Undeployed,
-            },
-        }
-    }
-
     pub fn from_action(
         action: &Action,
         config: &DeployConfig,
         conn: &PooledConnection<SqliteConnectionManager>,
         build_filter: BuildFilter,
     ) -> Self {
+        let artifact_repository = config
+            .artifact_repository()
+            .expect("Failed to get artifact repository");
+        let repo =
+            GitRepo::get_by_name(&artifact_repository.owner, &artifact_repository.repo, conn)
+                .ok()
+                .flatten()
+                .expect("Failed to get git repo");
+
         match action {
             Action::DeployLatest => {
-                let branch = config.tracking_branch();
+                let deployment_state = config.deployment_state();
+                let branch_name = deployment_state.artifact_branch().unwrap_or("master");
+
+                let branch = GitBranch::get_by_name(branch_name, repo.id, conn)
+                    .ok()
+                    .flatten();
+
+                let Some(branch) = branch else {
+                    return ResolvedVersion::ResolutionFailed;
+                };
+
                 let commit = match build_filter {
-                    BuildFilter::Any => get_latest_build(
-                        config.artifact_owner(),
-                        config.artifact_repo(),
-                        branch,
-                        conn,
-                    )
-                    .ok()
-                    .flatten(),
-                    BuildFilter::Completed => get_latest_completed_build(
-                        config.artifact_owner(),
-                        config.artifact_repo(),
-                        branch,
-                        conn,
-                    )
-                    .ok()
-                    .flatten(),
-                    BuildFilter::Successful => get_latest_successful_build(
-                        config.artifact_owner(),
-                        config.artifact_repo(),
-                        branch,
-                        conn,
-                    )
-                    .ok()
-                    .flatten(),
+                    BuildFilter::Any => branch.latest_build(conn).ok().flatten(),
+                    BuildFilter::Completed => branch.latest_completed_build(conn).ok().flatten(),
+                    BuildFilter::Successful => branch.latest_successful_build(conn).ok().flatten(),
                 };
 
                 match commit {
                     Some(commit) => ResolvedVersion::BranchTracked {
                         sha: commit.sha,
-                        branch: branch.to_string(),
+                        branch: branch.name.clone(),
+                        // FIXME: This isn't build time, it's commit time
                         build_time: commit.timestamp as u64,
                     },
                     None => ResolvedVersion::ResolutionFailed,
                 }
             }
             Action::DeployBranch { branch } => {
+                let branch = GitBranch::get_by_name(branch, repo.id, conn).ok().flatten();
+
+                let Some(branch) = branch else {
+                    return ResolvedVersion::ResolutionFailed;
+                };
+
                 let commit = match build_filter {
-                    BuildFilter::Any => get_latest_build(
-                        config.artifact_owner(),
-                        config.artifact_repo(),
-                        branch,
-                        conn,
-                    )
-                    .ok()
-                    .flatten(),
-                    BuildFilter::Completed => get_latest_completed_build(
-                        config.artifact_owner(),
-                        config.artifact_repo(),
-                        branch,
-                        conn,
-                    )
-                    .ok()
-                    .flatten(),
-                    BuildFilter::Successful => get_latest_successful_build(
-                        config.artifact_owner(),
-                        config.artifact_repo(),
-                        branch,
-                        conn,
-                    )
-                    .ok()
-                    .flatten(),
+                    BuildFilter::Any => branch.latest_build(conn).ok().flatten(),
+                    BuildFilter::Completed => branch.latest_completed_build(conn).ok().flatten(),
+                    BuildFilter::Successful => branch.latest_successful_build(conn).ok().flatten(),
                 };
 
                 match commit {
                     Some(commit) => ResolvedVersion::BranchTracked {
                         sha: commit.sha,
-                        branch: branch.clone(),
+                        branch: branch.name.clone(),
                         build_time: commit.timestamp as u64,
                     },
                     None => ResolvedVersion::ResolutionFailed,
                 }
             }
             Action::DeployCommit { sha } => {
-                let commit = get_commit_by_sha(sha, conn).ok().flatten();
+                let commit = GitCommit::get_by_sha(sha, repo.id, conn).ok().flatten();
 
                 match commit {
                     Some(commit) => ResolvedVersion::TrackedSha {
@@ -259,10 +220,26 @@ impl ResolvedVersion {
     pub fn format(&self, other: Option<&ResolvedVersion>, owner: &str, repo: &str) -> Markup {
         match self {
             ResolvedVersion::UnknownSha { sha } => {
-                html!((GitRef(sha.clone(), owner.to_string(), repo.to_string(), false)))
+                html!(
+                    (GitRef(
+                        sha.clone(),
+                        owner.to_string(),
+                        repo.to_string(),
+                        false,
+                        None
+                    ))
+                )
             }
             ResolvedVersion::TrackedSha { sha, build_time: _ } => {
-                html!((GitRef(sha.clone(), owner.to_string(), repo.to_string(), false)))
+                html!(
+                    (GitRef(
+                        sha.clone(),
+                        owner.to_string(),
+                        repo.to_string(),
+                        false,
+                        None
+                    ))
+                )
             }
             ResolvedVersion::BranchTracked {
                 sha,
@@ -281,10 +258,19 @@ impl ResolvedVersion {
                             owner.to_string(),
                             repo.to_string(),
                             false,
+                            None,
                         ))
                     )
                 } else {
-                    html!((GitRef(sha.clone(), owner.to_string(), repo.to_string(), false)))
+                    html!(
+                        (GitRef(
+                            sha.clone(),
+                            owner.to_string(),
+                            repo.to_string(),
+                            false,
+                            None
+                        ))
+                    )
                 }
             }
             ResolvedVersion::Undeployed => {
@@ -295,89 +281,152 @@ impl ResolvedVersion {
             }
         }
     }
+}
 
-    fn is_undeployed(&self) -> bool {
-        matches!(self, ResolvedVersion::Undeployed)
+trait FormatStates {
+    fn format_config(&self, owner: &str, repo: &str, config_name: &str) -> Markup;
+    fn format_artifact(&self, owner: &str, repo: &str) -> Markup;
+}
+
+impl FormatStates for DeploymentState {
+    fn format_config(&self, owner: &str, repo: &str, config_name: &str) -> Markup {
+        match self {
+            DeploymentState::DeployedWithArtifact { config, .. }
+            | DeploymentState::DeployedOnlyConfig { config } => {
+                html! {
+                    (GitRef(config.sha.clone(), owner.to_string(), repo.to_string(), false, Some(format!(".deploy/{}", config_name))))
+                }
+            }
+            DeploymentState::Undeployed => html! { "Undeployed" },
+        }
+    }
+
+    fn format_artifact(&self, owner: &str, repo: &str) -> Markup {
+        match self {
+            DeploymentState::DeployedWithArtifact { artifact, .. } => {
+                html! {
+                    (GitRef(artifact.sha.clone(), owner.to_string(), repo.to_string(), false, None))
+                }
+            }
+            DeploymentState::DeployedOnlyConfig { .. } => {
+                html! {
+                    span { "No artifact" }
+                }
+            }
+            DeploymentState::Undeployed => html! { "Undeployed" },
+        }
+    }
+}
+
+impl FormatStates for AppResult<DeploymentState> {
+    fn format_config(&self, owner: &str, repo: &str, config_name: &str) -> Markup {
+        match self {
+            Ok(deployment_state) => deployment_state.format_config(owner, repo, config_name),
+            Err(_) => {
+                html! {
+                    span { "[resolution failed]" }
+                }
+            }
+        }
+    }
+
+    fn format_artifact(&self, owner: &str, repo: &str) -> Markup {
+        match self {
+            Ok(deployment_state) => deployment_state.format_artifact(owner, repo),
+            Err(_) => {
+                html! {
+                    span { "[resolution failed]" }
+                }
+            }
+        }
     }
 }
 
 /// Represents a transition between two resolved versions
 struct DeployTransition {
-    from: ResolvedVersion,
-    to: ResolvedVersion,
+    from: DeploymentState,
+    to: AppResult<DeploymentState>,
+    current_config: DeployConfig,
 }
 
 impl DeployTransition {
     fn compare_url(&self, owner: &str, repo: &str) -> Option<String> {
         match (&self.from, &self.to) {
             (
-                ResolvedVersion::BranchTracked {
-                    branch: _,
-                    sha: from_sha,
-                    build_time: _,
-                },
-                ResolvedVersion::BranchTracked {
-                    branch: _,
-                    sha: to_sha,
-                    build_time: _,
-                },
+                DeploymentState::DeployedWithArtifact { artifact, .. },
+                Ok(DeploymentState::DeployedWithArtifact {
+                    artifact: other_artifact,
+                    ..
+                }),
             ) => Some(format!(
                 "https://github.com/{}/{}/compare/{}...{}",
-                owner, repo, from_sha, to_sha
+                owner, repo, artifact.sha, other_artifact.sha
             )),
             _ => None,
         }
     }
 
     /// Formats the transition for display
-    fn format(&self, owner: &str, repo: &str) -> Markup {
-        if self.from == self.to {
-            if self.from.is_undeployed() {
-                html! {
-                    "Already undeployed"
+    async fn format(&self, owner: &str, repo: &str) -> Markup {
+        if self.to == Ok(self.from.clone()) {
+            match self.from.clone() {
+                DeploymentState::Undeployed => {
+                    html! {
+                        div { "Already undeployed"}
+                    }
                 }
-            } else {
-                html! {
-                    (self.from.format(Some(&self.to), owner, repo))
-                    span {
-                        " (up to date"
-                        @if let Some(build_time) = self.from.get_build_time() {
-                            ", built "
-                            (HumanTime(build_time))
+                DeploymentState::DeployedWithArtifact { artifact, config } => {
+                    html! {
+                        div {
+                            .icon {
+                                span.deploy-config__icon.m-right-1 {}
+                            }
+                            (GitRef(config.sha.clone(), owner.to_string(), repo.to_string(), false, Some(format!(".deploy/{}", &self.current_config.name_any()))))
                         }
-                        ")"
+                        div {
+                            .icon {
+                                i.octicon.octicon-git-commit {}
+                            }
+                            (GitRef(artifact.sha.clone(), owner.to_string(), repo.to_string(), false, None))
+                        }
+                    }
+                }
+                DeploymentState::DeployedOnlyConfig { config } => {
+                    html! {
+                        div {
+                            .icon {
+                                span.deploy-config__icon.m-right-1 {}
+                            }
+                            (GitRef(config.sha.clone(), owner.to_string(), repo.to_string(), false, Some(format!(".deploy/{}", &self.current_config.name_any()))))
+                        }
                     }
                 }
             }
         } else {
             html! {
-                (self.from.format(Some(&self.to), owner, repo))
-                @if !self.from.is_undeployed() {
-                    span {
-                        " (last deployed"
-                        @if let Some(build_time) = self.from.get_build_time() {
-                            ", built "
-                            (HumanTime(build_time))
-                        }
-                        ")"
+                div {
+                    .icon {
+                        span.deploy-config__icon.m-right-1 {}
                     }
+                    // FIXME: No guarantee that config repo is the artifact repo (fix this!!!)
+                    // Move repo info as well as build info into some sort of HydratedDeploymentState struct.
+                    (self.from.format_config(owner, repo, &self.current_config.name_any()))
+                    ( PreviewArrow {} )
+                    (self.to.format_config(owner, repo, &self.current_config.name_any()))
                 }
-                ( PreviewArrow {} )
-                (self.to.format(Some(&self.from), owner, repo))
-                @if !self.to.is_undeployed() {
-                    span {
-                        " (latest built"
-                        @if let Some(build_time) = self.to.get_build_time() {
-                            ", "
-                            (HumanTime(build_time))
-                        }
-                        ")"
+                div {
+                    .icon {
+                        i.octicon.octicon-git-commit {}
                     }
-                }
-                @if let Some(compare_url) = self.compare_url(owner, repo) {
-                    " "
-                    a.git-ref href=(compare_url) {
-                        "[compare]"
+                    (self.from.format_artifact(owner, repo))
+                    ( PreviewArrow {} )
+                    (self.to.format_artifact(owner, repo))
+
+                    @if let Some(compare_url) = self.compare_url(owner, repo) {
+                        " "
+                        a.git-ref href=(compare_url) target="_blank" {
+                            "[compare]"
+                        }
                     }
                 }
             }
@@ -386,45 +435,199 @@ impl DeployTransition {
 }
 
 /// Generate the status header showing current branch and autodeploy status
-fn generate_status_header(config: &DeployConfig, owner: &str, repo: &str) -> Markup {
-    let default_branch = config.default_branch();
-    let default_autodeploy = config.spec_autodeploy();
-    let current_autodeploy = config.current_autodeploy();
-    let current_branch = config.tracking_branch();
+async fn generate_status_header(
+    config: &DeployConfig,
+    owner: &str,
+    repo: &str,
+    client: &Client,
+) -> Markup {
+    let default_branch = config
+        .artifact_repository()
+        .unwrap_or_else(|| config.config_repository().with_branch("master"))
+        .branch;
+
+    // FIXME: What about artifactless configs?
+    let current_branch = match config.deployment_state() {
+        DeploymentState::DeployedWithArtifact { artifact, .. } => artifact.branch.clone(),
+        DeploymentState::DeployedOnlyConfig { config } => config.branch.clone(),
+        DeploymentState::Undeployed => None,
+    };
+
+    let namespace = config.namespace().unwrap_or("default".to_string());
+    let namespace_uid = get_namespace_uid(client, &namespace)
+        .await
+        .unwrap_or_default();
 
     html! {
         div class="status-header" {
             div class="status-item" {
                 "Tracking branch: "
                 strong {
-                    (GitRef(
-                        current_branch.to_string(),
-                        owner.to_string(),
-                        repo.to_string(),
-                        true,
-                    ))
-                    @if current_branch != default_branch {
-                        span class="warning-icon" title=(format!("Different from default branch ({})", default_branch)) {
-                            "⚠️"
+                    @match current_branch {
+                        Some(branch) => {
+                            (GitRef(
+                                branch.to_string(),
+                                owner.to_string(),
+                                repo.to_string(),
+                                true,
+                                None,
+                            ))
+                            @if branch != default_branch {
+                                span class="warning-icon" title=(format!("Different from default branch ({})", default_branch)) {
+                                    "⚠️"
+                                }
+                            }
+                        }
+                        None => {
+                            "None"
                         }
                     }
+
                 }
             }
             div class="status-item" {
                 "Autodeploy: "
                 strong {
-                    @if current_autodeploy {
+                    @if config.autodeploy() {
                         (AutodeployStatus(true))
                     } @else {
                         (AutodeployStatus(false))
                     }
-                    @if default_autodeploy != current_autodeploy {
-                        span class="warning-icon" title="Different from default" {
-                            "⚠️"
-                        }
+                }
+            }
+            div class="status-item" {
+                "Namespace: "
+                strong {
+                    a href=(format!("{}/c/main/map?group=namespace&node={}", HEADLAMP_URL, namespace_uid)) target="_blank" {
+                        (namespace)
                     }
                 }
             }
+        }
+    }
+}
+
+impl ShaMaybeBranch {}
+
+impl DeploymentState {
+    pub fn from_action(
+        action: &Action,
+        config: &DeployConfig,
+        conn: &PooledConnection<SqliteConnectionManager>,
+    ) -> AppResult<Self> {
+        let artifact_repository = config.artifact_repository();
+
+        match (action, artifact_repository) {
+            (Action::DeployLatest, Some(artifact_repository)) => {
+                // In this case we are deploying the latest commit of the tracked branch and we know that the config has an artifact repository.
+                // We don't know the tracked branch yet (it could be the default or a custom branch, so we need to use config.deployment_state() to see what it is.)
+                // There also might not be a tracked branch if a specific commit is currently deployed, in which case we should deploy the latest commit of the default branch.
+                let deployment_state = config.deployment_state();
+                let branch_name = deployment_state
+                    .artifact_branch()
+                    .unwrap_or(&artifact_repository.branch);
+
+                Ok(DeploymentState::DeployedWithArtifact {
+                    artifact: ShaMaybeBranch::latest_for_branch(
+                        artifact_repository.clone().into_repo(),
+                        branch_name,
+                        BuildFilter::Successful,
+                        conn,
+                    )?,
+                    config: if artifact_repository.clone().into_repo() == config.config_repository()
+                    {
+                        ShaMaybeBranch::latest_for_branch(
+                            config.config_repository(),
+                            branch_name,
+                            BuildFilter::Successful,
+                            conn,
+                        )?
+                    } else {
+                        ShaMaybeBranch::latest_for_branch(
+                            config.config_repository(),
+                            "master",
+                            BuildFilter::Any,
+                            conn,
+                        )?
+                    },
+                })
+            }
+            (Action::DeployLatest, None) => {
+                let deployment_state = config.deployment_state();
+                // FIXME: Misleading: artifact_branch is just the tracking branch.
+                let branch_name = deployment_state.artifact_branch().unwrap_or("master");
+
+                Ok(DeploymentState::DeployedOnlyConfig {
+                    config: ShaMaybeBranch::latest_for_branch(
+                        config.config_repository(),
+                        branch_name,
+                        BuildFilter::Any,
+                        conn,
+                    )?,
+                })
+            }
+            (Action::DeployBranch { branch }, Some(artifact_repository)) => {
+                Ok(DeploymentState::DeployedWithArtifact {
+                    artifact: ShaMaybeBranch::latest_for_branch(
+                        artifact_repository.clone().into_repo(),
+                        branch,
+                        BuildFilter::Successful,
+                        conn,
+                    )?,
+                    config: if artifact_repository.into_repo() == config.config_repository() {
+                        ShaMaybeBranch::latest_for_branch(
+                            config.config_repository(),
+                            branch,
+                            BuildFilter::Successful,
+                            conn,
+                        )?
+                    } else {
+                        ShaMaybeBranch::latest_for_branch(
+                            config.config_repository(),
+                            "master",
+                            BuildFilter::Any,
+                            conn,
+                        )?
+                    },
+                })
+            }
+            (Action::DeployBranch { branch }, None) => Ok(DeploymentState::DeployedOnlyConfig {
+                config: ShaMaybeBranch::latest_for_branch(
+                    config.config_repository(),
+                    branch,
+                    BuildFilter::Any,
+                    conn,
+                )?,
+            }),
+            (Action::DeployCommit { sha }, Some(artifact_repository)) => {
+                Ok(DeploymentState::DeployedWithArtifact {
+                    artifact: ShaMaybeBranch {
+                        sha: sha.clone(),
+                        branch: None,
+                    },
+                    config: if artifact_repository.into_repo() == config.config_repository() {
+                        ShaMaybeBranch {
+                            sha: sha.clone(),
+                            branch: None,
+                        }
+                    } else {
+                        ShaMaybeBranch::latest_for_branch(
+                            config.config_repository(),
+                            "master",
+                            BuildFilter::Any,
+                            conn,
+                        )?
+                    },
+                })
+            }
+            (Action::DeployCommit { sha }, None) => Ok(DeploymentState::DeployedOnlyConfig {
+                config: ShaMaybeBranch {
+                    sha: sha.clone(),
+                    branch: None,
+                },
+            }),
+            (Action::ToggleAutodeploy, _) => Ok(config.deployment_state()),
+            (Action::Undeploy, _) => Ok(DeploymentState::Undeployed),
         }
     }
 }
@@ -433,44 +636,48 @@ pub async fn render_preview_content(
     selected_config: &DeployConfig,
     action: &Action,
     conn: &PooledConnection<SqliteConnectionManager>,
+    namespaced_objs: &[DynamicObject],
 ) -> Markup {
-    let owner = selected_config.artifact_owner().to_string();
-    let repo = selected_config.artifact_repo().to_string();
+    let owner = selected_config
+        .artifact_repository()
+        .unwrap_or_else(|| selected_config.config_repository().with_branch("master"))
+        .owner
+        .to_string();
+    let repo = selected_config
+        .artifact_repository()
+        .unwrap_or_else(|| selected_config.config_repository().with_branch("master"))
+        .repo
+        .to_string();
+
+    let deploy_transition = DeployTransition {
+        from: selected_config.deployment_state(),
+        to: DeploymentState::from_action(action, selected_config, conn),
+        current_config: selected_config.clone(),
+    };
 
     let preview_content = match action {
         Action::DeployLatest
         | Action::DeployBranch { .. }
         | Action::DeployCommit { .. }
-        | Action::Undeploy => DeployTransition {
-            from: ResolvedVersion::from_config(selected_config, conn),
-            to: ResolvedVersion::from_action(
-                action,
-                selected_config,
-                conn,
-                BuildFilter::Successful,
-            ),
-        }
-        .format(&owner, &repo),
+        | Action::Undeploy => deploy_transition.format(&owner, &repo).await,
         Action::ToggleAutodeploy => {
             html! {
                 "Autodeploy "
-                @if selected_config.current_autodeploy() {
+                @if selected_config.autodeploy() {
                     (AutodeployStatus(true))
-                } @else {
-                    (AutodeployStatus(false))
-                }
-                ( PreviewArrow {} )
-                @if selected_config.current_autodeploy() {
+                    ( PreviewArrow {} )
                     (AutodeployStatus(false))
                 } @else {
+                    (AutodeployStatus(false))
+                    ( PreviewArrow {} )
                     (AutodeployStatus(true))
                 }
             }
         }
     };
 
-    let mut alerts = vec![];
-    for alert in deploy_status(selected_config).await {
+    let mut alerts: Vec<Markup> = vec![];
+    for alert in deploy_status(selected_config, namespaced_objs).await {
         alerts.push(alert);
     }
     for alert in build_status(action, selected_config, conn).await {
@@ -482,12 +689,13 @@ pub async fn render_preview_content(
             (alert)
         }
         div class="preview-transition" {
-            div class="preview-transition-header" {
+            div class="deployable-item__content" {
                 (selected_config.name_any())
+                .deployable-item-info {
+                    (preview_content)
+                }
             }
-            div class="preview-transition-content" {
-                (preview_content)
-            }
+            (selected_config.format_resources(namespaced_objs).await)
         }
     }
 }
@@ -497,18 +705,28 @@ async fn generate_preview(
     selected_config: &DeployConfig,
     action: &Action,
     conn: &PooledConnection<SqliteConnectionManager>,
+    client: &Client,
+    namespaced_objs: &[DynamicObject],
 ) -> Markup {
-    let owner = selected_config.artifact_owner().to_string();
-    let repo = selected_config.artifact_repo().to_string();
+    let owner = selected_config
+        .artifact_repository()
+        .unwrap_or_else(|| selected_config.config_repository().with_branch("master"))
+        .owner
+        .to_string();
+    let repo = selected_config
+        .artifact_repository()
+        .unwrap_or_else(|| selected_config.config_repository().with_branch("master"))
+        .repo
+        .to_string();
 
     // Wrap the preview content in the container markup
     html! {
         div class="preview-container" {
             div class="preview-content" {
-                (generate_status_header(selected_config, &owner, &repo))
+                (generate_status_header(selected_config, &owner, &repo, client).await)
 
                 div.preview-content-poll-wrapper hx-get=(format!("/fragments/deploy-preview/{}/{}?{}", selected_config.namespace().unwrap_or("default".to_string()), selected_config.name_any(), action.as_params())) hx-trigger="load, every 2s" hx-swap="morph:innerHTML" {
-                    (render_preview_content(selected_config, action, conn).await)
+                    (render_preview_content(selected_config, action, conn, namespaced_objs).await)
                 }
             }
         }
@@ -576,6 +794,7 @@ impl Action {
 /// Handler for the deploy configs page
 #[get("/deploy")]
 pub async fn deploy_configs(
+    req: actix_web::HttpRequest,
     pool: web::Data<Pool<SqliteConnectionManager>>,
     query: web::Query<std::collections::HashMap<String, String>>,
 ) -> impl Responder {
@@ -588,6 +807,7 @@ pub async fn deploy_configs(
     };
 
     // Initialize Kubernetes client
+    // FIXME: Should this come from web::Data?
     let client = match Client::try_default().await {
         Ok(client) => client,
         Err(e) => {
@@ -598,51 +818,59 @@ pub async fn deploy_configs(
         }
     };
 
-    // Get all DeployConfigs across all namespaces
-    let deploy_configs_api: Api<DeployConfig> = Api::all(client.clone());
-    let deploy_configs = match deploy_configs_api.list(&Default::default()).await {
-        Ok(list) => list.items,
+    let deploy_configs = match get_all_deploy_configs(&client).await {
+        Ok(deploy_configs) => deploy_configs,
         Err(e) => {
-            log::error!("Failed to list DeployConfigs: {}", e);
+            log::error!("Failed to get all deploy configs: {}", e);
             return HttpResponse::InternalServerError()
                 .content_type("text/html; charset=utf-8")
-                .body("Failed to list DeployConfigs".to_string());
+                .body("Failed to get all deploy configs".to_string());
         }
     };
+
+    let teams_cookie = TeamsCookie::from_request(&req);
+    let deploy_configs = teams_cookie.filter_configs(&deploy_configs);
 
     let action = Action::from_query(&query);
 
     // Sort DeployConfigs by namespace and name for the dropdown
     let mut sorted_deploy_configs = deploy_configs.clone();
     sorted_deploy_configs.sort_by(|a, b| {
-        let a_ns = a.namespace().unwrap_or_default();
-        let b_ns = b.namespace().unwrap_or_default();
         let a_name = a.name_any();
         let b_name = b.name_any();
 
-        (a_ns, a_name).cmp(&(b_ns, b_name))
+        a_name.cmp(&b_name)
     });
 
     // Check if we have a selected config from query parameter
     let selected_config_key = query.get("selected");
 
     // Find the selected deploy config or use the first one as default
-    let selected_config = if let Some(selected_key) = selected_config_key {
-        // Parse the selected_key which is in the format "namespace/name"
-        let parts: Vec<&str> = selected_key.split('/').collect();
-        if parts.len() == 2 {
-            let namespace = parts[0];
-            let name = parts[1];
-
-            // Find the matching config
-            sorted_deploy_configs.iter().find(|config| {
-                config.namespace().unwrap_or_default() == namespace && config.name_any() == name
-            })
-        } else {
-            sorted_deploy_configs.first()
-        }
+    let selected_config = if let Some(name) = selected_config_key {
+        // Find the matching config
+        sorted_deploy_configs
+            .iter()
+            .find(|config| &config.name_any() == name)
     } else {
         sorted_deploy_configs.first()
+    };
+
+    let namespaced_objs = if let Some(selected_config) = selected_config {
+        match list_namespace_objects(
+            &client,
+            &selected_config.namespace().unwrap_or("default".to_string()),
+            ListMode::All,
+        )
+        .await
+        {
+            Ok(objs) => objs,
+            Err(e) => {
+                log::error!("Failed to get namespaced objects: {}", e);
+                vec![]
+            }
+        }
+    } else {
+        vec![]
     };
 
     // Render the HTML template using Maud
@@ -685,25 +913,25 @@ pub async fn deploy_configs(
                                 form action="/deploy" method="get" {
                                     select name="selected" onchange="this.form.submit()" {
                                         @for config in &sorted_deploy_configs {
-                                            @let namespace = config.namespace().unwrap_or_default();
                                             @let name = config.name_any();
                                             @let selected = if let Some(default) = selected_config {
-                                                default.namespace().unwrap_or_default() == namespace && default.name_any() == name
+                                                default.name_any() == name
                                             } else {
                                                 false
                                             };
 
-                                            option value=(format!("{}/{}", namespace, name)) selected[selected] {
-                                                (format!("{}/{}", namespace, name))
+                                            option value=(name) selected[selected] {
+                                                (name)
                                             }
                                         }
                                     }
                                 }
 
                                 @if let Some(selected_config) = selected_config {
-                                    @let current_branch = selected_config.tracking_branch();
+                                    @let deployment_state = selected_config.deployment_state();
+                                    @let current_branch = deployment_state.artifact_branch();
                                     form action="/deploy" method="get" {
-                                        input type="hidden" name="selected" value=(format!("{}/{}", selected_config.namespace().unwrap_or_default(), selected_config.name_any()));
+                                        input type="hidden" name="selected" value=(selected_config.name_any());
 
                                         div class="action-radio-group" {
                                             h4 { "Action" }
@@ -713,7 +941,7 @@ pub async fn deploy_configs(
                                             }
                                             label class="action-radio" {
                                                 input type="radio" name="action" value="toggle-autodeploy" checked[action.is_toggle_autodeploy()] onchange="this.form.submit()";
-                                                @if selected_config.current_autodeploy() {
+                                                @if selected_config.autodeploy() {
                                                     "Disable autodeploy"
                                                 } @else {
                                                     "Enable autodeploy"
@@ -728,7 +956,7 @@ pub async fn deploy_configs(
                                         @if action.is_deploy() {
                                             div class="action-input" {
                                                 label for="branch" { "Branch" }
-                                                input id="branch" type="text" name="branch" placeholder="Enter branch name" value=(query.get("branch").unwrap_or(&current_branch.to_string())) onblur="this.form.submit()";
+                                                input id="branch" type="text" name="branch" placeholder="Enter branch name" value=(query.get("branch").unwrap_or(&current_branch.unwrap_or_default().to_string())) onblur="this.form.submit()";
                                             }
                                             div class="action-input" {
                                                 label for="sha" { "SHA override" }
@@ -750,7 +978,7 @@ pub async fn deploy_configs(
                                                     "Deploy"
                                                 }
                                                 Action::ToggleAutodeploy => {
-                                                    @if selected_config.current_autodeploy() {
+                                                    @if selected_config.autodeploy() {
                                                         "Disable autodeploy"
                                                     } @else {
                                                         "Enable autodeploy"
@@ -787,10 +1015,10 @@ pub async fn deploy_configs(
                                             }
                                         }
                                         strong {
-                                            (format!("{}/{}", selected_config.namespace().unwrap_or_default(), selected_config.name_any()))
+                                            (format!("{}", selected_config.name_any()))
                                         }
                                     }
-                                    (generate_preview(selected_config, &action, &conn).await)
+                                    (generate_preview(selected_config, &action, &conn, &client, &namespaced_objs).await)
                                 }
                             }
                         }
@@ -805,13 +1033,14 @@ pub async fn deploy_configs(
         .body(markup.into_string())
 }
 
-/// Handler for updating the wanted SHA of a DeployConfig
+/// Handler for updating a DeployConfig
 #[post("/api/deploy/{namespace}/{name}")]
 pub async fn deploy_config(
     path: web::Path<(String, String)>,
     client: Option<web::Data<Client>>,
     pool: web::Data<Pool<SqliteConnectionManager>>,
     form: web::Form<HashMap<String, String>>,
+    octocrabs: web::Data<Octocrabs>,
 ) -> impl Responder {
     let conn = match pool.get() {
         Ok(c) => c,
@@ -834,140 +1063,94 @@ pub async fn deploy_config(
     };
 
     // Get the DeployConfig
-    let deploy_configs_api: Api<DeployConfig> =
-        Api::namespaced(client.get_ref().clone(), &namespace);
-
-    let config = match deploy_configs_api.get(&name).await {
-        Ok(config) => config,
+    let config = match get_deploy_config(&client, &name).await {
+        Ok(Some(config)) => config,
+        Ok(None) => {
+            return HttpResponse::NotFound()
+                .body(format!("DeployConfig {}/{} not found.", namespace, name));
+        }
         Err(e) => {
             log::error!("Failed to get DeployConfig {}/{}: {}", namespace, name, e);
             return HttpResponse::NotFound()
-                .content_type("text/html; charset=utf-8")
                 .body(format!("DeployConfig {}/{} not found.", namespace, name));
         }
     };
 
     let return_url = format!(
-        "/deploy?selected={}/{}&action={}&branch={}&sha={}",
-        namespace,
+        "/deploy?selected={}&action={}&branch={}&sha={}",
         name,
         form.get("action").unwrap_or(&"".to_string()),
         form.get("branch").unwrap_or(&"".to_string()),
         form.get("sha").unwrap_or(&"".to_string())
     );
 
-    let resolved_version =
-        ResolvedVersion::from_action(&action, &config, &conn, BuildFilter::Successful);
-
-    let status = match &action {
-        Action::DeployLatest | Action::DeployBranch { .. } | Action::DeployCommit { .. } => {
-            match resolved_version {
-                ResolvedVersion::UnknownSha { sha }
-                | ResolvedVersion::TrackedSha { sha, build_time: _ } => {
-                    DeployConfigStatusBuilder::new()
-                        .with_artifact_wanted_sha(sha.clone())
-                        .with_artifact_branch("".to_string())
-                        .with_artifact_latest_sha("".to_string())
-                }
-
-                ResolvedVersion::BranchTracked {
-                    sha,
-                    branch,
-                    build_time: _,
-                } => DeployConfigStatusBuilder::new()
-                    .with_artifact_wanted_sha(sha.clone())
-                    .with_artifact_branch(branch.clone())
-                    .with_artifact_latest_sha(sha.clone()),
-
-                ResolvedVersion::Undeployed => {
-                    DeployConfigStatusBuilder::new().with_artifact_wanted_sha("".to_string())
-                }
-
-                ResolvedVersion::ResolutionFailed => {
-                    return HttpResponse::BadRequest()
-                        .content_type("text/html; charset=utf-8")
-                        .body("No latest SHA available for deployment.");
-                }
-            }
-        }
-
-        Action::ToggleAutodeploy => {
-            DeployConfigStatusBuilder::new().with_autodeploy(!config.current_autodeploy())
-        }
-
-        Action::Undeploy => {
-            DeployConfigStatusBuilder::new().with_artifact_wanted_sha("".to_string())
+    let deployment_state = match DeploymentState::from_action(&action, &config, &conn) {
+        Ok(deployment_state) => deployment_state,
+        Err(e) => {
+            log::error!("Failed to get deployment state: {}", e);
+            return HttpResponse::InternalServerError()
+                .content_type("text/html; charset=utf-8")
+                .body("Failed to get deployment state");
         }
     };
 
-    match action {
-        Action::DeployLatest | Action::DeployBranch { .. } | Action::DeployCommit { .. } => {
-            let branch: Option<String> = match action {
-                Action::DeployLatest => Some(config.tracking_branch().to_string()),
-                Action::DeployBranch { branch } => Some(branch.clone()),
-                Action::DeployCommit { .. } => None,
-                Action::ToggleAutodeploy | Action::Undeploy => {
-                    panic!("unreachable")
-                }
-            };
+    let deploy_action = match &action {
+        Action::DeployLatest
+        | Action::DeployBranch { .. }
+        | Action::DeployCommit { .. }
+        | Action::Undeploy => match deployment_state {
+            DeploymentState::DeployedWithArtifact { artifact, config } => DeployAction::Deploy {
+                name: name.to_string(),
+                artifact: Some(artifact),
+                config,
+            },
+            DeploymentState::DeployedOnlyConfig { config } => DeployAction::Deploy {
+                name: name.to_string(),
+                artifact: None,
+                config,
+            },
+            DeploymentState::Undeployed => DeployAction::Undeploy {
+                name: name.to_string(),
+            },
+        },
 
-            let sha = status.get_artifact_wanted_sha().map(|s| s.to_string());
+        Action::ToggleAutodeploy => DeployAction::ToggleAutodeploy {
+            name: name.to_string(),
+        },
+    };
 
-            match insert_deploy_event(
-                &DeployEvent {
-                    deploy_config: name.to_string(),
-                    team: config.team().to_string(),
-                    timestamp: Utc::now().timestamp(),
-                    initiator: "USER".to_string(),
-                    status: "SUCCESS".to_string(),
-                    branch,
-                    sha,
-                },
-                &conn,
-            ) {
-                Ok(_) => {}
-                Err(e) => {
-                    log::error!("Failed to insert deploy event: {}", e);
-                }
-            }
-        }
-        Action::Undeploy => {
-            if let Err(e) = insert_deploy_event(
-                &DeployEvent {
-                    deploy_config: name.to_string(),
-                    team: config.team().to_string(),
-                    timestamp: Utc::now().timestamp(),
-                    initiator: "USER".to_string(),
-                    status: "SUCCESS".to_string(),
-                    branch: None,
-                    sha: None,
-                },
-                &conn,
-            ) {
-                log::error!("Failed to insert deploy event: {}", e);
-            }
-        }
-        Action::ToggleAutodeploy => {
-            // No event
+    match deploy_action
+        .execute(&client, &octocrabs, config.config_repository())
+        .await
+    {
+        Ok(()) => (),
+        Err(e) => {
+            log::error!("Failed to execute deploy action: {}", e);
+            return HttpResponse::InternalServerError()
+                .content_type("text/html; charset=utf-8")
+                .body("Failed to execute deploy action");
         }
     }
 
-    // Apply the status update
-    let patch: Patch<&Value> = Patch::Merge(&status.into());
-    log::debug!("Patching DeployConfig status: {:#?}", patch);
-    let params = PatchParams::default();
-    match deploy_configs_api
-        .patch_status(&name, &params, &patch)
-        .await
-    {
-        Ok(_) => (),
-        Err(e) => {
-            log::error!("Failed to update DeployConfig status: {}", e);
-            return HttpResponse::InternalServerError()
-                .content_type("text/html; charset=utf-8")
-                .body(format!("Failed to update DeployConfig status: {}", e));
-        }
+    let Ok(maybe_deploy_event) =
+        DeployEvent::from_user_deploy_action(&deploy_action, &conn, &config)
+    else {
+        return HttpResponse::InternalServerError()
+            .content_type("text/html; charset=utf-8")
+            .body("Failed to create deploy event");
     };
+    if let Some(deploy_event) = maybe_deploy_event {
+        match deploy_event.insert(&conn) {
+            Ok(_) => (),
+            Err(e) => {
+                log::error!("Failed to insert deploy event: {}", e);
+
+                return HttpResponse::InternalServerError()
+                    .content_type("text/html; charset=utf-8")
+                    .body("Failed to insert deploy event");
+            }
+        }
+    }
 
     // Redirect back to the DeployConfig page with the selected config
     HttpResponse::SeeOther()

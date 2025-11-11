@@ -1,0 +1,110 @@
+/** Styles for the tree structure */
+.deployable-item__child-list {
+  margin-bottom: 10px;
+  padding-left: 27px;
+}
+
+.deployable-item__child-list > li {
+  list-style-type: none;
+  line-height: 20px;
+  position: relative;
+}
+
+.deployables-tree__item:before,
+.deployables-tree__item:not(:last-child):after {
+  content: " ";
+  width: 15px;
+  position: absolute;
+  left: -20px;
+  border-left: 1px solid #7c98b6;
+}
+
+.deployables-tree__item:before {
+  height: 11px;
+  border-bottom: 1px solid #7c98b6;
+}
+
+.deployables-tree__item:not(:last-child):after {
+  height: 100%;
+  top: 10px;
+}
+
+/** Styles for content color and positioning treatment */
+.deployable-item-info {
+  position: relative;
+  margin-bottom: 5px;
+  color: #516f90;
+  line-height: 1.4;
+  font-size: 12px;
+}
+
+.deployable-item-info a {
+  color: inherit;
+}
+
+.deployable-state {
+  font-size: 12px;
+  color: #516f90;
+}
+.deployable-state--error {
+  color: #c62828; /* accessible red on white */
+  font-weight: 600;
+}
+.deployable-state--warn {
+  color: #8a6d00; /* dark amber for visibility on white */
+  font-weight: 600;
+}
+.deployable-state--neutral {
+  color: inherit; /* rely on parent color for fully healthy states */
+}
+.deployable-state--muted {
+  color: #7a869a; /* greyed out for inactive/scaled-to-zero items */
+  font-weight: 400;
+}
+
+/* Grey out entire tree item (name, kind, links, etc.) */
+.deployables-tree__item--muted {
+  color: #7a869a;
+}
+.deployables-tree__item--muted a {
+  color: inherit;
+}
+.deployable-state--will-skip {
+  font-style: italic;
+}
+
+.deployable-item--commit-summary > a .octicon {
+  font-size: 12px;
+}
+
+
+/** Deploy config icon styles **/
+.deploy-config__icon {
+  color: #0091ae;
+}
+
+.deploy-config__icon:before {
+  font-family: FontAwesome;
+  content: "\f121";
+}
+
+/** Deploy type icon styles **/
+.deployable-type-icon {
+  padding-left: 22px !important;
+  position: relative;
+}
+
+.deployable-type-icon:before {
+  display: inline-block;
+  position: absolute;
+  top: 0;
+  left: 0;
+  content: " ";
+  width: 16px;
+  height: 16px;
+  opacity: 0.7;
+}
+
+.m-right-1 {
+  margin-right: 4px;
+}

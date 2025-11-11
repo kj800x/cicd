@@ -1,3 +1,4 @@
+use crate::db::functions::get_branches_with_commits;
 use crate::prelude::*;
 use crate::web::{build_status_helpers, formatting, header};
 
@@ -16,8 +17,8 @@ pub fn render_branch_grid_fragment(pool: &Pool<SqliteConnectionManager>) -> Mark
 
     // Sort branches by timestamp of most recent commit
     branch_data_list.sort_by(|a, b| {
-        let a_time = a.commits.first().map(|c| c.commit.timestamp).unwrap_or(0);
-        let b_time = b.commits.first().map(|c| c.commit.timestamp).unwrap_or(0);
+        let a_time = a.commits.first().map(|c| c.timestamp).unwrap_or(0);
+        let b_time = b.commits.first().map(|c| c.timestamp).unwrap_or(0);
         b_time.cmp(&a_time) // Reverse order for newest first
     });
 
@@ -43,8 +44,8 @@ pub fn render_branch_grid_fragment(pool: &Pool<SqliteConnectionManager>) -> Mark
                                     }
                                     span {
                                         // Show the latest commit time
-                                        @if let Some(commit_with_parents) = data.commits.first() {
-                                            (format!("updated {}", formatting::format_relative_time(commit_with_parents.commit.timestamp)))
+                                        @if let Some(commit) = data.commits.first() {
+                                            (format!("updated {}", formatting::format_relative_time(commit.timestamp)))
                                         }
                                     }
                                 }
@@ -52,10 +53,10 @@ pub fn render_branch_grid_fragment(pool: &Pool<SqliteConnectionManager>) -> Mark
                         }
 
                         div class="commit-list" {
-                            @for commit_with_parents in &data.commits {
-                                @let commit = &commit_with_parents.commit;
-                                div class=(format!("commit-row {}", build_status_helpers::build_status_bg_class(&commit.build_status))) {
-                                    div class=(format!("commit-status {}", build_status_helpers::build_status_class(&commit.build_status))) {}
+                            @for commit in &data.commits {
+                                @let build_status = commit.get_build_status(&conn).unwrap_or_default();
+                                div class=(format!("commit-row {}", build_status_helpers::build_status_bg_class(&build_status.clone().into()))) {
+                                    div class=(format!("commit-status {}", build_status_helpers::build_status_class(&build_status.clone().into()))) {}
 
                                     div class="commit-sha" { (formatting::format_short_sha(&commit.sha)) }
 
@@ -72,7 +73,7 @@ pub fn render_branch_grid_fragment(pool: &Pool<SqliteConnectionManager>) -> Mark
                                     div class="commit-links" {
                                         a href=(format!("https://github.com/{}/{}/commit/{}", data.repo.owner_name, data.repo.name, commit.sha)) target="_blank" { "Code" }
 
-                                        @if let Some(url) = &commit.build_url {
+                                        @if let Some(url) = &build_status.map(|x| x.url) {
                                             a href=(url) target="_blank" { "Logs" }
                                         }
                                     }

@@ -1,31 +1,4 @@
 pub mod prelude {
-    pub use crate::db::{
-        add_commit_parent, add_commit_to_branch, get_all_repos, get_branch_by_name,
-        get_branches_by_repo_id, get_branches_for_commit, get_branches_with_commits,
-        get_child_commits, get_commit, get_commit_by_sha, get_commit_parents,
-        get_commit_with_branches, get_commit_with_repo_branches, get_commits_since,
-        get_latest_successful_build, get_parent_commits, get_repo, get_repo_by_commit_sha,
-        get_repo_by_id, migrate, set_commit_status, upsert_branch, upsert_commit, upsert_repo,
-        Branch as DbBranch, BranchWithCommits, BuildStatus, Commit as DbCommit, CommitParent,
-        CommitWithBranches, CommitWithParents, CommitWithRepo, CommitWithRepoBranches,
-        Repo as DbRepo,
-    };
-
-    pub use crate::graphql::{
-        index_graphiql, Branch as GraphQlBranch, Build, Commit as GraphQlCommit, QueryRoot,
-        Repository as GraphQlRepository,
-    };
-
-    pub use crate::resource::*;
-
-    pub use crate::webhooks::{
-        start_websockets, GhCommit, RepoOwner, Repository as WebhookRepository,
-    };
-
-    pub use crate::kubernetes::{
-        controller::start_controller, DeployConfig, DeployConfigStatus, Repository as K8sRepository,
-    };
-
     pub use chrono::prelude::*;
 
     pub use actix_session::{storage::CookieSessionStore, Session, SessionMiddleware};
@@ -43,49 +16,43 @@ pub mod prelude {
     pub use r2d2_sqlite::SqliteConnectionManager;
     pub use serde::{Deserialize, Serialize};
 
+    pub use crate::error::{AppError, AppResult};
     pub use actix_web::Error;
     pub use actix_web::{guard, Result};
     pub use async_graphql::{http::GraphiQLSource, EmptyMutation, EmptySubscription, Schema};
     pub use async_graphql_actix_web::GraphQL;
+    pub use maud::{html, Markup, DOCTYPE};
     pub use r2d2::PooledConnection;
     pub use rusqlite::Connection;
     pub use rusqlite::{params, OptionalExtension};
     pub use rusqlite_migration::{Migrations, M};
     pub use std::time::{SystemTime, UNIX_EPOCH};
-
-    // Maud imports
-    pub use maud::{html, Markup, DOCTYPE};
-
-    pub use crate::discord::{setup_discord, DiscordNotifier};
-
-    // Error handling
-    pub use crate::error::{AppError, AppResult};
 }
 
+mod build_status;
 mod crab_ext;
 mod db;
-mod discord;
 mod error;
-mod graphql;
 mod kubernetes;
-mod resource;
 mod web;
 mod webhooks;
-
-use prometheus::Registry;
-use web::{all_recent_builds, deploy_config, index, watchdog};
-
 use crate::crab_ext::{initialize_octocrabs, Octocrabs};
-use crate::discord::setup_discord;
+use crate::db::migrations::migrate;
+use crate::kubernetes::controller::start_controller;
 use crate::prelude::*;
-use crate::web::{
-    assets, branch_grid_fragment, build_grid_fragment, deploy_configs, deploy_preview,
+use crate::web::{branch_grid_fragment, build_grid_fragment, deploy_configs, deploy_preview};
+use crate::webhooks::config_sync::ConfigSyncHandler;
+use crate::webhooks::database::DatabaseHandler;
+use crate::webhooks::manager::WebhookManager;
+use cicd::serve_static_file;
+use web::{
+    all_recent_builds, bootstrap, deploy_config, deploy_history, deploy_history_index, index,
+    settings_index, toggle_team,
 };
 
 async fn start_http(
-    registry: Registry,
+    registry: prometheus::Registry,
     pool: Pool<SqliteConnectionManager>,
-    discord_notifier: Option<DiscordNotifier>,
     octocrabs: Octocrabs,
 ) -> Result<(), std::io::Error> {
     log::info!("Starting HTTP server at http://localhost:8080/api");
@@ -107,17 +74,6 @@ async fn start_http(
     };
 
     HttpServer::new(move || {
-        let schema = Schema::build(QueryRoot, EmptyMutation, EmptySubscription)
-            .data(pool.clone())
-            .finish();
-
-        let graphql_api = resource("/api/graphql")
-            .guard(guard::Post())
-            .to(GraphQL::new(schema));
-        let graphiql_page = resource("/api/graphql")
-            .guard(guard::Get())
-            .to(index_graphiql);
-
         let mut app = App::new();
 
         // Add Kubernetes client data if available
@@ -125,11 +81,6 @@ async fn start_http(
             app = app
                 .app_data(Data::new(client.clone()))
                 .service(deploy_config)
-        }
-
-        // Add Discord notifier to app data if available
-        if let Some(notifier) = discord_notifier.clone() {
-            app = app.app_data(Data::new(notifier));
         }
 
         app.wrap(RequestTracing::new())
@@ -146,19 +97,28 @@ async fn start_http(
             .app_data(Data::new(octocrabs.clone()))
             .app_data(Data::new(pool.clone()))
             .wrap(middleware::Logger::default())
-            .service(manual_hello)
-            .service(sync_all_deploy_configs)
-            .service(sync_repo_deploy_configs)
             .service(deploy_configs)
             .service(index)
             .service(branch_grid_fragment)
             .service(build_grid_fragment)
             .service(all_recent_builds)
-            .service(watchdog)
+            .service(deploy_history)
+            .service(deploy_history_index)
+            .service(web::deploy_history_fragment)
+            .service(settings_index)
+            .service(bootstrap)
+            .service(web::bootstrap_quick)
+            .service(web::bootstrap_owner)
+            .service(web::bootstrap_repo)
+            .service(web::bootstrap_log)
+            .service(web::rate_limits)
+            .service(toggle_team)
             .service(deploy_preview)
-            .service(graphql_api)
-            .service(graphiql_page)
-            .service(assets())
+            .service(serve_static_file!("htmx.min.js"))
+            .service(serve_static_file!("idiomorph.min.js"))
+            .service(serve_static_file!("idiomorph-ext.min.js"))
+            .service(serve_static_file!("styles.css"))
+            .service(serve_static_file!("deploy.css"))
     })
     .bind(("0.0.0.0", 8080))?
     .run()
@@ -167,20 +127,14 @@ async fn start_http(
 
 async fn start_kubernetes_controller(
     pool: Pool<SqliteConnectionManager>,
-    enable_k8s_controller: bool,
-    discord_notifier: Option<DiscordNotifier>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !enable_k8s_controller {
-        // FIXME: Hold this future open?
-    }
-
     log::info!("Starting Kubernetes controller");
 
     // Initialize Kubernetes client
     let client = kube::Client::try_default().await?;
 
     // Start the controller
-    start_controller(client, pool, discord_notifier).await?;
+    start_controller(client, pool).await?;
 
     Ok(())
 }
@@ -199,6 +153,7 @@ async fn main() -> std::io::Result<()> {
         .filter_module("cicd::discord", log::LevelFilter::Info)
         .filter_module("cicd::kubernetes", log::LevelFilter::Info)
         .filter_module("cicd::web", log::LevelFilter::Info)
+        .filter_module("cicd::kubernetes::deploy_handlers", log::LevelFilter::Debug)
         .parse_default_env()
         .init();
 
@@ -215,42 +170,36 @@ async fn main() -> std::io::Result<()> {
         std::env::var("DATABASE_PATH").unwrap_or("db.db".to_string()),
     );
     let pool = Pool::new(manager).expect("Failed to create database pool");
-    migrate(
-        pool.get()
-            .expect("Failed to get database connection from pool"),
-    )
-    .expect("Failed to run database migrations");
-
-    // Setup Discord notifier
-    log::info!("Setting up Discord notifier...");
-    let discord_notifier = setup_discord().await;
-
-    match &discord_notifier {
-        Some(_) => log::info!("Discord notifier initialized"),
-        None => log::warn!("Discord notifier NOT initialized - notifications will be disabled"),
+    {
+        let conn = pool.get().expect("Failed to get database connection");
+        migrate(conn).expect("Failed to run database migrations");
     }
 
-    // Determine if we should run the Kubernetes controller
-    let enable_k8s_controller = std::env::var("ENABLE_K8S_CONTROLLER")
-        .map(|v| v.to_lowercase() == "true")
-        .unwrap_or(false);
+    // Initialize Kubernetes client
+    let client = kube::Client::try_default()
+        .await
+        .expect("Failed to initialize Kubernetes client");
+
+    let mut webhook_manager = WebhookManager::new(
+        std::env::var("WEBSOCKET_URL").expect("WEBSOCKET_URL must be set"),
+        std::env::var("CLIENT_SECRET").expect("CLIENT_SECRET must be set"),
+    );
+    webhook_manager.add_handler(DatabaseHandler::new(pool.clone(), octocrabs.clone()));
+    webhook_manager.add_handler(ConfigSyncHandler::new(
+        pool.clone(),
+        client.clone(),
+        octocrabs.clone(),
+    ));
 
     tokio::select! {
         _ = Box::pin(start_http(
             registry,
             pool.clone(),
-            discord_notifier.clone(),
-            octocrabs.clone(),
-        )) =>  {},
-        _ = Box::pin(start_websockets(
-            pool.clone(),
-            discord_notifier.clone(),
             octocrabs.clone(),
         )) => {},
+        _ = Box::pin(webhook_manager.start()) => {},
         _ = Box::pin(start_kubernetes_controller(
-            pool.clone(),
-            enable_k8s_controller,
-            discord_notifier,
+            pool.clone()
         )) => {}
     };
 
