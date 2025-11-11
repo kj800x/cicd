@@ -472,8 +472,8 @@ header {
   }
 }
 
-/* Teams page */
-.teams-page {
+
+.settings-page {
   .content {
     max-width: 800px;
     margin: 0 auto;
@@ -522,13 +522,6 @@ header {
     background: #ffeaeb;
     border-color: #f0b6b9;
     color: #a70007;
-  }
-}
-
-.settings-page {
-  .content {
-    max-width: 800px;
-    margin: 0 auto;
   }
 
   .rate-limits-section {
