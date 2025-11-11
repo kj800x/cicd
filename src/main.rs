@@ -107,6 +107,9 @@ async fn start_http(
             .service(web::deploy_history_fragment)
             .service(settings_index)
             .service(bootstrap)
+            .service(web::bootstrap_quick)
+            .service(web::bootstrap_owner)
+            .service(web::bootstrap_repo)
             .service(web::bootstrap_log)
             .service(web::rate_limits)
             .service(toggle_team)
@@ -149,7 +152,7 @@ async fn main() -> std::io::Result<()> {
         .filter_module("kube_runtime::controller", log::LevelFilter::Warn) // Kubernetes controller logs every reconciliation at info level
         .filter_module("cicd::discord", log::LevelFilter::Info)
         .filter_module("cicd::kubernetes", log::LevelFilter::Info)
-        .filter_module("cicd::web", log::LevelFilter::Debug)
+        .filter_module("cicd::web", log::LevelFilter::Info)
         .filter_module("cicd::kubernetes::deploy_handlers", log::LevelFilter::Debug)
         .parse_default_env()
         .init();

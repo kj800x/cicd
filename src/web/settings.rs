@@ -111,14 +111,42 @@ pub async fn settings_index(req: actix_web::HttpRequest) -> impl Responder {
 
                     div class="bootstrap-section" {
                         h3 { "Bootstrap" }
-                        div class="subtitle" { "Initialize the database by scanning all accessible GitHub repositories." }
-                        div class="bootstrap-actions" {
+                        div class="subtitle" { "Initialize or update the database by scanning GitHub repositories." }
+
+                        div class="bootstrap-mode" {
+                            h4 { "Quick Scan" }
+                            div class="bootstrap-description" { "Scan all owner repos, import 1 commit from default branch" }
                             button
                                 class="bootstrap-button"
-                                hx-post="/bootstrap"
+                                hx-post="/bootstrap/quick"
                                 hx-swap="none"
-                            { "Run bootstrap" }
+                            { "Run Quick Scan" }
                         }
+
+                        div class="bootstrap-mode" {
+                            h4 { "Owner Sync" }
+                            div class="bootstrap-description" { "Scan all owner repos, import 10 commits from default branch" }
+                            button
+                                class="bootstrap-button"
+                                hx-post="/bootstrap/owner"
+                                hx-swap="none"
+                            { "Run Owner Sync" }
+                        }
+
+                        div class="bootstrap-mode" {
+                            h4 { "Deep Repo Scan" }
+                            div class="bootstrap-description" { "Scan all branches of a specific repo, import 50 commits each" }
+                            div class="repo-input-group" {
+                                input type="text" id="repo-owner" placeholder="owner" class="repo-input" {}
+                                span class="repo-separator" { "/" }
+                                input type="text" id="repo-name" placeholder="repo" class="repo-input" {}
+                                button
+                                    class="bootstrap-button"
+                                    onclick="fetch('/bootstrap/repo', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ owner: document.getElementById('repo-owner').value, repo: document.getElementById('repo-name').value }) })"
+                                { "Run Deep Scan" }
+                            }
+                        }
+
                         div class="bootstrap-log-box"
                             id="bootstrap-log"
                             hx-get="/bootstrap/log"

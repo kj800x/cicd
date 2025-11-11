@@ -11,15 +11,39 @@ use kube::Client;
 use octocrab::Octocrab;
 use std::sync::{Arc, Mutex, OnceLock};
 
-const BOOTSTRAP_COMMITS_PER_BRANCH: u8 = 1;
 const PER_PAGE: u8 = 100;
 
 static BOOTSTRAP_LOG: OnceLock<Arc<Mutex<String>>> = OnceLock::new();
+static BOOTSTRAP_LOCK: OnceLock<Arc<Mutex<bool>>> = OnceLock::new();
 
 fn get_bootstrap_log() -> Arc<Mutex<String>> {
     BOOTSTRAP_LOG
         .get_or_init(|| Arc::new(Mutex::new(String::new())))
         .clone()
+}
+
+fn get_bootstrap_lock() -> Arc<Mutex<bool>> {
+    BOOTSTRAP_LOCK
+        .get_or_init(|| Arc::new(Mutex::new(false)))
+        .clone()
+}
+
+fn try_acquire_lock() -> bool {
+    if let Ok(mut lock) = get_bootstrap_lock().lock() {
+        if *lock {
+            return false; // Already locked
+        }
+        *lock = true;
+        true
+    } else {
+        false
+    }
+}
+
+fn release_lock() {
+    if let Ok(mut lock) = get_bootstrap_lock().lock() {
+        *lock = false;
+    }
 }
 
 fn log_clear() {
@@ -111,12 +135,13 @@ async fn list_commits_for_branch(
     owner: &str,
     repo: &str,
     branch: &str,
+    limit: u8,
 ) -> anyhow::Result<Vec<octocrab::models::repos::RepoCommit>> {
     let resp = crab
         .repos(owner, repo)
         .list_commits()
         .sha(branch)
-        .per_page(BOOTSTRAP_COMMITS_PER_BRANCH)
+        .per_page(limit)
         .send()
         .await?;
     Ok(resp.items)
@@ -227,267 +252,328 @@ fn map_state_to_status(state: &str) -> String {
     }
 }
 
-async fn run_bootstrap(pool: Pool<SqliteConnectionManager>, octocrabs: Octocrabs, client: Client) {
+enum BootstrapMode {
+    Quick, // 1 commit, default branch only
+    Owner, // 10 commits, default branch only
+    Repo {
+        // 50 commits, all branches
+        owner: String,
+        repo: String,
+    },
+}
+
+impl BootstrapMode {
+    fn commits_per_branch(&self) -> u8 {
+        match self {
+            BootstrapMode::Quick => 1,
+            BootstrapMode::Owner => 10,
+            BootstrapMode::Repo { .. } => 50,
+        }
+    }
+
+    fn scan_all_branches(&self) -> bool {
+        matches!(self, BootstrapMode::Repo { .. })
+    }
+
+    fn name(&self) -> &str {
+        match self {
+            BootstrapMode::Quick => "Quick Scan",
+            BootstrapMode::Owner => "Owner Sync",
+            BootstrapMode::Repo { .. } => "Deep Repo Scan",
+        }
+    }
+}
+
+async fn run_bootstrap_with_mode(
+    pool: Pool<SqliteConnectionManager>,
+    octocrabs: Octocrabs,
+    client: Client,
+    mode: BootstrapMode,
+) {
     tokio::spawn(async move {
         log_clear();
-        log_append("Starting bootstrap scan");
+        log_append(format!("Starting {} bootstrap", mode.name()));
 
-        let conn = match pool.get() {
-            Ok(c) => c,
-            Err(e) => {
-                log::error!("Bootstrap: failed to get DB connection: {}", e);
-                log_append(format!("Error: failed to get DB connection: {}", e));
-                return;
+        // Route to appropriate implementation based on mode
+        match &mode {
+            BootstrapMode::Repo { owner, repo } => {
+                run_repo_bootstrap_impl(pool, octocrabs, client, owner.clone(), repo.clone()).await;
             }
-        };
+            _ => {
+                run_owner_bootstrap_impl(pool, octocrabs, client, mode).await;
+            }
+        }
 
-        for (idx, crab) in octocrabs.iter().enumerate() {
-            let token_label = format!("token-{}", idx + 1);
-            let start_remaining = log_rate_limit(crab, &format!("start-{}", token_label)).await;
-            match list_all_repos(crab).await {
-                Ok(repos) => {
-                    log_append(format!("Discovered {} repositories", repos.len()));
-                    for r in repos {
-                        let default_branch = r
-                            .default_branch
-                            .clone()
-                            .unwrap_or_else(|| "main".to_string());
-                        let (owner_name, name) = if let Some(full) = r.full_name.clone() {
-                            let mut parts = full.splitn(2, '/');
-                            (
-                                parts.next().unwrap_or_default().to_string(),
-                                parts.next().unwrap_or_default().to_string(),
-                            )
-                        } else {
-                            (
-                                r.owner
-                                    .as_ref()
-                                    .map(|o| o.login.clone())
-                                    .unwrap_or_default(),
-                                r.name.clone(),
-                            )
-                        };
-                        let repo = GitRepo {
-                            id: r.id.0,
-                            owner_name,
-                            name,
-                            default_branch: default_branch.clone(),
-                            private: r.private.unwrap_or(false),
-                            language: r
-                                .language
+        release_lock();
+    });
+}
+
+async fn run_owner_bootstrap_impl(
+    pool: Pool<SqliteConnectionManager>,
+    octocrabs: Octocrabs,
+    client: Client,
+    mode: BootstrapMode,
+) {
+    let conn = match pool.get() {
+        Ok(c) => c,
+        Err(e) => {
+            log::error!("Bootstrap: failed to get DB connection: {}", e);
+            log_append(format!("Error: failed to get DB connection: {}", e));
+            return;
+        }
+    };
+
+    for (idx, crab) in octocrabs.iter().enumerate() {
+        let token_label = format!("token-{}", idx + 1);
+        let start_remaining = log_rate_limit(crab, &format!("start-{}", token_label)).await;
+        match list_all_repos(crab).await {
+            Ok(repos) => {
+                log_append(format!("Discovered {} repositories", repos.len()));
+                for r in repos {
+                    let default_branch = r
+                        .default_branch
+                        .clone()
+                        .unwrap_or_else(|| "main".to_string());
+                    let (owner_name, name) = if let Some(full) = r.full_name.clone() {
+                        let mut parts = full.splitn(2, '/');
+                        (
+                            parts.next().unwrap_or_default().to_string(),
+                            parts.next().unwrap_or_default().to_string(),
+                        )
+                    } else {
+                        (
+                            r.owner
                                 .as_ref()
-                                .and_then(|v| v.as_str().map(|s| s.to_string())),
-                        };
-                        if let Err(e) = repo.upsert(&conn) {
+                                .map(|o| o.login.clone())
+                                .unwrap_or_default(),
+                            r.name.clone(),
+                        )
+                    };
+                    let repo = GitRepo {
+                        id: r.id.0,
+                        owner_name,
+                        name,
+                        default_branch: default_branch.clone(),
+                        private: r.private.unwrap_or(false),
+                        language: r
+                            .language
+                            .as_ref()
+                            .and_then(|v| v.as_str().map(|s| s.to_string())),
+                    };
+                    if let Err(e) = repo.upsert(&conn) {
+                        log::warn!(
+                            "Bootstrap: upsert repo {}/{} failed: {}",
+                            repo.owner_name,
+                            repo.name,
+                            e
+                        );
+                        log_append(format!(
+                            "repo {}/{}: upsert failed: {}",
+                            repo.owner_name, repo.name, e
+                        ));
+                        continue;
+                    }
+
+                    // Process only the default branch
+                    let branch_name = default_branch.clone();
+                    log_rate_limit(
+                        crab,
+                        &format!("before-commits-{}/{}", repo.owner_name, repo.name),
+                    )
+                    .await;
+                    let commits = match list_commits_for_branch(
+                        crab,
+                        &repo.owner_name,
+                        &repo.name,
+                        &branch_name,
+                        mode.commits_per_branch(),
+                    )
+                    .await
+                    {
+                        Ok(c) => c,
+                        Err(e) => {
                             log::warn!(
-                                "Bootstrap: upsert repo {}/{} failed: {}",
+                                "Bootstrap: list commits for {}/{}@{} failed: {:?}",
                                 repo.owner_name,
                                 repo.name,
+                                branch_name,
                                 e
                             );
                             log_append(format!(
-                                "repo {}/{}: upsert failed: {}",
-                                repo.owner_name, repo.name, e
+                                "repo {}/{}: list commits for {} failed: {:?}",
+                                repo.owner_name, repo.name, branch_name, e
                             ));
                             continue;
                         }
+                    };
 
-                        // Process only the default branch
-                        let branch_name = default_branch.clone();
-                        log_rate_limit(
-                            crab,
-                            &format!("before-commits-{}/{}", repo.owner_name, repo.name),
-                        )
-                        .await;
-                        let commits = match list_commits_for_branch(
-                            crab,
-                            &repo.owner_name,
-                            &repo.name,
-                            &branch_name,
-                        )
-                        .await
-                        {
-                            Ok(c) => c,
+                    log_append(format!(
+                        "repo {}/{}: {} commits on {}",
+                        repo.owner_name,
+                        repo.name,
+                        commits.len(),
+                        branch_name
+                    ));
+
+                    if let Some(first) = commits.first() {
+                        let branch_egg = GitBranchEgg {
+                            name: branch_name.clone(),
+                            head_commit_sha: first.sha.clone(),
+                            repo_id: repo.id,
+                            active: true,
+                        };
+                        let branch = match branch_egg.upsert(&conn) {
+                            Ok(br) => br,
                             Err(e) => {
                                 log::warn!(
-                                    "Bootstrap: list commits for {}/{}@{} failed: {:?}",
+                                    "Bootstrap: upsert branch {} for {}/{} failed: {}",
+                                    branch_name,
                                     repo.owner_name,
                                     repo.name,
-                                    branch_name,
                                     e
                                 );
                                 log_append(format!(
-                                    "repo {}/{}: list commits for {} failed: {:?}",
+                                    "repo {}/{}: upsert branch {} failed: {}",
                                     repo.owner_name, repo.name, branch_name, e
                                 ));
                                 continue;
                             }
                         };
 
-                        log_append(format!(
-                            "repo {}/{}: {} commits on {}",
-                            repo.owner_name,
-                            repo.name,
-                            commits.len(),
-                            branch_name
-                        ));
+                        for c in &commits {
+                            let author_name = c
+                                .commit
+                                .author
+                                .as_ref()
+                                .map(|a| a.name.clone())
+                                .unwrap_or_else(|| "unknown".to_string());
+                            let committer_name = c
+                                .commit
+                                .committer
+                                .as_ref()
+                                .map(|a| a.name.clone())
+                                .unwrap_or_else(|| "unknown".to_string());
+                            let ts_millis = c
+                                .commit
+                                .author
+                                .as_ref()
+                                .and_then(|a| a.date.as_ref())
+                                .or_else(|| {
+                                    c.commit.committer.as_ref().and_then(|a| a.date.as_ref())
+                                })
+                                .map(|d| d.timestamp_millis())
+                                .unwrap_or_else(|| Utc::now().timestamp_millis());
 
-                        if let Some(first) = commits.first() {
-                            let branch_egg = GitBranchEgg {
-                                name: branch_name.clone(),
-                                head_commit_sha: first.sha.clone(),
+                            let egg = GitCommitEgg {
+                                sha: c.sha.clone(),
                                 repo_id: repo.id,
-                                active: true,
+                                message: c.commit.message.clone(),
+                                author: author_name,
+                                committer: committer_name,
+                                timestamp: ts_millis,
                             };
-                            let branch = match branch_egg.upsert(&conn) {
-                                Ok(br) => br,
+                            let commit = match crate::db::git_commit::GitCommit::upsert(&egg, &conn)
+                            {
+                                Ok(cc) => cc,
                                 Err(e) => {
                                     log::warn!(
-                                        "Bootstrap: upsert branch {} for {}/{} failed: {}",
-                                        branch_name,
+                                        "Bootstrap: upsert commit {} for {}/{} failed: {}",
+                                        c.sha,
                                         repo.owner_name,
                                         repo.name,
                                         e
                                     );
                                     log_append(format!(
-                                        "repo {}/{}: upsert branch {} failed: {}",
-                                        repo.owner_name, repo.name, branch_name, e
+                                        "repo {}/{}: upsert commit {} failed: {}",
+                                        repo.owner_name, repo.name, c.sha, e
                                     ));
                                     continue;
                                 }
                             };
 
-                            for c in commits {
-                                let author_name = c
-                                    .commit
-                                    .author
-                                    .as_ref()
-                                    .map(|a| a.name.clone())
-                                    .unwrap_or_else(|| "unknown".to_string());
-                                let committer_name = c
-                                    .commit
-                                    .committer
-                                    .as_ref()
-                                    .map(|a| a.name.clone())
-                                    .unwrap_or_else(|| "unknown".to_string());
-                                let ts_millis = c
-                                    .commit
-                                    .author
-                                    .as_ref()
-                                    .and_then(|a| a.date.as_ref())
-                                    .or_else(|| {
-                                        c.commit.committer.as_ref().and_then(|a| a.date.as_ref())
-                                    })
-                                    .map(|d| d.timestamp_millis())
-                                    .unwrap_or_else(|| Utc::now().timestamp_millis());
+                            let parent_shas: Vec<String> =
+                                c.parents.clone().into_iter().flat_map(|p| p.sha).collect();
+                            if let Err(e) = commit.add_parent_shas(parent_shas, &conn) {
+                                log::debug!(
+                                    "Bootstrap: add parents for {} failed: {}",
+                                    commit.sha,
+                                    e
+                                );
+                                log_append(format!(
+                                    "repo {}/{}: add parents for {} failed: {}",
+                                    repo.owner_name, repo.name, commit.sha, e
+                                ));
+                            }
+                            if let Err(e) = commit.add_branch(branch.id, &conn) {
+                                log::debug!(
+                                    "Bootstrap: add branch relation for {} failed: {}",
+                                    commit.sha,
+                                    e
+                                );
+                                log_append(format!(
+                                    "repo {}/{}: add branch relation for {} failed: {}",
+                                    repo.owner_name, repo.name, commit.sha, e
+                                ));
+                            }
 
-                                let egg = GitCommitEgg {
-                                    sha: c.sha.clone(),
-                                    repo_id: repo.id,
-                                    message: c.commit.message.clone(),
-                                    author: author_name,
-                                    committer: committer_name,
-                                    timestamp: ts_millis,
-                                };
-                                let commit =
-                                    match crate::db::git_commit::GitCommit::upsert(&egg, &conn) {
-                                        Ok(cc) => cc,
-                                        Err(e) => {
-                                            log::warn!(
-                                                "Bootstrap: upsert commit {} for {}/{} failed: {}",
-                                                c.sha,
-                                                repo.owner_name,
-                                                repo.name,
-                                                e
-                                            );
-                                            log_append(format!(
-                                                "repo {}/{}: upsert commit {} failed: {}",
-                                                repo.owner_name, repo.name, c.sha, e
-                                            ));
-                                            continue;
-                                        }
+                            // Best-effort: fetch combined status
+                            // log_rate_limit(
+                            //     crab,
+                            //     &format!("before-status-{}", commit.sha[..7].to_string()),
+                            // )
+                            // .await;
+                            match get_status_state_for_sha(
+                                crab,
+                                &repo.owner_name,
+                                &repo.name,
+                                &commit.sha,
+                            )
+                            .await
+                            {
+                                Ok(Some(cs)) => {
+                                    let status = map_state_to_status(&cs);
+                                    let build = GitCommitBuild {
+                                        repo_id: repo.id,
+                                        commit_id: commit.id,
+                                        check_name: "default".to_string(),
+                                        status,
+                                        url: format!(
+                                            "https://github.com/{}/{}/commit/{}/checks",
+                                            repo.owner_name, repo.name, commit.sha
+                                        ),
+                                        start_time: None,
+                                        settle_time: None,
                                     };
-
-                                let parent_shas: Vec<String> =
-                                    c.parents.into_iter().flat_map(|p| p.sha).collect();
-                                if let Err(e) = commit.add_parent_shas(parent_shas, &conn) {
-                                    log::debug!(
-                                        "Bootstrap: add parents for {} failed: {}",
-                                        commit.sha,
-                                        e
-                                    );
-                                    log_append(format!(
-                                        "repo {}/{}: add parents for {} failed: {}",
-                                        repo.owner_name, repo.name, commit.sha, e
-                                    ));
-                                }
-                                if let Err(e) = commit.add_branch(branch.id, &conn) {
-                                    log::debug!(
-                                        "Bootstrap: add branch relation for {} failed: {}",
-                                        commit.sha,
-                                        e
-                                    );
-                                    log_append(format!(
-                                        "repo {}/{}: add branch relation for {} failed: {}",
-                                        repo.owner_name, repo.name, commit.sha, e
-                                    ));
-                                }
-
-                                // Best-effort: fetch combined status
-                                log_rate_limit(
-                                    crab,
-                                    &format!("before-status-{}", commit.sha[..7].to_string()),
-                                )
-                                .await;
-                                match get_status_state_for_sha(
-                                    crab,
-                                    &repo.owner_name,
-                                    &repo.name,
-                                    &commit.sha,
-                                )
-                                .await
-                                {
-                                    Ok(Some(cs)) => {
-                                        let status = map_state_to_status(&cs);
-                                        let build = GitCommitBuild {
-                                            repo_id: repo.id,
-                                            commit_id: commit.id,
-                                            check_name: "default".to_string(),
-                                            status,
-                                            url: format!(
-                                                "https://github.com/{}/{}/commit/{}/checks",
-                                                repo.owner_name, repo.name, commit.sha
-                                            ),
-                                            start_time: None,
-                                            settle_time: None,
-                                        };
-                                        if let Err(e) = GitCommitBuild::upsert(&build, &conn) {
-                                            log::debug!(
-                                                "Bootstrap: upsert build for {} failed: {}",
-                                                commit.sha,
-                                                e
-                                            );
-                                            log_append(format!(
-                                                "repo {}/{}: upsert build for {} failed: {}",
-                                                repo.owner_name, repo.name, commit.sha, e
-                                            ));
-                                        }
-                                    }
-                                    Ok(None) => {}
-                                    Err(e) => {
+                                    if let Err(e) = GitCommitBuild::upsert(&build, &conn) {
                                         log::debug!(
-                                            "Bootstrap: fetch combined status for {} failed: {:?}",
+                                            "Bootstrap: upsert build for {} failed: {}",
                                             commit.sha,
                                             e
                                         );
                                         log_append(format!(
-                                            "repo {}/{}: fetch combined status for {} failed: {:?}",
+                                            "repo {}/{}: upsert build for {} failed: {}",
                                             repo.owner_name, repo.name, commit.sha, e
                                         ));
                                     }
                                 }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    log::debug!(
+                                        "Bootstrap: fetch combined status for {} failed: {:?}",
+                                        commit.sha,
+                                        e
+                                    );
+                                    log_append(format!(
+                                        "repo {}/{}: fetch combined status for {} failed: {:?}",
+                                        repo.owner_name, repo.name, commit.sha, e
+                                    ));
+                                }
+                            }
+                        }
 
-                                // Sync deploy configs for this commit (idempotent)
+                        // Sync deploy configs only for the HEAD of the default branch
+                        if branch_name == repo.default_branch {
+                            if let Some(head_commit) = commits.first() {
                                 match sync_deploy_configs_for_commit(
                                     &octocrabs,
                                     &client,
@@ -495,16 +581,16 @@ async fn run_bootstrap(pool: Pool<SqliteConnectionManager>, octocrabs: Octocrabs
                                     &repo.owner_name,
                                     &repo.name,
                                     repo.id as u64,
-                                    &c.sha,
+                                    &head_commit.sha,
                                 )
                                 .await
                                 {
                                     Ok(_) => {
                                         log_append(format!(
-                                            "repo {}/{}: synced deploy configs for {}",
+                                            "repo {}/{}: synced deploy configs for HEAD of default branch ({})",
                                             repo.owner_name,
                                             repo.name,
-                                            c.sha[..7].to_string()
+                                            head_commit.sha[..7].to_string()
                                         ));
                                     }
                                     Err(e) => {
@@ -512,7 +598,7 @@ async fn run_bootstrap(pool: Pool<SqliteConnectionManager>, octocrabs: Octocrabs
                                             "Bootstrap: sync deploy configs for {}/{} @ {} failed: {:?}",
                                             repo.owner_name,
                                             repo.name,
-                                            c.sha,
+                                            head_commit.sha,
                                             e
                                         );
                                         // Don't fail the entire bootstrap if deploy config sync fails
@@ -520,33 +606,367 @@ async fn run_bootstrap(pool: Pool<SqliteConnectionManager>, octocrabs: Octocrabs
                                     }
                                 }
                             }
-                        } else {
-                            log_append(format!(
-                                "repo {}/{}: no commits on {}",
-                                repo.owner_name, repo.name, branch_name
-                            ));
                         }
-                    }
-                    let end_remaining = log_rate_limit(crab, &format!("end-{}", token_label)).await;
-
-                    // Calculate usage if we have both start and end measurements
-                    if let (Some(start), Some(end)) = (start_remaining, end_remaining) {
-                        let used = start.saturating_sub(end);
+                    } else {
                         log_append(format!(
-                            "Bootstrap used approximately {} API requests for {}",
-                            used, token_label
+                            "repo {}/{}: no commits on {}",
+                            repo.owner_name, repo.name, branch_name
                         ));
                     }
+                }
+                let end_remaining = log_rate_limit(crab, &format!("end-{}", token_label)).await;
 
-                    log_append("Bootstrap completed");
+                // Calculate usage if we have both start and end measurements
+                if let (Some(start), Some(end)) = (start_remaining, end_remaining) {
+                    let used = start.saturating_sub(end);
+                    log_append(format!(
+                        "Bootstrap used approximately {} API requests for {}",
+                        used, token_label
+                    ));
                 }
-                Err(e) => {
-                    log::warn!("Bootstrap: list repos failed: {:?}", e);
-                    log_append(format!("Error: list repos failed: {:?}", e));
-                }
+
+                log_append("Bootstrap completed");
+            }
+            Err(e) => {
+                log::warn!("Bootstrap: list repos failed: {:?}", e);
+                log_append(format!("Error: list repos failed: {:?}", e));
             }
         }
-    });
+    }
+}
+
+async fn run_repo_bootstrap_impl(
+    pool: Pool<SqliteConnectionManager>,
+    octocrabs: Octocrabs,
+    client: Client,
+    owner: String,
+    repo_name: String,
+) {
+    let conn = match pool.get() {
+        Ok(c) => c,
+        Err(e) => {
+            log::error!("Bootstrap: failed to get DB connection: {}", e);
+            log_append(format!("Error: failed to get DB connection: {}", e));
+            return;
+        }
+    };
+
+    log_append(format!("Scanning repo {}/{}", owner, repo_name));
+
+    for (idx, crab) in octocrabs.iter().enumerate() {
+        let token_label = format!("token-{}", idx + 1);
+        let start_remaining = log_rate_limit(crab, &format!("start-{}", token_label)).await;
+
+        // Fetch the specific repository
+        let repo_data = match crab.repos(&owner, &repo_name).get().await {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!(
+                    "Bootstrap: fetch repo {}/{} failed: {:?}",
+                    owner,
+                    repo_name,
+                    e
+                );
+                log_append(format!(
+                    "Error: fetch repo {}/{} failed: {:?}",
+                    owner, repo_name, e
+                ));
+                continue;
+            }
+        };
+
+        let default_branch = repo_data
+            .default_branch
+            .clone()
+            .unwrap_or_else(|| "main".to_string());
+
+        let repo = GitRepo {
+            id: repo_data.id.0,
+            owner_name: owner.clone(),
+            name: repo_name.clone(),
+            default_branch: default_branch.clone(),
+            private: repo_data.private.unwrap_or(false),
+            language: repo_data
+                .language
+                .as_ref()
+                .and_then(|v| v.as_str().map(|s| s.to_string())),
+        };
+
+        if let Err(e) = repo.upsert(&conn) {
+            log::warn!(
+                "Bootstrap: upsert repo {}/{} failed: {}",
+                owner,
+                repo_name,
+                e
+            );
+            log_append(format!(
+                "repo {}/{}: upsert failed: {}",
+                owner, repo_name, e
+            ));
+            return;
+        }
+
+        log_append(format!(
+            "repo {}/{}: fetching all branches",
+            owner, repo_name
+        ));
+
+        // Fetch all branches for this repo
+        let branches = match list_all_branches(crab, &owner, &repo_name).await {
+            Ok(b) => b,
+            Err(e) => {
+                log::warn!(
+                    "Bootstrap: list branches for {}/{} failed: {:?}",
+                    owner,
+                    repo_name,
+                    e
+                );
+                log_append(format!(
+                    "repo {}/{}: list branches failed: {:?}",
+                    owner, repo_name, e
+                ));
+                return;
+            }
+        };
+
+        log_append(format!(
+            "repo {}/{}: processing {} branches",
+            owner,
+            repo_name,
+            branches.len()
+        ));
+
+        for branch_data in branches {
+            let branch_name = branch_data.name.clone();
+
+            log_rate_limit(
+                crab,
+                &format!("before-commits-{}/{}@{}", owner, repo_name, branch_name),
+            )
+            .await;
+
+            let commits = match list_commits_for_branch(
+                crab,
+                &owner,
+                &repo_name,
+                &branch_name,
+                50, // Deep scan: 50 commits per branch
+            )
+            .await
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    log::warn!(
+                        "Bootstrap: list commits for {}/{}@{} failed: {:?}",
+                        owner,
+                        repo_name,
+                        branch_name,
+                        e
+                    );
+                    log_append(format!(
+                        "repo {}/{}: list commits for {} failed: {:?}",
+                        owner, repo_name, branch_name, e
+                    ));
+                    continue;
+                }
+            };
+
+            log_append(format!(
+                "repo {}/{}: {} commits on {}",
+                owner,
+                repo_name,
+                commits.len(),
+                branch_name
+            ));
+
+            if let Some(first) = commits.first() {
+                let branch_egg = GitBranchEgg {
+                    name: branch_name.clone(),
+                    head_commit_sha: first.sha.clone(),
+                    repo_id: repo.id,
+                    active: true,
+                };
+                let branch = match branch_egg.upsert(&conn) {
+                    Ok(br) => br,
+                    Err(e) => {
+                        log::warn!(
+                            "Bootstrap: upsert branch {} for {}/{} failed: {}",
+                            branch_name,
+                            owner,
+                            repo_name,
+                            e
+                        );
+                        log_append(format!(
+                            "repo {}/{}: upsert branch {} failed: {}",
+                            owner, repo_name, branch_name, e
+                        ));
+                        continue;
+                    }
+                };
+
+                for c in commits {
+                    let author_name = c
+                        .commit
+                        .author
+                        .as_ref()
+                        .map(|a| a.name.clone())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let committer_name = c
+                        .commit
+                        .committer
+                        .as_ref()
+                        .map(|a| a.name.clone())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let ts_millis = c
+                        .commit
+                        .author
+                        .as_ref()
+                        .and_then(|a| a.date.as_ref())
+                        .or_else(|| c.commit.committer.as_ref().and_then(|a| a.date.as_ref()))
+                        .map(|d| d.timestamp_millis())
+                        .unwrap_or_else(|| Utc::now().timestamp_millis());
+
+                    let egg = GitCommitEgg {
+                        sha: c.sha.clone(),
+                        repo_id: repo.id,
+                        message: c.commit.message.clone(),
+                        author: author_name,
+                        committer: committer_name,
+                        timestamp: ts_millis,
+                    };
+                    let commit = match crate::db::git_commit::GitCommit::upsert(&egg, &conn) {
+                        Ok(cc) => cc,
+                        Err(e) => {
+                            log::warn!(
+                                "Bootstrap: upsert commit {} for {}/{} failed: {}",
+                                c.sha,
+                                owner,
+                                repo_name,
+                                e
+                            );
+                            log_append(format!(
+                                "repo {}/{}: upsert commit {} failed: {}",
+                                owner, repo_name, c.sha, e
+                            ));
+                            continue;
+                        }
+                    };
+
+                    let parent_shas: Vec<String> =
+                        c.parents.clone().into_iter().flat_map(|p| p.sha).collect();
+                    if let Err(e) = commit.add_parent_shas(parent_shas, &conn) {
+                        log::debug!("Bootstrap: add parents for {} failed: {}", commit.sha, e);
+                    }
+                    if let Err(e) = commit.add_branch(branch.id, &conn) {
+                        log::debug!(
+                            "Bootstrap: add branch relation for {} failed: {}",
+                            commit.sha,
+                            e
+                        );
+                    }
+
+                    // Fetch build status for each commit
+                    // log_rate_limit(
+                    //     crab,
+                    //     &format!("before-status-{}", commit.sha[..7].to_string()),
+                    // )
+                    // .await;
+                    match get_status_state_for_sha(crab, &owner, &repo_name, &commit.sha).await {
+                        Ok(Some(cs)) => {
+                            let status = map_state_to_status(&cs);
+                            let build = GitCommitBuild {
+                                repo_id: repo.id,
+                                commit_id: commit.id,
+                                check_name: "default".to_string(),
+                                status,
+                                url: format!(
+                                    "https://github.com/{}/{}/commit/{}/checks",
+                                    owner, repo_name, commit.sha
+                                ),
+                                start_time: None,
+                                settle_time: None,
+                            };
+                            if let Err(e) = GitCommitBuild::upsert(&build, &conn) {
+                                log::debug!(
+                                    "Bootstrap: upsert build for {} failed: {}",
+                                    commit.sha,
+                                    e
+                                );
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            log::debug!(
+                                "Bootstrap: fetch combined status for {} failed: {:?}",
+                                commit.sha,
+                                e
+                            );
+                        }
+                    }
+                }
+
+                // Sync deploy configs only for the HEAD of the default branch
+                if branch_name == repo.default_branch {
+                    let head_commit = &branch_egg.head_commit_sha;
+                    match sync_deploy_configs_for_commit(
+                        &octocrabs,
+                        &client,
+                        &pool,
+                        &owner,
+                        &repo_name,
+                        repo.id as u64,
+                        head_commit,
+                    )
+                    .await
+                    {
+                        Ok(_) => {
+                            log_append(format!(
+                                "repo {}/{}: synced deploy configs for HEAD of default branch ({})",
+                                owner,
+                                repo_name,
+                                head_commit[..7].to_string()
+                            ));
+                        }
+                        Err(e) => {
+                            log::debug!(
+                                "Bootstrap: sync deploy configs for {}/{} @ {} failed: {:?}",
+                                owner,
+                                repo_name,
+                                head_commit,
+                                e
+                            );
+                        }
+                    }
+                }
+            } else {
+                log_append(format!(
+                    "repo {}/{}: no commits on {}",
+                    owner, repo_name, branch_name
+                ));
+            }
+        }
+
+        let end_remaining = log_rate_limit(crab, &format!("end-{}", token_label)).await;
+
+        // Calculate usage if we have both start and end measurements
+        if let (Some(start), Some(end)) = (start_remaining, end_remaining) {
+            let used = start.saturating_sub(end);
+            log_append(format!(
+                "Deep repo scan used approximately {} API requests for {}",
+                used, token_label
+            ));
+        }
+
+        log_append(format!(
+            "Deep repo scan completed for {}/{}",
+            owner, repo_name
+        ));
+        break; // Only use the first token that works
+    }
+}
+
+async fn run_bootstrap(pool: Pool<SqliteConnectionManager>, octocrabs: Octocrabs, client: Client) {
+    run_bootstrap_with_mode(pool, octocrabs, client, BootstrapMode::Quick).await;
 }
 
 #[post("/bootstrap")]
@@ -565,6 +985,113 @@ pub async fn bootstrap(
     HttpResponse::build(StatusCode::ACCEPTED)
         .content_type("text/html; charset=utf-8")
         .body("Bootstrap started. This may take a few minutes.")
+}
+
+#[post("/bootstrap/quick")]
+pub async fn bootstrap_quick(
+    pool: web::Data<Pool<SqliteConnectionManager>>,
+    octocrabs: web::Data<Octocrabs>,
+    client: web::Data<Client>,
+) -> impl Responder {
+    if !try_acquire_lock() {
+        return HttpResponse::build(StatusCode::CONFLICT)
+            .content_type("text/html; charset=utf-8")
+            .body("A bootstrap task is already running. Please wait for it to complete.");
+    }
+
+    run_bootstrap_with_mode(
+        pool.get_ref().clone(),
+        octocrabs.get_ref().clone(),
+        client.get_ref().clone(),
+        BootstrapMode::Quick,
+    )
+    .await;
+
+    HttpResponse::build(StatusCode::ACCEPTED)
+        .content_type("text/html; charset=utf-8")
+        .body("Quick scan started.")
+}
+
+#[post("/bootstrap/owner")]
+pub async fn bootstrap_owner(
+    pool: web::Data<Pool<SqliteConnectionManager>>,
+    octocrabs: web::Data<Octocrabs>,
+    client: web::Data<Client>,
+) -> impl Responder {
+    if !try_acquire_lock() {
+        return HttpResponse::build(StatusCode::CONFLICT)
+            .content_type("text/html; charset=utf-8")
+            .body("A bootstrap task is already running. Please wait for it to complete.");
+    }
+
+    run_bootstrap_with_mode(
+        pool.get_ref().clone(),
+        octocrabs.get_ref().clone(),
+        client.get_ref().clone(),
+        BootstrapMode::Owner,
+    )
+    .await;
+
+    HttpResponse::build(StatusCode::ACCEPTED)
+        .content_type("text/html; charset=utf-8")
+        .body("Owner sync started.")
+}
+
+#[derive(serde::Deserialize)]
+pub struct RepoBootstrapRequest {
+    owner: String,
+    repo: String,
+}
+
+#[post("/bootstrap/repo")]
+pub async fn bootstrap_repo(
+    pool: web::Data<Pool<SqliteConnectionManager>>,
+    octocrabs: web::Data<Octocrabs>,
+    client: web::Data<Client>,
+    req: web::Json<RepoBootstrapRequest>,
+) -> impl Responder {
+    if !try_acquire_lock() {
+        return HttpResponse::build(StatusCode::CONFLICT)
+            .content_type("text/html; charset=utf-8")
+            .body("A bootstrap task is already running. Please wait for it to complete.");
+    }
+
+    // Validate that the repo exists
+    let mut repo_found = false;
+    for crab in octocrabs.iter() {
+        if let Ok(_) = crab.repos(&req.owner, &req.repo).get().await {
+            repo_found = true;
+            break;
+        }
+    }
+
+    if !repo_found {
+        release_lock();
+        return HttpResponse::build(StatusCode::NOT_FOUND)
+            .content_type("text/html; charset=utf-8")
+            .body(format!(
+                "Repository {}/{} not found or not accessible.",
+                req.owner, req.repo
+            ));
+    }
+
+    run_bootstrap_with_mode(
+        pool.get_ref().clone(),
+        octocrabs.get_ref().clone(),
+        client.get_ref().clone(),
+        BootstrapMode::Repo {
+            owner: req.owner.clone(),
+            repo: req.repo.clone(),
+        },
+    )
+    .await;
+
+    HttpResponse::build(StatusCode::ACCEPTED)
+        .content_type("text/html; charset=utf-8")
+        .body(format!(
+            "Deep repo scan started for {}/{}.",
+            req.owner, req.repo
+        ))
 }
 
 #[get("/bootstrap/log")]
