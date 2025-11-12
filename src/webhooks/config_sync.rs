@@ -229,7 +229,11 @@ pub async fn fetch_deploy_configs_by_sha(
     let result = octocrabs.crab_for(&repository).await;
 
     let Some(crab) = result else {
-        log::error!("No octocrab found for repo {}/{}", repository.owner(), repository.repo());
+        log::error!(
+            "No octocrab found for repo {}/{}",
+            repository.owner(),
+            repository.repo()
+        );
         return Err(AppError::NotFound(
             "No octocrab found for this repo".to_owned(),
         ));
@@ -238,7 +242,12 @@ pub async fn fetch_deploy_configs_by_sha(
     let owner = repository.owner().to_string();
     let repo = repository.repo().to_string();
 
-    log::debug!("Fetching .deploy directory from {}/{} at {}", owner, repo, sha);
+    log::debug!(
+        "Fetching .deploy directory from {}/{} at {}",
+        owner,
+        repo,
+        sha
+    );
     let content = match crab
         .repos(&owner, &repo)
         .get_content()
@@ -333,7 +342,10 @@ pub async fn fetch_deploy_configs_by_sha(
 
             result
         } else {
-            log::debug!("No directory found for .deploy/{}, using only .yaml file", config_name);
+            log::debug!(
+                "No directory found for .deploy/{}, using only .yaml file",
+                config_name
+            );
             vec![]
         };
 
@@ -362,7 +374,11 @@ pub async fn fetch_deploy_configs_by_sha(
         let config: GitHubDeployConfig =
             serde_yaml::from_str(&config_content).map_err(AppError::Yaml)?;
 
-        log::debug!("Parsing {} child YAML files for config {}", child_files.len(), config_name);
+        log::debug!(
+            "Parsing {} child YAML files for config {}",
+            child_files.len(),
+            config_name
+        );
         let child_files: Vec<Value> = child_files
             .into_iter()
             .enumerate()
@@ -371,7 +387,11 @@ pub async fn fetch_deploy_configs_by_sha(
                 let parsed: Value = serde_yaml::from_str(&file).map_err(AppError::Yaml)?;
                 log::debug!("  Parsed child file [{}]: {}", idx, parsed);
                 if parsed.is_null() {
-                    log::warn!("  WARNING: Child file [{}] parsed as null! Content was: {}", idx, file);
+                    log::warn!(
+                        "  WARNING: Child file [{}] parsed as null! Content was: {}",
+                        idx,
+                        file
+                    );
                 }
                 Ok(parsed)
             })
