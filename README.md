@@ -293,6 +293,16 @@ Changing a DeployConfig's namespace is not currently supported. If you need to m
 
 The limitation exists because deploy operations reference the existing config's namespace rather than the desired namespace from the updated configuration.
 
+### Resource Apply Failures Not Reflected in UI
+**BUG TO FIX**: When the Kubernetes controller fails to apply resources (e.g., due to schema validation errors like incorrect field names in CronJob specs), the deployment still appears successful in the UI. The controller logs show the errors, but the DeployConfig status doesn't reflect the failure state. This can lead to confusing situations where deployments look healthy but resources are actually failing to reconcile.
+
+**Common causes**:
+- Invalid Kubernetes YAML (e.g., using `spec.timezone` instead of `spec.timeZone` in CronJobs)
+- Fields not supported by the cluster version
+- Schema validation errors during Server-Side Apply
+
+**Needed fix**: The controller should update the DeployConfig status to reflect apply failures, and the UI should show error states for resources that fail to apply. The reconciliation loop should surface these errors more prominently rather than just logging and requeuing.
+
 ## Roadmap
 
 ### Immediate Priorities (Post-Cutover)
