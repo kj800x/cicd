@@ -368,7 +368,7 @@ pub async fn fetch_deploy_configs_by_sha(
             .enumerate()
             .map(|(idx, file)| {
                 log::debug!("  Parsing child file [{}]", idx);
-                let parsed = serde_yaml::from_str(&file).map_err(AppError::Yaml)?;
+                let parsed: Value = serde_yaml::from_str(&file).map_err(AppError::Yaml)?;
                 log::debug!("  Parsed child file [{}]: {}", idx, parsed);
                 if parsed.is_null() {
                     log::warn!("  WARNING: Child file [{}] parsed as null! Content was: {}", idx, file);
