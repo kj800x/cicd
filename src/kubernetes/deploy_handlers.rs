@@ -52,12 +52,32 @@ impl DeployAction {
                 artifact,
                 config,
             } => {
-                log::debug!("Updating to config sha: {}", config.sha);
+                log::debug!(
+                    "Deploy action: name={}, artifact={:?}, config={:?}",
+                    name,
+                    artifact,
+                    config
+                );
+                log::debug!(
+                    "Fetching config from repo {}/{} at sha: {}",
+                    repository.owner(),
+                    repository.repo(),
+                    config.sha
+                );
 
                 let desired_config =
                     fetch_deploy_config_by_sha(octocrabs, repository, &config.sha, name)
                         .await?
                         .ok_or(AppError::NotFound("Desired config not found".to_owned()))?;
+
+                log::debug!(
+                    "Fetched config for {}: {} specs found",
+                    name,
+                    desired_config.spec.spec.specs.len()
+                );
+                for (idx, spec) in desired_config.spec.spec.specs.iter().enumerate() {
+                    log::debug!("  spec[{}]: {}", idx, spec);
+                }
 
                 set_deploy_config_specs(
                     client,

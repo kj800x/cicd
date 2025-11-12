@@ -155,6 +155,7 @@ async fn main() -> std::io::Result<()> {
         .filter_module("cicd::kubernetes", log::LevelFilter::Info)
         .filter_module("cicd::web", log::LevelFilter::Info)
         .filter_module("cicd::kubernetes::deploy_handlers", log::LevelFilter::Debug)
+        .filter_module("cicd::webhooks::config_sync", log::LevelFilter::Debug)
         .parse_default_env()
         .init();
 

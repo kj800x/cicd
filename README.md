@@ -303,6 +303,21 @@ The limitation exists because deploy operations reference the existing config's 
 
 **Needed fix**: The controller should update the DeployConfig status to reflect apply failures, and the UI should show error states for resources that fail to apply. The reconciliation loop should surface these errors more prominently rather than just logging and requeuing.
 
+### Separate Artifact and Config Repos Not Supported
+**BUG TO FIX**: When a DeployConfig has different repos for artifacts (the code) and config (the `.deploy/*.yaml` files), the deploy action fails because `DeploymentState::from_action` calls `latest_for_branch()` on the config repo. This function requires the repo to be tracked in the database with commits, but config-only repos typically don't have CI/CD builds and aren't tracked.
+
+**Error symptoms**:
+- "Repository not found" or "Branch not found" errors when trying to deploy
+- `spec.specs[N]` being null in the DeployConfig, causing validation errors
+- Deploy actions failing with "Failed to execute deploy action" in logs
+
+**Workaround**: Currently, artifact and config repos should be the same, or the config repo must have CI/CD builds that are tracked in the database.
+
+**Needed fix**: When artifact and config repos differ, the deploy logic should:
+1. Use the config repo's default branch HEAD SHA directly (via GitHub API) instead of looking it up in the database
+2. Or allow specifying config SHA explicitly in the deploy action
+3. Config repos shouldn't need to be tracked in the database at all - they should only need to be accessible via the GitHub API
+
 ## Roadmap
 
 ### Immediate Priorities (Post-Cutover)

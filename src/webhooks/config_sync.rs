@@ -188,11 +188,30 @@ pub async fn fetch_deploy_config_by_sha(
     sha: &str,
     config_name: &str,
 ) -> AppResult<Option<DeployConfig>> {
+    log::debug!(
+        "fetch_deploy_config_by_sha: repo={}/{}, sha={}, config_name={}",
+        repository.owner(),
+        repository.repo(),
+        sha,
+        config_name
+    );
     let configs = fetch_deploy_configs_by_sha(octocrabs, repository, sha).await?;
-    log::trace!("configs: {:#?}", configs);
+    log::debug!("Found {} deploy configs total", configs.len());
+    for config in &configs {
+        log::debug!(
+            "  - config '{}': {} specs",
+            config.name_any(),
+            config.spec.spec.specs.len()
+        );
+    }
     let config = configs
         .into_iter()
         .find(|config| config.name_any() == config_name);
+    if config.is_some() {
+        log::debug!("Found matching config for '{}'", config_name);
+    } else {
+        log::warn!("No matching config found for '{}'", config_name);
+    }
     Ok(config)
 }
 
@@ -201,9 +220,16 @@ pub async fn fetch_deploy_configs_by_sha(
     repository: impl IRepo,
     sha: &str,
 ) -> AppResult<Vec<DeployConfig>> {
+    log::debug!(
+        "fetch_deploy_configs_by_sha: repo={}/{}, sha={}",
+        repository.owner(),
+        repository.repo(),
+        sha
+    );
     let result = octocrabs.crab_for(&repository).await;
 
     let Some(crab) = result else {
+        log::error!("No octocrab found for repo {}/{}", repository.owner(), repository.repo());
         return Err(AppError::NotFound(
             "No octocrab found for this repo".to_owned(),
         ));
@@ -212,6 +238,7 @@ pub async fn fetch_deploy_configs_by_sha(
     let owner = repository.owner().to_string();
     let repo = repository.repo().to_string();
 
+    log::debug!("Fetching .deploy directory from {}/{} at {}", owner, repo, sha);
     let content = match crab
         .repos(&owner, &repo)
         .get_content()
@@ -221,11 +248,14 @@ pub async fn fetch_deploy_configs_by_sha(
         .await
     {
         Ok(content) => content,
-        Err(__e) => {
+        Err(e) => {
+            log::warn!("Failed to fetch .deploy directory: {:?}", e);
             // FIXME: Should actually confirm that this is a 404 before saying Ok(())
             return Ok(vec![]);
         }
     };
+
+    log::debug!("Found {} items in .deploy directory", content.items.len());
 
     // create a map from name to Content
     let entries: HashMap<String, Content> = content
@@ -242,7 +272,9 @@ pub async fn fetch_deploy_configs_by_sha(
     let mut final_deploy_configs: Vec<DeployConfig> = vec![];
 
     for config_name in configs {
+        log::debug!("Processing config: {}", config_name);
         let child_files = if entries.contains_key(config_name) {
+            log::debug!("Found directory .deploy/{}", config_name);
             let Ok(content_items) = crab
                 .repos(&owner, &repo)
                 .get_content()
@@ -251,6 +283,7 @@ pub async fn fetch_deploy_configs_by_sha(
                 .send()
                 .await
             else {
+                log::error!("Failed to read .deploy/{}", config_name);
                 return Err(AppError::NotFound(format!(
                     "Failed to read .deploy/{}",
                     config_name
@@ -258,10 +291,12 @@ pub async fn fetch_deploy_configs_by_sha(
             };
 
             let files = content_items.items;
+            log::debug!("Found {} files in .deploy/{}", files.len(), config_name);
 
             let mut result: Vec<String> = vec![];
 
             for file in files {
+                log::debug!("  Reading file: {}", file.name);
                 let Ok(mut content) = crab
                     .repos(&owner, &repo)
                     .get_content()
@@ -270,6 +305,7 @@ pub async fn fetch_deploy_configs_by_sha(
                     .send()
                     .await
                 else {
+                    log::error!("Failed to read .deploy/{}/{}", config_name, file.name);
                     return Err(AppError::NotFound(format!(
                         "Failed to read .deploy/{}/{}",
                         config_name, file.name
@@ -279,15 +315,25 @@ pub async fn fetch_deploy_configs_by_sha(
                 let contents = content.take_items();
                 let c = &contents[0];
                 let Some(decoded_content) = c.decoded_content() else {
+                    log::error!("Failed to decode .deploy/{}/{}", config_name, file.name);
                     return Err(AppError::Internal(
                         "Failed to decode child file content".to_owned(),
                     ));
                 };
+                log::debug!(
+                    "  File {} content length: {} bytes",
+                    file.name,
+                    decoded_content.len()
+                );
+                if decoded_content.is_empty() {
+                    log::warn!("  WARNING: File {} is empty!", file.name);
+                }
                 result.push(decoded_content);
             }
 
             result
         } else {
+            log::debug!("No directory found for .deploy/{}, using only .yaml file", config_name);
             vec![]
         };
 
@@ -316,11 +362,26 @@ pub async fn fetch_deploy_configs_by_sha(
         let config: GitHubDeployConfig =
             serde_yaml::from_str(&config_content).map_err(AppError::Yaml)?;
 
+        log::debug!("Parsing {} child YAML files for config {}", child_files.len(), config_name);
         let child_files: Vec<Value> = child_files
             .into_iter()
-            .map(|file| serde_yaml::from_str(&file).map_err(AppError::Yaml))
+            .enumerate()
+            .map(|(idx, file)| {
+                log::debug!("  Parsing child file [{}]", idx);
+                let parsed = serde_yaml::from_str(&file).map_err(AppError::Yaml)?;
+                log::debug!("  Parsed child file [{}]: {}", idx, parsed);
+                if parsed.is_null() {
+                    log::warn!("  WARNING: Child file [{}] parsed as null! Content was: {}", idx, file);
+                }
+                Ok(parsed)
+            })
             .collect::<Result<Vec<Value>, AppError>>()?;
 
+        log::debug!(
+            "Creating DeployConfig {} with {} specs",
+            config_name,
+            child_files.len()
+        );
         let dc = DeployConfig {
             spec: DeployConfigSpec {
                 spec: DeployConfigSpecFields {
