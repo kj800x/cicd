@@ -11,6 +11,7 @@ use k8s_openapi::api::{
 };
 use maud::{html, Markup};
 
+use chrono::Utc;
 use chrono_tz::America::New_York;
 use kube::{
     api::{DynamicObject, GroupVersionKind},
@@ -91,6 +92,19 @@ fn is_warn_reason(reason: &str) -> bool {
             | "Waiting"
             | "Unknown"
     )
+}
+
+/// Format a duration in seconds as a human-readable string (e.g., "5m", "2h", "30s")
+fn format_duration(seconds: i64) -> String {
+    if seconds < 60 {
+        format!("{}s", seconds)
+    } else if seconds < 3600 {
+        format!("{}m", seconds / 60)
+    } else if seconds < 86400 {
+        format!("{}h", seconds / 3600)
+    } else {
+        format!("{}d", seconds / 86400)
+    }
 }
 
 fn summarize_deployment_status_markup(deployment: &Deployment) -> Option<Markup> {
@@ -210,7 +224,31 @@ fn summarize_pod_status_markup(pod: &Pod) -> Option<Markup> {
     // Completed jobs/cronjobs should be marked as Completed, not NotReady
     if status.phase.as_deref() == Some("Succeeded") || status.reason.as_deref() == Some("Completed")
     {
-        return Some(render_state_span("Completed", "neutral"));
+        // Calculate duration for completed pods (time it ran, not time since completion)
+        let duration_str = if let Some(containers) = &status.container_statuses {
+            containers.iter().find_map(|cs| {
+                cs.state
+                    .as_ref()
+                    .and_then(|s| s.terminated.as_ref())
+                    .and_then(|t| {
+                        if let (Some(started), Some(finished)) = (&t.started_at, &t.finished_at) {
+                            let duration_secs = (finished.0 - started.0).num_seconds();
+                            Some(format_duration(duration_secs))
+                        } else {
+                            None
+                        }
+                    })
+            })
+        } else {
+            None
+        };
+
+        let status_text = if let Some(duration) = duration_str {
+            format!("Completed ({})", duration)
+        } else {
+            "Completed".to_string()
+        };
+        return Some(render_state_span(&status_text, "neutral"));
     }
 
     if let Some(r) = &status.reason {
@@ -353,7 +391,50 @@ fn summarize_pod_status_markup(pod: &Pod) -> Option<Markup> {
             "Pending" | "Unknown" => "warn",
             _ => "warn",
         };
-        return Some(render_state_span(phase, level));
+
+        // Add duration for Running pods
+        let status_text = if phase == "Running" {
+            let duration_str = if let Some(containers) = &status.container_statuses {
+                containers
+                    .iter()
+                    .find_map(|cs| {
+                        cs.state
+                            .as_ref()
+                            .and_then(|s| s.running.as_ref())
+                            .and_then(|r| {
+                                r.started_at.as_ref().map(|started| {
+                                    let now = Utc::now();
+                                    let duration_secs = (now - started.0).num_seconds();
+                                    format_duration(duration_secs)
+                                })
+                            })
+                    })
+                    .unwrap_or_else(|| {
+                        // Fallback to pod start_time if available
+                        status
+                            .start_time
+                            .as_ref()
+                            .map(|st| {
+                                let now = Utc::now();
+                                let duration_secs = (now - st.0).num_seconds();
+                                format_duration(duration_secs)
+                            })
+                            .unwrap_or_default()
+                    })
+            } else {
+                String::new()
+            };
+
+            if duration_str.is_empty() {
+                phase.clone()
+            } else {
+                format!("Running ({})", duration_str)
+            }
+        } else {
+            phase.clone()
+        };
+
+        return Some(render_state_span(&status_text, level));
     }
 
     Some(render_state_span("Unknown", "warn"))
