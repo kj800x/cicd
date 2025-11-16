@@ -100,6 +100,24 @@ impl DeployConfig {
             .unwrap_or(false)
     }
 
+    pub fn supports_bounce(&self) -> bool {
+        self.resource_specs().iter().any(|spec| {
+            spec.get("kind")
+                .and_then(|k| k.as_str())
+                .unwrap_or_default()
+                == "Deployment"
+        })
+    }
+
+    pub fn supports_execute_job(&self) -> bool {
+        self.resource_specs().iter().any(|spec| {
+            spec.get("kind")
+                .and_then(|k| k.as_str())
+                .unwrap_or_default()
+                == "CronJob"
+        })
+    }
+
     pub fn deployment_state(&self) -> DeploymentState {
         if let Some(config) = self.status.as_ref().and_then(|s| s.config.as_ref()) {
             if let Some(artifact) = self.status.as_ref().and_then(|s| s.artifact.as_ref()) {

@@ -142,7 +142,9 @@ impl DeployEvent {
                 }
                 Ok(Some(event))
             }
-            DeployAction::ToggleAutodeploy { .. } => {
+            DeployAction::ToggleAutodeploy { .. }
+            | DeployAction::Bounce { .. }
+            | DeployAction::ExecuteJob { .. } => {
                 // No event
                 Ok(None)
             }

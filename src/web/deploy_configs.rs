@@ -197,6 +197,8 @@ impl ResolvedVersion {
                     None => ResolvedVersion::UnknownSha { sha: sha.clone() },
                 }
             }
+            Action::Bounce => ResolvedVersion::ResolutionFailed,
+            Action::ExecuteJob => ResolvedVersion::ResolutionFailed,
             Action::ToggleAutodeploy => ResolvedVersion::ResolutionFailed,
             Action::Undeploy => ResolvedVersion::Undeployed,
         }
@@ -625,7 +627,9 @@ impl DeploymentState {
                     branch: None,
                 },
             }),
-            (Action::ToggleAutodeploy, _) => Ok(config.deployment_state()),
+            (Action::Bounce, _) | (Action::ExecuteJob, _) | (Action::ToggleAutodeploy, _) => {
+                Ok(config.deployment_state())
+            }
             (Action::Undeploy, _) => Ok(DeploymentState::Undeployed),
         }
     }
@@ -659,6 +663,20 @@ pub async fn render_preview_content(
         | Action::DeployBranch { .. }
         | Action::DeployCommit { .. }
         | Action::Undeploy => deploy_transition.format(&owner, &repo).await,
+        Action::Bounce => {
+            html! {
+                // TODO:
+                "Bounce deployments in "
+                (selected_config.name_any())
+            }
+        }
+        Action::ExecuteJob => {
+            html! {
+                // TODO:
+                "Manual execution of "
+                (selected_config.name_any())
+            }
+        }
         Action::ToggleAutodeploy => {
             html! {
                 "Autodeploy "
@@ -736,6 +754,8 @@ pub enum Action {
     DeployLatest,
     DeployBranch { branch: String },
     DeployCommit { sha: String },
+    Bounce,
+    ExecuteJob,
     ToggleAutodeploy,
     Undeploy,
 }
@@ -760,6 +780,8 @@ impl Action {
             }
             "toggle-autodeploy" => Action::ToggleAutodeploy,
             "undeploy" => Action::Undeploy,
+            "bounce" => Action::Bounce,
+            "execute-job" => Action::ExecuteJob,
             _ => Action::DeployLatest,
         }
     }
@@ -769,6 +791,8 @@ impl Action {
             Action::DeployLatest => "action=deploy".to_string(),
             Action::DeployBranch { branch } => format!("action=deploy&branch={}", branch),
             Action::DeployCommit { sha } => format!("action=deploy&sha={}", sha),
+            Action::Bounce => "action=bounce".to_string(),
+            Action::ExecuteJob => "action=execute-job".to_string(),
             Action::ToggleAutodeploy => "action=toggle-autodeploy".to_string(),
             Action::Undeploy => "action=undeploy".to_string(),
         }
@@ -787,6 +811,14 @@ impl Action {
 
     fn is_undeploy(&self) -> bool {
         matches!(self, Action::Undeploy)
+    }
+
+    fn is_bounce(&self) -> bool {
+        matches!(self, Action::Bounce)
+    }
+
+    fn is_execute_job(&self) -> bool {
+        matches!(self, Action::ExecuteJob)
     }
 }
 
@@ -946,6 +978,18 @@ pub async fn deploy_configs(
                                                     "Enable autodeploy"
                                                 }
                                             }
+                                            @if selected_config.supports_bounce() {
+                                                label class="action-radio" {
+                                                    input type="radio" name="action" value="bounce" checked[action.is_bounce()] onchange="this.form.submit()";
+                                                    "Bounce"
+                                                }
+                                            }
+                                            @if selected_config.supports_execute_job() {
+                                                label class="action-radio" {
+                                                    input type="radio" name="action" value="execute-job" checked[action.is_execute_job()] onchange="this.form.submit()";
+                                                    "Execute job"
+                                                }
+                                            }
                                             label class="action-radio" {
                                                 input type="radio" name="action" value="undeploy" checked[action.is_undeploy()] onchange="this.form.submit()";
                                                 "Undeploy"
@@ -983,6 +1027,12 @@ pub async fn deploy_configs(
                                                         "Enable autodeploy"
                                                     }
                                                 }
+                                                Action::Bounce => {
+                                                    "Bounce"
+                                                }
+                                                Action::ExecuteJob => {
+                                                    "Execute job"
+                                                }
                                                 Action::Undeploy => {
                                                     "Undeploy"
                                                 }
@@ -1005,6 +1055,12 @@ pub async fn deploy_configs(
                                             }
                                             Action::DeployCommit { .. } => {
                                                 "Commit deploy of "
+                                            }
+                                            Action::Bounce => {
+                                                "Bounce deployments in "
+                                            }
+                                            Action::ExecuteJob => {
+                                                "Manual execution of "
                                             }
                                             Action::ToggleAutodeploy => {
                                                 "Option change for "
@@ -1112,7 +1168,12 @@ pub async fn deploy_config(
                 name: name.to_string(),
             },
         },
-
+        Action::Bounce => DeployAction::Bounce {
+            name: name.to_string(),
+        },
+        Action::ExecuteJob => DeployAction::ExecuteJob {
+            name: name.to_string(),
+        },
         Action::ToggleAutodeploy => DeployAction::ToggleAutodeploy {
             name: name.to_string(),
         },
