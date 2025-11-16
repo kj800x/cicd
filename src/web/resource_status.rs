@@ -854,12 +854,44 @@ impl LiteResource {
     fn format_self(&self, namespaced_objs: &[DynamicObject]) -> Markup {
         let status = self.format_self_status(namespaced_objs);
 
+        // Check if this resource type supports logs
+        let supports_logs = matches!(
+            self.kind,
+            HandledResourceKind::Pod
+                | HandledResourceKind::Job
+                | HandledResourceKind::Deployment
+                | HandledResourceKind::ReplicaSet
+        );
+
+        // Get UID for log link
+        let log_link = if supports_logs {
+            namespaced_objs
+                .iter()
+                .find(|o| {
+                    o.name_any() == self.name
+                        && o.namespace().as_deref() == Some(&self.namespace)
+                        && o.types.as_ref().map(|t| t.kind.as_str()) == Some(&self.kind.to_string())
+                })
+                .and_then(|o| o.metadata.uid.as_ref())
+                .map(|uid| {
+                    html! {
+                        " · "
+                        a href=(format!("/resource-logs/{}", uid)) { "Logs" }
+                    }
+                })
+        } else {
+            None
+        };
+
         html! {
             span {
                 b { (self.kind) }
                 ": "
                 (self.name)
                 (status)
+                @if let Some(link) = log_link {
+                    (link)
+                }
             }
         }
     }

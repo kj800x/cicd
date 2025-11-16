@@ -47,7 +47,8 @@ use crate::webhooks::manager::WebhookManager;
 use cicd::serve_static_file;
 use web::{
     all_recent_builds, bootstrap, deploy_config, deploy_history, deploy_history_index, index,
-    settings_index, settings_fragment, toggle_team, toggle_repo,
+    resource_logs_download, resource_logs_fragment, resource_logs_page, settings_index,
+    settings_fragment, toggle_team, toggle_repo,
 };
 
 async fn start_http(
@@ -117,6 +118,9 @@ async fn start_http(
             .service(toggle_team)
             .service(toggle_repo)
             .service(deploy_preview)
+            .service(resource_logs_page)
+            .service(resource_logs_fragment)
+            .service(resource_logs_download)
             .service(serve_static_file!("htmx.min.js"))
             .service(serve_static_file!("idiomorph.min.js"))
             .service(serve_static_file!("idiomorph-ext.min.js"))

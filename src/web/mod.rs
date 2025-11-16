@@ -8,6 +8,7 @@ mod header;
 mod index;
 mod bootstrap;
 mod resource_status;
+mod resource_logs;
 mod settings;
 pub mod team_prefs;
 
@@ -18,4 +19,5 @@ pub use fragments::*;
 pub use index::*;
 pub use bootstrap::*;
 pub use resource_status::*;
+pub use resource_logs::*;
 pub use settings::*;

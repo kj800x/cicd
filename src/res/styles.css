@@ -1397,3 +1397,65 @@ header {
     border-radius: 10px;
   }
 }
+
+/* Resource logs page */
+.resource-logs-page {
+  .content {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 20px;
+  }
+
+  header {
+    margin-bottom: 20px;
+
+    h1 {
+      margin: 0 0 8px 0;
+      font-size: 24px;
+      font-weight: 600;
+      color: var(--text-color);
+    }
+
+    .subtitle {
+      color: var(--secondary-text);
+      font-size: 14px;
+
+      a {
+        color: var(--primary-blue);
+        text-decoration: none;
+
+        &:hover {
+          text-decoration: underline;
+        }
+      }
+    }
+  }
+
+  .resource-logs__container {
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    overflow: hidden;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column-reverse;
+    overflow-y: auto;
+  }
+
+  .resource-logs__content {
+    margin: 0;
+    padding: 16px;
+    font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace;
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--text-color);
+    background: var(--card-bg);
+    display: flex;
+    flex-direction: column-reverse;
+  }
+
+  .resource-logs__line {
+    white-space: pre-wrap;
+    word-wrap: break-word;
+  }
+}
