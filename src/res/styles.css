@@ -474,9 +474,83 @@ header {
 
 
 .settings-page {
-  .content {
-    max-width: 800px;
+  .settings-container {
+    display: flex;
+    gap: 24px;
+    max-width: 1200px;
     margin: 0 auto;
+    padding: 24px;
+  }
+
+  .settings-sidebar {
+    width: 240px;
+    flex-shrink: 0;
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 16px;
+    height: fit-content;
+    position: sticky;
+    top: 24px;
+  }
+
+  .settings-sidebar-title {
+    margin: 0 0 16px 0;
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--text-color);
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border-color);
+  }
+
+  .settings-nav-link {
+    display: block;
+    padding: 10px 12px;
+    margin-bottom: 4px;
+    color: var(--text-color);
+    text-decoration: none;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 500;
+    transition: background-color 0.15s ease, color 0.15s ease;
+  }
+
+  .settings-nav-link:hover {
+    background-color: var(--bg-light);
+    color: var(--primary-blue);
+  }
+
+  .settings-nav-link.active {
+    background-color: var(--primary-blue);
+    color: white;
+    font-weight: 600;
+  }
+
+  .settings-nav-link.active:hover {
+    background-color: #0a5ec3;
+    color: white;
+  }
+
+  .settings-content-wrapper {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .settings-content-wrapper header {
+    margin-bottom: 24px;
+  }
+
+  .settings-content-wrapper header h1 {
+    margin: 0 0 8px 0;
+    font-size: 24px;
+    font-weight: 600;
+    color: var(--text-color);
+  }
+
+  .settings-content-wrapper header .subtitle {
+    margin: 0;
+    font-size: 14px;
+    color: var(--secondary-text);
   }
 
   .teams-list {
@@ -524,10 +598,25 @@ header {
     color: #a70007;
   }
 
-  .rate-limits-section {
-    margin-top: 32px;
-    padding-top: 16px;
-    border-top: 1px solid var(--border-color);
+  .empty-state {
+    padding: 48px 24px;
+    text-align: center;
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+  }
+
+  .empty-state h2 {
+    margin: 0 0 8px 0;
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--text-color);
+  }
+
+  .empty-state p {
+    margin: 0;
+    font-size: 14px;
+    color: var(--secondary-text);
   }
 
   .rate-limits-display {
@@ -547,7 +636,7 @@ header {
 
   .rate-limit-token {
     font-weight: 600;
-    color: var(--text-primary);
+    color: var(--text-color);
   }
 
   .rate-limit-usage {
@@ -564,18 +653,12 @@ header {
 
   .rate-limit-reset {
     font-size: 12px;
-    color: var(--text-secondary);
+    color: var(--secondary-text);
   }
 
   .rate-limit-error {
-    color: var(--error-color);
+    color: var(--danger-color);
     font-size: 14px;
-  }
-
-  .bootstrap-section {
-    margin-top: 32px;
-    padding-top: 16px;
-    border-top: 1px solid var(--border-color);
   }
 
   .bootstrap-mode {
@@ -590,13 +673,13 @@ header {
     margin: 0 0 4px 0;
     font-size: 16px;
     font-weight: 600;
-    color: var(--text-primary);
+    color: var(--text-color);
   }
 
   .bootstrap-description {
     margin: 4px 0 8px 0;
     font-size: 13px;
-    color: var(--text-secondary);
+    color: var(--secondary-text);
   }
 
   .bootstrap-actions {
@@ -633,7 +716,7 @@ header {
   }
 
   .repo-separator {
-    color: var(--text-secondary);
+    color: var(--secondary-text);
     font-weight: 600;
   }
 
@@ -646,6 +729,7 @@ header {
     overflow: auto;
     display: flex;
     flex-direction: column-reverse;
+    margin-top: 16px;
   }
 
   .bootstrap-log-box .log-line {

@@ -47,7 +47,7 @@ use crate::webhooks::manager::WebhookManager;
 use cicd::serve_static_file;
 use web::{
     all_recent_builds, bootstrap, deploy_config, deploy_history, deploy_history_index, index,
-    settings_index, toggle_team,
+    settings_index, settings_fragment, toggle_team,
 };
 
 async fn start_http(
@@ -106,6 +106,7 @@ async fn start_http(
             .service(deploy_history_index)
             .service(web::deploy_history_fragment)
             .service(settings_index)
+            .service(settings_fragment)
             .service(bootstrap)
             .service(web::bootstrap_quick)
             .service(web::bootstrap_owner)
