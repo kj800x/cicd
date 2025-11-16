@@ -1,9 +1,13 @@
 use crate::db::functions::get_branches_with_commits;
 use crate::prelude::*;
 use crate::web::{build_status_helpers, formatting, header};
+use crate::web::team_prefs::ReposCookie;
 
 /// Generate the HTML fragment for the branch grid content
-pub fn render_branch_grid_fragment(pool: &Pool<SqliteConnectionManager>) -> Markup {
+pub fn render_branch_grid_fragment(
+    pool: &Pool<SqliteConnectionManager>,
+    req: &actix_web::HttpRequest,
+) -> Markup {
     let conn = match pool.get() {
         Ok(c) => c,
         Err(e) => {
@@ -12,8 +16,13 @@ pub fn render_branch_grid_fragment(pool: &Pool<SqliteConnectionManager>) -> Mark
         }
     };
 
+    let repos_cookie = ReposCookie::from_request(req);
+
     // Get branches with their commits from the database
     let mut branch_data_list = get_branches_with_commits(&conn, 10).unwrap_or_default();
+
+    // Filter branches based on repo visibility cookie
+    branch_data_list.retain(|data| repos_cookie.is_visible(&data.repo.owner_name));
 
     // Sort branches by timestamp of most recent commit
     branch_data_list.sort_by(|a, b| {
@@ -91,8 +100,9 @@ pub fn render_branch_grid_fragment(pool: &Pool<SqliteConnectionManager>) -> Mark
 #[get("/branch-grid-fragment")]
 pub async fn branch_grid_fragment(
     pool: web::Data<Pool<SqliteConnectionManager>>,
+    req: actix_web::HttpRequest,
 ) -> impl Responder {
-    let fragment = render_branch_grid_fragment(&pool);
+    let fragment = render_branch_grid_fragment(&pool, &req);
 
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
@@ -101,7 +111,10 @@ pub async fn branch_grid_fragment(
 
 /// Generate HTML for the dashboard homepage that displays recent branches and their commits
 #[get("/")]
-pub async fn index(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Responder {
+pub async fn index(
+    pool: web::Data<Pool<SqliteConnectionManager>>,
+    req: actix_web::HttpRequest,
+) -> impl Responder {
     // Render the HTML template using Maud
     let markup = html! {
         (DOCTYPE)
@@ -126,7 +139,7 @@ pub async fn index(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Respo
                         hx-get="/branch-grid-fragment"
                         hx-trigger="every 5s"
                         hx-swap="morph:innerHTML" {
-                        (render_branch_grid_fragment(&pool))
+                        (render_branch_grid_fragment(&pool, &req))
                     }
                 }
             }

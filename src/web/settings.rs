@@ -8,7 +8,7 @@ use maud::{html, Markup, DOCTYPE};
 use crate::kubernetes::api::get_all_deploy_configs;
 use crate::prelude::*;
 use crate::web::header;
-use crate::web::team_prefs::{TeamsCookie, TEAMS_COOKIE};
+use crate::web::team_prefs::{ReposCookie, TeamsCookie, REPOS_COOKIE, TEAMS_COOKIE};
 
 fn render_team_row(team: &str, is_member: bool) -> Markup {
     let toggle_label = if is_member { "Visible" } else { "Hidden" };
@@ -26,6 +26,31 @@ fn render_team_row(team: &str, is_member: bool) -> Markup {
                 class=(toggle_class)
                 hx-post="/teams/toggle"
                 hx-vals=(format!(r#"{{"team":"{}"}}"#, team))
+                hx-target=(target_id)
+                hx-swap="outerHTML"
+            {
+                (toggle_label)
+            }
+        }
+    }
+}
+
+fn render_repo_row(org: &str, is_visible: bool) -> Markup {
+    let toggle_label = if is_visible { "Visible" } else { "Hidden" };
+    let toggle_class = if is_visible {
+        "team-toggle on"
+    } else {
+        "team-toggle off"
+    };
+    let target_id = format!("#repo-{}", org);
+
+    html! {
+        div id=(format!("repo-{}", org)) class="team-row" {
+            div class="team-name" { (org) }
+            button
+                class=(toggle_class)
+                hx-post="/repos/toggle"
+                hx-vals=(format!(r#"{{"org":"{}"}}"#, org))
                 hx-target=(target_id)
                 hx-swap="outerHTML"
             {
@@ -60,6 +85,17 @@ fn render_sidebar(section: &str) -> Markup {
                 onclick="document.querySelectorAll('.settings-nav-link').forEach(l => l.classList.remove('active')); this.classList.add('active');"
             {
                 "Team visibility"
+            }
+            a
+                class=(if section == "repo-visibility" { "settings-nav-link active" } else { "settings-nav-link" })
+                href="/settings?section=repo-visibility"
+                hx-get="/settings-fragment?section=repo-visibility"
+                hx-target="#settings-content"
+                hx-swap="morph:innerHTML"
+                hx-push-url="/settings?section=repo-visibility"
+                onclick="document.querySelectorAll('.settings-nav-link').forEach(l => l.classList.remove('active')); this.classList.add('active');"
+            {
+                "Repo visibility"
             }
             a
                 class=(if section == "bootstrap" { "settings-nav-link active" } else { "settings-nav-link" })
@@ -123,8 +159,18 @@ pub async fn settings_fragment(
 ) -> impl Responder {
     let section = query.get("section").map(|s| s.as_str()).unwrap_or("rate-limits");
 
+    let pool = match req.app_data::<web::Data<Pool<SqliteConnectionManager>>>() {
+        Some(p) => p.clone(),
+        None => {
+            return HttpResponse::InternalServerError()
+                .content_type("text/html; charset=utf-8")
+                .body("Failed to get database connection".to_string());
+        }
+    };
+
     match section {
         "team-visibility" => team_visibility_fragment(req).await,
+        "repo-visibility" => repo_visibility_fragment(req, pool).await,
         "rate-limits" => rate_limits_fragment().await,
         "bootstrap" => bootstrap_fragment().await,
         _ => team_visibility_fragment(req).await,
@@ -178,6 +224,58 @@ async fn team_visibility_fragment(req: actix_web::HttpRequest) -> HttpResponse {
             div class="teams-list" {
                 @for t in &all_teams {
                     (render_team_row(t, memberships.is_member(t)))
+                }
+            }
+        }
+    };
+
+    HttpResponse::Ok()
+        .content_type("text/html; charset=utf-8")
+        .body(markup.into_string())
+}
+
+async fn repo_visibility_fragment(
+    req: actix_web::HttpRequest,
+    pool: web::Data<Pool<SqliteConnectionManager>>,
+) -> HttpResponse {
+    let conn = match pool.get() {
+        Ok(c) => c,
+        Err(e) => {
+            log::error!("Failed to get database connection: {}", e);
+            return HttpResponse::InternalServerError()
+                .content_type("text/html; charset=utf-8")
+                .body("Failed to get database connection".to_string());
+        }
+    };
+
+    // Get all unique orgs from repos
+    let query = "SELECT DISTINCT owner_name FROM git_repo ORDER BY owner_name";
+    let mut all_orgs: Vec<String> = Vec::new();
+    if let Ok(mut stmt) = conn.prepare(query) {
+        if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+            for org in rows.flatten() {
+                all_orgs.push(org);
+            }
+        }
+    }
+
+    let memberships = ReposCookie::from_request(&req);
+
+    let markup = html! {
+        header {
+            h1 { "Repo visibility" }
+            div class="subtitle" { "Choose which organizations' repos to show" }
+        }
+
+        @if all_orgs.is_empty() {
+            div class="empty-state" {
+                h2 { "No organizations found" }
+                p { "No organizations were discovered across repositories." }
+            }
+        } @else {
+            div class="teams-list" {
+                @for org in &all_orgs {
+                    (render_repo_row(org, memberships.is_visible(org)))
                 }
             }
         }
@@ -303,6 +401,41 @@ pub async fn toggle_team(
         .finish();
 
     let fragment = render_team_row(&team, new_state).into_string();
+
+    HttpResponse::Ok()
+        .content_type("text/html; charset=utf-8")
+        .cookie(cookie)
+        .body(fragment)
+}
+
+#[post("/repos/toggle")]
+pub async fn toggle_repo(
+    req: actix_web::HttpRequest,
+    form: web::Form<HashMap<String, String>>,
+) -> impl Responder {
+    let org = form.get("org").cloned().unwrap_or_default();
+    if org.is_empty() {
+        return HttpResponse::BadRequest().body("Missing 'org'");
+    }
+
+    // Load, mutate, and persist
+    let mut set = ReposCookie::from_request(&req).0.unwrap_or_default();
+    let new_state = if set.contains(&org) {
+        set.remove(&org);
+        false
+    } else {
+        set.insert(org.clone());
+        true
+    };
+
+    let cookie_val = ReposCookie(Some(set)).serialize();
+    let cookie = Cookie::build(REPOS_COOKIE, cookie_val)
+        .path("/")
+        .http_only(false)
+        .max_age(Duration::days(365))
+        .finish();
+
+    let fragment = render_repo_row(&org, new_state).into_string();
 
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")

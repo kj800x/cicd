@@ -2,9 +2,13 @@ use crate::db::functions::get_commits_since;
 use crate::db::git_repo::GitRepo;
 use crate::prelude::*;
 use crate::web::{build_status_helpers, formatting, header};
+use crate::web::team_prefs::ReposCookie;
 
 /// Generate the HTML fragment for the build grid content
-pub fn render_build_grid_fragment(pool: &Pool<SqliteConnectionManager>) -> Markup {
+pub fn render_build_grid_fragment(
+    pool: &Pool<SqliteConnectionManager>,
+    req: &actix_web::HttpRequest,
+) -> Markup {
     let conn = match pool.get() {
         Ok(c) => c,
         Err(e) => {
@@ -15,6 +19,8 @@ pub fn render_build_grid_fragment(pool: &Pool<SqliteConnectionManager>) -> Marku
     let since = Utc::now() - chrono::Duration::hours(24);
     let commits_result = get_commits_since(&conn, since.timestamp_millis());
 
+    let repos_cookie = ReposCookie::from_request(req);
+
     let mut builds = Vec::new();
 
     if let Ok(commits) = commits_result {
@@ -24,6 +30,11 @@ pub fn render_build_grid_fragment(pool: &Pool<SqliteConnectionManager>) -> Marku
             let repo = GitRepo::get_by_id(&commit.repo_id, &conn)
                 .expect("Expect")
                 .expect("Expect");
+
+            // Filter repos based on visibility cookie
+            if !repos_cookie.is_visible(&repo.owner_name) {
+                continue;
+            }
 
             let parent_commits = commit.get_parents(&conn).unwrap_or_default();
             let branches = commit.get_branches(&conn).unwrap_or_default();
@@ -85,8 +96,11 @@ pub fn render_build_grid_fragment(pool: &Pool<SqliteConnectionManager>) -> Marku
 
 /// Handler for the build grid fragment endpoint
 #[get("/build-grid-fragment")]
-pub async fn build_grid_fragment(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Responder {
-    let fragment = render_build_grid_fragment(&pool);
+pub async fn build_grid_fragment(
+    pool: web::Data<Pool<SqliteConnectionManager>>,
+    req: actix_web::HttpRequest,
+) -> impl Responder {
+    let fragment = render_build_grid_fragment(&pool, &req);
 
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
@@ -95,7 +109,10 @@ pub async fn build_grid_fragment(pool: web::Data<Pool<SqliteConnectionManager>>)
 
 /// Generate HTML for the all recent builds page that displays recent builds
 #[get("/all-recent-builds")]
-pub async fn all_recent_builds(pool: web::Data<Pool<SqliteConnectionManager>>) -> impl Responder {
+pub async fn all_recent_builds(
+    pool: web::Data<Pool<SqliteConnectionManager>>,
+    req: actix_web::HttpRequest,
+) -> impl Responder {
     // Render the HTML template using Maud
     let markup = html! {
         (DOCTYPE)
@@ -120,7 +137,7 @@ pub async fn all_recent_builds(pool: web::Data<Pool<SqliteConnectionManager>>) -
                         hx-get="/build-grid-fragment"
                         hx-trigger="every 5s"
                         hx-swap="morph:innerHTML" {
-                        (render_build_grid_fragment(&pool))
+                        (render_build_grid_fragment(&pool, &req))
                     }
                 }
             }

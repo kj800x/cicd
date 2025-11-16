@@ -5,11 +5,18 @@ use actix_web::HttpRequest;
 use crate::kubernetes::DeployConfig;
 
 pub const TEAMS_COOKIE: &str = "teams";
+pub const REPOS_COOKIE: &str = "repos";
 
 /// User team preferences stored in a cookie.
 /// None means no cookie present; Some(empty) means cookie present but empty.
 #[derive(Clone, Debug, Default)]
 pub struct TeamsCookie(pub Option<HashSet<String>>);
+
+/// User repo visibility preferences stored in a cookie.
+/// None means no cookie present; Some(empty) means cookie present but empty.
+/// Stores organization names (owner_name) that the user wants to see.
+#[derive(Clone, Debug, Default)]
+pub struct ReposCookie(pub Option<HashSet<String>>);
 
 impl TeamsCookie {
     /// Build from the incoming request's cookie.
@@ -65,6 +72,48 @@ impl TeamsCookie {
                 .filter(|cfg| set.contains(cfg.team()))
                 .cloned()
                 .collect(),
+        }
+    }
+}
+
+impl ReposCookie {
+    /// Build from the incoming request's cookie.
+    pub fn from_request(req: &HttpRequest) -> Self {
+        let cookie = match req.cookie(REPOS_COOKIE) {
+            Some(c) => c,
+            None => return ReposCookie(None),
+        };
+        let raw = cookie.value().trim();
+        let set: HashSet<String> = if raw.is_empty() {
+            HashSet::new()
+        } else {
+            raw.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        };
+        ReposCookie(Some(set))
+    }
+
+    /// Serialize to a stable, comma-separated value for the cookie.
+    /// If there is no cookie (None), serialize to empty string.
+    pub fn serialize(&self) -> String {
+        match &self.0 {
+            None => "".to_string(),
+            Some(set) => {
+                let mut v: Vec<String> = set.iter().cloned().collect();
+                v.sort_unstable();
+                v.join(",")
+            }
+        }
+    }
+
+    /// Returns true if the given org is present in the cookie.
+    /// Absence of cookie counts as false for membership.
+    pub fn is_visible(&self, org: &str) -> bool {
+        match &self.0 {
+            None => false,
+            Some(set) => set.contains(org),
         }
     }
 }
