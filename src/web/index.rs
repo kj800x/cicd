@@ -1,7 +1,7 @@
 use crate::db::functions::get_branches_with_commits;
 use crate::prelude::*;
-use crate::web::{build_status_helpers, formatting, header};
 use crate::web::team_prefs::ReposCookie;
+use crate::web::{build_status_helpers, formatting, header};
 
 /// Generate the HTML fragment for the branch grid content
 pub fn render_branch_grid_fragment(
@@ -109,8 +109,16 @@ pub async fn branch_grid_fragment(
         .body(fragment.into_string())
 }
 
-/// Generate HTML for the dashboard homepage that displays recent branches and their commits
+/// Root redirect handler - redirects to deploy configs page
 #[get("/")]
+pub async fn root() -> impl Responder {
+    HttpResponse::Found()
+        .append_header(("Location", "/deploy"))
+        .finish()
+}
+
+/// Generate HTML for the dashboard homepage that displays recent branches and their commits
+#[get("/branches")]
 pub async fn index(
     pool: web::Data<Pool<SqliteConnectionManager>>,
     req: actix_web::HttpRequest,

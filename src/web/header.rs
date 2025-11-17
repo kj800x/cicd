@@ -15,7 +15,7 @@ pub fn render(active_page: &str) -> Markup {
                     a href="/deploy" class=(if active_page == "deploy" { "subheader-nav-item active" } else { "subheader-nav-item" }) { "Deploy" }
                     a href="/deploy-history" class=(if active_page == "history" { "subheader-nav-item active" } else { "subheader-nav-item" }) { "Deploy history" }
                     // a href="/watchdog" class=(if active_page == "watchdog" { "subheader-nav-item active" } else { "subheader-nav-item" }) { "Watchdog" }
-                    a href="/" class=(if active_page == "branches" { "subheader-nav-item active" } else { "subheader-nav-item" }) { "Recent branches" }
+                    a href="/branches" class=(if active_page == "branches" { "subheader-nav-item active" } else { "subheader-nav-item" }) { "Recent branches" }
                     a href="/all-recent-builds" class=(if active_page == "builds" { "subheader-nav-item active" } else { "subheader-nav-item" }) { "Recent builds" }
                     a href="/settings" class=(if active_page == "settings" { "subheader-nav-item active" } else { "subheader-nav-item" }) {
                         span {

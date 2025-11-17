@@ -47,7 +47,7 @@ use crate::webhooks::manager::WebhookManager;
 use cicd::serve_static_file;
 use web::{
     all_recent_builds, bootstrap, deploy_config, deploy_history, deploy_history_index, index,
-    resource_logs_download, resource_logs_fragment, resource_logs_page, settings_index,
+    resource_logs_download, resource_logs_fragment, resource_logs_page, root, settings_index,
     settings_fragment, toggle_team, toggle_repo,
 };
 
@@ -98,6 +98,7 @@ async fn start_http(
             .app_data(Data::new(octocrabs.clone()))
             .app_data(Data::new(pool.clone()))
             .wrap(middleware::Logger::default())
+            .service(root)
             .service(deploy_configs)
             .service(index)
             .service(branch_grid_fragment)
