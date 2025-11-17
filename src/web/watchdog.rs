@@ -258,9 +258,21 @@ fn check_resource_health_with_message(obj: &DynamicObject, namespaced_objs: &[Dy
         .map(|t| t.kind.as_str())
         .unwrap_or("");
 
+    // Resources that don't have a meaningful status to check are healthy if they exist
+    match kind_str {
+        "Secret" | "OnePasswordItem" | "DaemonSet" | "ConfigMap" | "PersistentVolumeClaim" => {
+            return (HealthStatus::Healthy, None);
+        }
+        _ => {}
+    }
+
     let kind: HandledResourceKind = match kind_str.parse() {
         Ok(k) => k,
-        Err(_) => return (HealthStatus::Unknown, None),
+        Err(_) => {
+            // For unknown resource types, if they exist, consider them healthy
+            // (we can't check their status, but existence is usually good enough)
+            return (HealthStatus::Healthy, None);
+        }
     };
 
     // Use the same logic as resource_status.rs but return health status and message
@@ -289,7 +301,9 @@ fn check_resource_health_with_message(obj: &DynamicObject, namespaced_objs: &[Dy
         },
         // Services and Ingresses are generally healthy if they exist
         HandledResourceKind::Service | HandledResourceKind::Ingress => (HealthStatus::Healthy, None),
-        HandledResourceKind::Other(_) => (HealthStatus::Unknown, None),
+        // For other resource types we recognize but don't have specific checks for,
+        // if they exist, consider them healthy
+        HandledResourceKind::Other(_) => (HealthStatus::Healthy, None),
     }
 }
 
