@@ -10,6 +10,7 @@ mod bootstrap;
 mod resource_status;
 mod resource_logs;
 mod settings;
+mod watchdog;
 pub mod team_prefs;
 
 pub use all_recent_builds::*;
@@ -21,3 +22,4 @@ pub use bootstrap::*;
 pub use resource_status::*;
 pub use resource_logs::*;
 pub use settings::*;
+pub use watchdog::*;

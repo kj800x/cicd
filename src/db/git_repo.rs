@@ -92,4 +92,16 @@ impl GitRepo {
 
         Ok(())
     }
+
+    pub fn get_all(conn: &PooledConnection<SqliteConnectionManager>) -> AppResult<Vec<Self>> {
+        let mut repos = Vec::new();
+        let mut stmt = conn.prepare("SELECT id, owner_name, name, default_branch, private, language FROM git_repo ORDER BY owner_name, name")?;
+        let mut rows = stmt.query([])?;
+
+        while let Some(row) = rows.next()? {
+            repos.push(GitRepo::from_row(row)?);
+        }
+
+        Ok(repos)
+    }
 }

@@ -59,7 +59,7 @@ fn render_state_span_content(level: &str, inner: Markup) -> Markup {
     }
 }
 
-fn is_error_reason(reason: &str) -> bool {
+pub fn is_error_reason(reason: &str) -> bool {
     matches!(
         reason,
         "CrashLoopBackOff"
@@ -78,7 +78,7 @@ fn is_error_reason(reason: &str) -> bool {
     )
 }
 
-fn is_warn_reason(reason: &str) -> bool {
+pub fn is_warn_reason(reason: &str) -> bool {
     matches!(
         reason,
         "ContainerCreating"
@@ -635,7 +635,7 @@ fn summarize_job_status_markup(job: &KJob) -> Option<Markup> {
         Some(render_state_span("Enqueued -", "warn"))
     }
 }
-fn from_dynamic_object<T: DeserializeOwned>(obj: &DynamicObject) -> Result<T, AppError> {
+pub fn from_dynamic_object<T: DeserializeOwned>(obj: &DynamicObject) -> Result<T, AppError> {
     let value: Value = serde_json::to_value(obj)
         .map_err(|e| AppError::Internal(format!("Failed to serialize DynamicObject: {}", e)))?;
     serde_json::from_value(value)
@@ -662,13 +662,14 @@ fn list_children(obj: &DynamicObject, namespaced_objs: &[DynamicObject]) -> Vec<
 }
 
 #[derive(Clone)]
-enum HandledResourceKind {
+pub enum HandledResourceKind {
     Deployment,
     ReplicaSet,
     Pod,
     Service,
     Ingress,
     Job,
+    CronJob,
     Other(String),
 }
 
@@ -683,6 +684,7 @@ impl FromStr for HandledResourceKind {
             "Service" => Ok(HandledResourceKind::Service),
             "Ingress" => Ok(HandledResourceKind::Ingress),
             "Job" => Ok(HandledResourceKind::Job),
+            "CronJob" => Ok(HandledResourceKind::CronJob),
             s => Ok(HandledResourceKind::Other(s.to_string())),
         }
     }
@@ -697,6 +699,7 @@ impl Display for HandledResourceKind {
             HandledResourceKind::Service => write!(f, "Service"),
             HandledResourceKind::Ingress => write!(f, "Ingress"),
             HandledResourceKind::Job => write!(f, "Job"),
+            HandledResourceKind::CronJob => write!(f, "CronJob"),
             HandledResourceKind::Other(s) => write!(f, "{}", s),
         }
     }
@@ -719,6 +722,7 @@ impl TryInto<GroupVersionKind> for &HandledResourceKind {
                 Ok(GroupVersionKind::gvk("networking.k8s.io", "v1", "Ingress"))
             }
             HandledResourceKind::Job => Ok(GroupVersionKind::gvk("batch", "v1", "Job")),
+            HandledResourceKind::CronJob => Ok(GroupVersionKind::gvk("batch", "v1", "CronJob")),
             HandledResourceKind::Other(s) => {
                 Err(AppError::Internal(format!("Unknown resource kind: {}", s)))
             }
@@ -767,6 +771,7 @@ impl HandledResourceKind {
                 let job = from_dynamic_object::<KJob>(obj).expect("Failed to deserialize Job");
                 summarize_job_status_markup(&job).unwrap_or_else(|| html! { "" })
             }
+            HandledResourceKind::CronJob => html! { "" }, // CronJobs don't have status markup yet
             HandledResourceKind::Other(_) => html! { "" },
         }
     }
