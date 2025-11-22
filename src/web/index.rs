@@ -188,12 +188,7 @@ pub async fn index(
             }
             body.index-page hx-ext="morph" {
                 (header::render("branches"))
-                div class="content" {
-                    header {
-                        h1 { "CI/CD Build Status Dashboard" }
-                        div class="subtitle" { "Recent branches with latest build status" }
-                    }
-
+                div class="content no-padding" {
                     // Add container with HTMX attributes for auto-refresh
                     div id="branch-grid-container" {
                         (render_branch_grid_fragment(&pool, &req))

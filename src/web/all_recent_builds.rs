@@ -198,12 +198,7 @@ pub async fn all_recent_builds(
             }
             body.recent-builds-page hx-ext="morph" {
                 (header::render("builds"))
-                div class="content" {
-                    header {
-                        h1 { "CI/CD Build Status Dashboard" }
-                        div class="subtitle" { "Build status from the last 24 hours" }
-                    }
-
+                div class="content no-padding" {
                     // Add container with HTMX attributes for auto-refresh
                     div id="build-grid-container" {
                         (render_build_grid_fragment(&pool, &req))
