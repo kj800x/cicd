@@ -350,6 +350,8 @@ pub async fn copy_namespace_resources(
         resource.metadata.uid = None;
         // Remove resource version
         resource.metadata.resource_version = None;
+        // Remove managedFields (server-side field, must be nil when creating)
+        resource.metadata.managed_fields = None;
 
         // Add labels to mark this resource as copied from template namespace
         let labels = resource
