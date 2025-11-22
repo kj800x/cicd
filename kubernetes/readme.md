@@ -40,3 +40,11 @@ export TEMPLATE_NAMESPACE=infrastructure
 - **Idempotent**: Copying is safe to run multiple times - existing resources are never overwritten
 - **Error Handling**: Copy failures are logged but don't prevent namespace creation or deployment
 - **Metadata Cleanup**: Owner references and namespace-specific metadata are removed during copying
+- **Resource Marking**: Copied resources are marked with labels and annotations:
+  - Labels:
+    - `cicd.coolkev.com/copied-from-template: "true"` - Indicates resource was copied from template
+  - Annotations:
+    - `cicd.coolkev.com/copied-from-template-namespace: <namespace>` - Source template namespace
+    - `cicd.coolkev.com/copied-at: <RFC3339 timestamp>` - Timestamp when resource was copied
+
+These markers allow you to identify and query resources that were copied from the template namespace using standard Kubernetes label selectors (e.g., `kubectl get all -l cicd.coolkev.com/copied-from-template=true`).

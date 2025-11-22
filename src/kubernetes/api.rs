@@ -299,9 +299,9 @@ pub async fn copy_namespace_resources(
         .map_err(|e| AppError::Internal(format!("failed parsing GVK: {}", e)))?;
 
         // Resolve ApiResource to check if resource exists in target namespace
-        let (ar, caps) = pinned_kind(client, &gvk)
-            .await
-            .map_err(|e| AppError::Internal(format!("GVK {gvk:?} not found via discovery: {}", e)))?;
+        let (ar, caps) = pinned_kind(client, &gvk).await.map_err(|e| {
+            AppError::Internal(format!("GVK {gvk:?} not found via discovery: {}", e))
+        })?;
 
         let target_api: Api<DynamicObject> = match caps.scope {
             discovery::Scope::Namespaced => Api::namespaced_with(client.clone(), target_ns, &ar),
@@ -350,6 +350,30 @@ pub async fn copy_namespace_resources(
         resource.metadata.uid = None;
         // Remove resource version
         resource.metadata.resource_version = None;
+
+        // Add labels to mark this resource as copied from template namespace
+        let labels = resource
+            .metadata
+            .labels
+            .get_or_insert_with(Default::default);
+        labels.insert(
+            "cicd.coolkev.com/copied-from-template".to_string(),
+            "true".to_string(),
+        );
+
+        // Add annotations with template namespace and timestamp
+        let annotations = resource
+            .metadata
+            .annotations
+            .get_or_insert_with(Default::default);
+        annotations.insert(
+            "cicd.coolkev.com/copied-from-template-namespace".to_string(),
+            template_ns.to_string(),
+        );
+        annotations.insert(
+            "cicd.coolkev.com/copied-at".to_string(),
+            chrono::Utc::now().to_rfc3339(),
+        );
 
         // Copy the resource to target namespace
         match apply(client, target_ns, resource).await {

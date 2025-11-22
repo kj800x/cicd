@@ -321,6 +321,10 @@ When using `TEMPLATE_NAMESPACE`:
 - Cluster-scoped resources are not copied (only namespaced resources)
 - Owner references and other namespace-specific metadata are removed during copying
 - Copy failures are logged as warnings but do not prevent namespace creation or deployment
+- Copied resources are marked with labels and annotations:
+  - **Labels**: `cicd.coolkev.com/copied-from-template: "true"`
+  - **Annotations**: `cicd.coolkev.com/copied-from-template-namespace: <namespace>` and `cicd.coolkev.com/copied-at: <timestamp>`
+- These markers allow you to identify and query copied resources using standard Kubernetes label selectors
 
 ### Resource Apply Failures Not Reflected in UI
 **BUG TO FIX**: When the Kubernetes controller fails to apply resources (e.g., due to schema validation errors like incorrect field names in CronJob specs), the deployment still appears successful in the UI. The controller logs show the errors, but the DeployConfig status doesn't reflect the failure state. This can lead to confusing situations where deployments look healthy but resources are actually failing to reconcile.
