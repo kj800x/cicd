@@ -966,12 +966,13 @@ pub async fn deploy_configs(
 
                                         div class="action-radio-group" {
                                             h4 { "Action" }
+                                            @let is_orphaned = selected_config.is_orphaned();
                                             label class="action-radio" {
-                                                input type="radio" name="action" value="deploy" checked[action.is_deploy()] onchange="this.form.submit()";
+                                                input type="radio" name="action" value="deploy" checked[action.is_deploy()] disabled[is_orphaned] onchange="this.form.submit()";
                                                 "Deploy"
                                             }
                                             label class="action-radio" {
-                                                input type="radio" name="action" value="toggle-autodeploy" checked[action.is_toggle_autodeploy()] onchange="this.form.submit()";
+                                                input type="radio" name="action" value="toggle-autodeploy" checked[action.is_toggle_autodeploy()] disabled[is_orphaned] onchange="this.form.submit()";
                                                 @if selected_config.autodeploy() {
                                                     "Disable autodeploy"
                                                 } @else {
@@ -980,13 +981,13 @@ pub async fn deploy_configs(
                                             }
                                             @if selected_config.supports_bounce() {
                                                 label class="action-radio" {
-                                                    input type="radio" name="action" value="bounce" checked[action.is_bounce()] onchange="this.form.submit()";
+                                                    input type="radio" name="action" value="bounce" checked[action.is_bounce()] disabled[is_orphaned] onchange="this.form.submit()";
                                                     "Bounce"
                                                 }
                                             }
                                             @if selected_config.supports_execute_job() {
                                                 label class="action-radio" {
-                                                    input type="radio" name="action" value="execute-job" checked[action.is_execute_job()] onchange="this.form.submit()";
+                                                    input type="radio" name="action" value="execute-job" checked[action.is_execute_job()] disabled[is_orphaned] onchange="this.form.submit()";
                                                     "Execute job"
                                                 }
                                             }
@@ -996,7 +997,7 @@ pub async fn deploy_configs(
                                             }
                                         }
 
-                                        @if action.is_deploy() {
+                                        @if action.is_deploy() && !selected_config.is_orphaned() {
                                             div class="action-input" {
                                                 label for="branch" { "Branch" }
                                                 input id="branch" type="text" name="branch" placeholder="Enter branch name" value=(query.get("branch").unwrap_or(&current_branch.unwrap_or_default().to_string())) onblur="this.form.submit()";
@@ -1015,7 +1016,8 @@ pub async fn deploy_configs(
                                         input type="hidden" name="branch" value=(query.get("branch").unwrap_or(&"".to_string()));
                                         input type="hidden" name="sha" value=(query.get("sha").unwrap_or(&"".to_string()));
                                         input type="hidden" name="action" value=(query.get("action").unwrap_or(&"".to_string()));
-                                        button.primary-action-button.danger-button[action.is_undeploy()] type="submit" {
+                                        @let is_orphaned = selected_config.is_orphaned();
+                                        button.primary-action-button.danger-button[action.is_undeploy()] type="submit" disabled[is_orphaned && !action.is_undeploy()] {
                                             @match action {
                                                 Action::DeployLatest | Action::DeployBranch { .. } | Action::DeployCommit { .. } => {
                                                     "Deploy"
@@ -1071,6 +1073,18 @@ pub async fn deploy_configs(
                                         }
                                         strong {
                                             (format!("{}", selected_config.name_any()))
+                                        }
+                                    }
+                                    @if selected_config.is_orphaned() {
+                                        div.alert.alert-warning {
+                                            div class="alert-header" {
+                                                "⚠️ Orphaned Deploy Config"
+                                            }
+                                            div class="alert-content" {
+                                                div class="details" {
+                                                    "This deploy config has been deleted from the config repository but is still deployed. Only undeploy is available."
+                                                }
+                                            }
                                         }
                                     }
                                     (generate_preview(selected_config, &action, &conn, &client, &namespaced_objs).await)
@@ -1130,6 +1144,13 @@ pub async fn deploy_config(
                 .body(format!("DeployConfig {}/{} not found.", namespace, name));
         }
     };
+
+    // Reject non-undeploy actions for orphaned configs
+    if config.is_orphaned() && !matches!(&action, Action::Undeploy) {
+        return HttpResponse::BadRequest()
+            .content_type("text/html; charset=utf-8")
+            .body("Cannot perform this action on an orphaned deploy config. Only undeploy is allowed.");
+    }
 
     let return_url = format!(
         "/deploy?selected={}&action={}&branch={}&sha={}",

@@ -100,6 +100,13 @@ impl DeployConfig {
             .unwrap_or(false)
     }
 
+    pub fn is_orphaned(&self) -> bool {
+        self.status
+            .as_ref()
+            .and_then(|s| s.orphaned)
+            .unwrap_or(false)
+    }
+
     pub fn supports_bounce(&self) -> bool {
         self.resource_specs().iter().any(|spec| {
             spec.get("kind")

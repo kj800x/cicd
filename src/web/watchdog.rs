@@ -88,6 +88,14 @@ async fn check_deploy_config_health(
     config: &DeployConfig,
     client: &Client,
 ) -> AppResult<(HealthStatus, Option<String>)> {
+    // Check if config is orphaned first
+    if config.is_orphaned() {
+        return Ok((
+            HealthStatus::Warning,
+            Some("This deploy config is orphaned. Restore the config or undeploy it.".to_string()),
+        ));
+    }
+
     let namespace = config.namespace().unwrap_or_else(|| "default".to_string());
 
     // Get all resources in the namespace
