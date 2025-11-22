@@ -24,6 +24,8 @@ spec:
               value: ws://apps.coolkev.com:8080/ws
             - name: ENABLE_K8S_CONTROLLER
               value: 'true'
+            - name: TEMPLATE_NAMESPACE
+              value: 'template-namespace'
             - name: DATABASE_PATH
               value: /data/db.db
             - name: GITHUB_PATS
