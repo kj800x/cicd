@@ -4,16 +4,17 @@ use crate::prelude::*;
 use crate::web::team_prefs::ReposCookie;
 use crate::web::{build_status_helpers, formatting, header};
 
+/// Type alias for a build row tuple
+type BuildRow = (
+    crate::db::git_commit::GitCommit,
+    GitRepo,
+    Vec<crate::db::git_branch::GitBranch>,
+    Option<crate::db::git_commit_build::GitCommitBuild>,
+    Vec<crate::db::git_commit::GitCommit>,
+);
+
 /// Generate the HTML rows for the build table tbody
-fn render_build_rows(
-    builds: &Vec<(
-        crate::db::git_commit::GitCommit,
-        GitRepo,
-        Vec<crate::db::git_branch::GitBranch>,
-        Option<crate::db::git_commit_build::GitCommitBuild>,
-        Vec<crate::db::git_commit::GitCommit>,
-    )>,
-) -> Markup {
+fn render_build_rows(builds: &Vec<BuildRow>) -> Markup {
     html! {
         @for (commit, repo, branches, build_status, __parent_commits) in builds {
             @let status: crate::build_status::BuildStatus = build_status.clone().into();

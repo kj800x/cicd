@@ -20,16 +20,6 @@ pub fn build_status_bg_class(status: &BuildStatus) -> &'static str {
     }
 }
 
-/// Get the CSS class for a build card status
-pub fn build_card_status_class(status: &BuildStatus) -> &'static str {
-    match status {
-        BuildStatus::Success => "card-status-success",
-        BuildStatus::Failure => "card-status-failure",
-        BuildStatus::Pending => "card-status-pending",
-        BuildStatus::None => "card-status-none",
-    }
-}
-
 /// Get the text representation of a build status
 pub fn build_status_text(status: &BuildStatus) -> &'static str {
     match status {
