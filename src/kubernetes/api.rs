@@ -1,7 +1,7 @@
 use crate::kubernetes::{DeployConfig, DeployConfigStatusBuilder};
 use crate::prelude::*;
 use k8s_openapi::api::core::v1::Namespace;
-use kube::api::{DeleteParams, GroupVersionKind, TypeMeta};
+use kube::api::{DeleteParams, GroupVersionKind, PostParams, TypeMeta};
 use kube::discovery::pinned_kind;
 use kube::{
     api::{Api, DynamicObject, ListParams, Patch, PatchParams, ResourceExt},
@@ -234,4 +234,199 @@ pub async fn get_namespace_uid(client: &Client, namespace: &str) -> AppResult<St
         .metadata
         .uid
         .expect("expect namespaces to all have a uid"))
+}
+
+/// Check if a namespace exists
+pub async fn namespace_exists(client: &Client, namespace: &str) -> AppResult<bool> {
+    let namespaces_api: Api<Namespace> = Api::all(client.clone());
+    match namespaces_api.get(namespace).await {
+        Ok(_) => Ok(true),
+        Err(kube::Error::Api(e)) if e.code == 404 => Ok(false),
+        Err(e) => Err(AppError::Kubernetes(e)),
+    }
+}
+
+/// Create a namespace
+pub async fn create_namespace(client: &Client, namespace: &str) -> AppResult<()> {
+    let namespaces_api: Api<Namespace> = Api::all(client.clone());
+    let ns = Namespace {
+        metadata: kube::api::ObjectMeta {
+            name: Some(namespace.to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    namespaces_api
+        .create(&PostParams::default(), &ns)
+        .await
+        .map_err(AppError::Kubernetes)?;
+    log::info!("Created namespace: {}", namespace);
+    Ok(())
+}
+
+/// Copy all resources from template namespace to target namespace
+/// Skips resources that already exist in the target namespace
+pub async fn copy_namespace_resources(
+    client: &Client,
+    template_ns: &str,
+    target_ns: &str,
+) -> AppResult<()> {
+    log::info!(
+        "Copying resources from template namespace {} to target namespace {}",
+        template_ns,
+        target_ns
+    );
+
+    // Get all resources from template namespace
+    let template_resources = list_namespace_objects(client, template_ns, ListMode::All).await?;
+    log::debug!(
+        "Found {} resources in template namespace {}",
+        template_resources.len(),
+        template_ns
+    );
+
+    let mut copied_count = 0;
+    let mut skipped_count = 0;
+
+    for mut resource in template_resources {
+        let resource_name = resource.name_any();
+        let gvk = GroupVersionKind::try_from(
+            resource
+                .types
+                .as_ref()
+                .ok_or_else(|| AppError::Internal("missing types on DynamicObject".to_string()))?,
+        )
+        .map_err(|e| AppError::Internal(format!("failed parsing GVK: {}", e)))?;
+
+        // Resolve ApiResource to check if resource exists in target namespace
+        let (ar, caps) = pinned_kind(client, &gvk)
+            .await
+            .map_err(|e| AppError::Internal(format!("GVK {gvk:?} not found via discovery: {}", e)))?;
+
+        let target_api: Api<DynamicObject> = match caps.scope {
+            discovery::Scope::Namespaced => Api::namespaced_with(client.clone(), target_ns, &ar),
+            discovery::Scope::Cluster => {
+                // Skip cluster-scoped resources (they don't belong to a namespace)
+                log::debug!(
+                    "Skipping cluster-scoped resource {} (kind: {})",
+                    resource_name,
+                    gvk.kind
+                );
+                skipped_count += 1;
+                continue;
+            }
+        };
+
+        // Check if resource already exists in target namespace
+        match target_api.get(&resource_name).await {
+            Ok(_) => {
+                log::debug!(
+                    "Resource {}/{} already exists in target namespace, skipping",
+                    target_ns,
+                    resource_name
+                );
+                skipped_count += 1;
+                continue;
+            }
+            Err(kube::Error::Api(e)) if e.code == 404 => {
+                // Resource doesn't exist, proceed with copying
+            }
+            Err(e) => {
+                log::warn!(
+                    "Error checking if resource {}/{} exists: {}",
+                    target_ns,
+                    resource_name,
+                    e
+                );
+                continue;
+            }
+        }
+
+        // Update resource metadata for target namespace
+        resource.metadata.namespace = Some(target_ns.to_string());
+        // Remove owner references and other namespace-specific metadata
+        resource.metadata.owner_references = None;
+        // Remove UID so Kubernetes can assign a new one
+        resource.metadata.uid = None;
+        // Remove resource version
+        resource.metadata.resource_version = None;
+
+        // Copy the resource to target namespace
+        match apply(client, target_ns, resource).await {
+            Ok(_) => {
+                log::debug!(
+                    "Copied resource {}/{} from template namespace",
+                    target_ns,
+                    resource_name
+                );
+                copied_count += 1;
+            }
+            Err(e) => {
+                log::warn!(
+                    "Failed to copy resource {}/{}: {}",
+                    target_ns,
+                    resource_name,
+                    e
+                );
+            }
+        }
+    }
+
+    log::info!(
+        "Finished copying resources: {} copied, {} skipped",
+        copied_count,
+        skipped_count
+    );
+
+    Ok(())
+}
+
+/// Ensure namespace exists, creating it if necessary and copying resources from template namespace
+/// Returns true if namespace was newly created, false if it already existed
+pub async fn ensure_namespace_exists(
+    client: &Client,
+    namespace: &str,
+    template_namespace: Option<&str>,
+) -> AppResult<bool> {
+    // Check if namespace exists
+    let exists = namespace_exists(client, namespace).await?;
+
+    if exists {
+        log::debug!("Namespace {} already exists", namespace);
+        return Ok(false);
+    }
+
+    // Create namespace
+    create_namespace(client, namespace).await?;
+
+    // Copy resources from template namespace if provided
+    if let Some(template_ns) = template_namespace {
+        if template_ns == namespace {
+            log::debug!(
+                "Template namespace {} is the same as target namespace, skipping copy",
+                template_ns
+            );
+        } else {
+            match copy_namespace_resources(client, template_ns, namespace).await {
+                Ok(_) => {
+                    log::info!(
+                        "Successfully copied resources from template namespace {} to {}",
+                        template_ns,
+                        namespace
+                    );
+                }
+                Err(e) => {
+                    // Log warning but don't fail - namespace was created successfully
+                    log::warn!(
+                        "Failed to copy resources from template namespace {} to {}: {}",
+                        template_ns,
+                        namespace,
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(true)
 }

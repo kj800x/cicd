@@ -64,6 +64,7 @@ The application is built using:
 - **WebSockets** for receiving GitHub webhook events
 - **Discord API** for build notifications
 - **Prometheus** for metrics
+- **Kubernetes** for deployment management with custom DeployConfig CRD and controller
 
 ## Setup and Configuration
 
@@ -83,6 +84,26 @@ To enable Discord notifications for build events, set the following variables:
 - `DISCORD_CHANNEL_ID`: The ID of the channel where build notifications should be posted
 
 If these variables are not set, Discord notifications will be disabled.
+
+#### Kubernetes Namespace Template Configuration
+
+To enable automatic namespace initialization with resource copying, set:
+
+- `TEMPLATE_NAMESPACE`: (Optional) Name of the template namespace from which resources should be copied when creating new namespaces
+
+When `TEMPLATE_NAMESPACE` is set, the application will automatically:
+1. Create the target namespace if it doesn't exist
+2. Copy all resources from the template namespace to the new namespace
+3. Skip resources that already exist in the target namespace
+
+This is useful for ensuring new namespaces have required infrastructure resources (ConfigMaps, Secrets, ServiceAccounts, NetworkPolicies, etc.) before deploying applications.
+
+**Example**: If `TEMPLATE_NAMESPACE=infrastructure`, when deploying to a new namespace `production`, the system will:
+- Create the `production` namespace
+- Copy all resources from `infrastructure` namespace to `production`
+- Then proceed with deploying the application resources
+
+If `TEMPLATE_NAMESPACE` is not set, namespaces will still be created automatically, but no resources will be copied.
 
 ### Running the Application
 
@@ -292,6 +313,14 @@ Changing a DeployConfig's namespace is not currently supported. If you need to m
 4. Deploy to the new namespace
 
 The limitation exists because deploy operations reference the existing config's namespace rather than the desired namespace from the updated configuration.
+
+### Template Namespace Resource Copying
+When using `TEMPLATE_NAMESPACE`:
+- Resources are copied only when a namespace is first created
+- Existing resources in the target namespace are never overwritten (skipped if they already exist)
+- Cluster-scoped resources are not copied (only namespaced resources)
+- Owner references and other namespace-specific metadata are removed during copying
+- Copy failures are logged as warnings but do not prevent namespace creation or deployment
 
 ### Resource Apply Failures Not Reflected in UI
 **BUG TO FIX**: When the Kubernetes controller fails to apply resources (e.g., due to schema validation errors like incorrect field names in CronJob specs), the deployment still appears successful in the UI. The controller logs show the errors, but the DeployConfig status doesn't reflect the failure state. This can lead to confusing situations where deployments look healthy but resources are actually failing to reconcile.

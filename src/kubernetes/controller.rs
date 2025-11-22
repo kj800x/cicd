@@ -3,7 +3,9 @@ use crate::error::format_error_chain;
 use crate::kubernetes::api::ListMode;
 use crate::kubernetes::repo::DeploymentState;
 use crate::kubernetes::spec_editing::WithVersion;
-use crate::kubernetes::{apply, delete_dynamic_object, list_namespace_objects};
+use crate::kubernetes::{
+    apply, delete_dynamic_object, ensure_namespace_exists, list_namespace_objects,
+};
 use crate::prelude::*;
 use futures_util::StreamExt;
 use kube::{
@@ -27,6 +29,17 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> AppRes
     let name = dc.name_any();
 
     log::debug!("Reconciling DeployConfig {}/{}", ns, name);
+
+    // Ensure namespace exists (safety check - DeployConfig should already exist in target namespace)
+    let template_namespace = std::env::var("TEMPLATE_NAMESPACE").ok();
+    if let Err(e) = ensure_namespace_exists(client, &ns, template_namespace.as_deref()).await {
+        log::warn!(
+            "Failed to ensure namespace {} exists during reconciliation: {}",
+            ns,
+            e
+        );
+        // Continue anyway - namespace might already exist
+    }
 
     // Create or update resources as needed
     for resource in dc.resource_specs() {

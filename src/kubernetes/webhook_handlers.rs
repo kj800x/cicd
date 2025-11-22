@@ -2,7 +2,7 @@ use super::DeployConfig;
 use super::Repository;
 use crate::error::format_error_chain;
 use crate::kubernetes::repo::DeploymentState;
-use crate::kubernetes::Error;
+use crate::kubernetes::{ensure_namespace_exists, Error};
 use crate::prelude::*;
 use itertools::Itertools;
 use kube::api::{DeleteParams, PostParams};
@@ -14,6 +14,7 @@ use kube::{
 // Goals: sync spec.config, spec.artifact, spec.team, spec.kind, status.orphaned (always false here)
 // NON-GOALS: spec.specs (since that is updated ONLY by deploy events)
 // TODO: There's some other semantics here that need to be figured out, but lets get this online again first.
+// TODO: update_deploy_config does not handle namespace changes
 async fn update_deploy_config(
     client: &Client,
     existing_config: &DeployConfig,
@@ -22,7 +23,23 @@ async fn update_deploy_config(
     let ns = existing_config
         .namespace()
         .unwrap_or_else(|| "default".to_string());
+    let new_ns = final_config
+        .namespace()
+        .unwrap_or_else(|| "default".to_string());
     let name = existing_config.name_any();
+
+    if new_ns != ns {
+        return Err(Error::App(AppError::Internal(
+            "Namespace change not supported. You must undeploy, delete the config, and recreate it with the new namespace.".to_owned(),
+        )));
+    }
+
+    // Ensure namespace exists (in case namespace changed)
+    // TODO: We don't currently support namespace changes without an undeploy so this is a no-op, but it's a reminder that if we ever support it we need to do this too.
+    let template_namespace = std::env::var("TEMPLATE_NAMESPACE").ok();
+    ensure_namespace_exists(client, &ns, template_namespace.as_deref())
+        .await
+        .map_err(Error::App)?;
 
     // We always use the existing config's specs, since specs are only updated by deploy events.
     let mut merge_patch = final_config.clone();
@@ -53,6 +70,12 @@ async fn create_deploy_config(client: &Client, final_config: &DeployConfig) -> R
         .namespace()
         .unwrap_or_else(|| "default".to_string());
     let name = final_config.name_any();
+
+    // Ensure namespace exists before creating DeployConfig
+    let template_namespace = std::env::var("TEMPLATE_NAMESPACE").ok();
+    ensure_namespace_exists(client, &ns, template_namespace.as_deref())
+        .await
+        .map_err(Error::App)?;
 
     let api: Api<DeployConfig> = Api::namespaced(client.clone(), &ns);
 

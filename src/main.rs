@@ -47,8 +47,8 @@ use crate::webhooks::manager::WebhookManager;
 use cicd::serve_static_file;
 use web::{
     all_recent_builds, bootstrap, deploy_config, deploy_history, deploy_history_index, index,
-    resource_logs_download, resource_logs_fragment, resource_logs_page, root, settings_index,
-    settings_fragment, toggle_team, toggle_repo,
+    resource_logs_download, resource_logs_fragment, resource_logs_page, root, settings_fragment,
+    settings_index, toggle_repo, toggle_team,
 };
 
 async fn start_http(
@@ -188,6 +188,13 @@ async fn main() -> std::io::Result<()> {
     let client = kube::Client::try_default()
         .await
         .expect("Failed to initialize Kubernetes client");
+
+    // Log template namespace configuration
+    if let Ok(template_namespace) = std::env::var("TEMPLATE_NAMESPACE") {
+        log::info!("Template namespace configured: {}", template_namespace);
+    } else {
+        log::debug!("TEMPLATE_NAMESPACE not set, namespace resource copying disabled");
+    }
 
     let mut webhook_manager = WebhookManager::new(
         std::env::var("WEBSOCKET_URL").expect("WEBSOCKET_URL must be set"),

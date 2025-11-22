@@ -7,7 +7,7 @@ pub mod repo;
 pub mod spec_editing;
 pub mod webhook_handlers;
 
-pub use api::{apply, delete_dynamic_object, list_namespace_objects};
+pub use api::{apply, delete_dynamic_object, ensure_namespace_exists, list_namespace_objects};
 pub use deploy_config::DeployConfig;
 pub use deploy_config_status_builder::DeployConfigStatusBuilder;
 pub use repo::Repository;
