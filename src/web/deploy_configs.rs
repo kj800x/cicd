@@ -475,7 +475,7 @@ async fn generate_status_header(
                             ))
                             @if branch != default_branch {
                                 span class="warning-icon" title=(format!("Different from default branch ({})", default_branch)) {
-                                    "⚠️"
+                                    i class="fa fa-exclamation-triangle" {}
                                 }
                             }
                         }
@@ -1078,7 +1078,8 @@ pub async fn deploy_configs(
                                     @if selected_config.is_orphaned() {
                                         div.alert.alert-warning {
                                             div class="alert-header" {
-                                                "⚠️ Orphaned Deploy Config"
+                                                i class="fa fa-exclamation-triangle" {}
+                                                " Orphaned Deploy Config"
                                             }
                                             div class="alert-content" {
                                                 div class="details" {

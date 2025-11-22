@@ -51,6 +51,10 @@ Rust-based CI/CD dashboard with Actix Web backend, Maud HTML templating, HTMX fr
        hx-ext="morph" { /* content */ }
   ```
 - Prefer Idiomorph for morphing DOM updates
+- **Icons**: Use Font Awesome or Octicons icons instead of Unicode emojis
+  - Font Awesome: `<i class="fa fa-icon-name"></i>` (already loaded via CDN)
+  - Octicons: `<span class="octicon octicon-icon-name"></span>` (already loaded via CDN)
+  - Examples: `fa fa-external-link` for links, `fa fa-file-text-o` for logs, `fa fa-gear` for settings
 
 ### CSS Organization (`src/res/*.css`)
 - **Namespace CSS under page selectors** unless there's a compelling reason otherwise

@@ -29,3 +29,13 @@ pub fn build_card_status_class(status: &BuildStatus) -> &'static str {
         BuildStatus::None => "card-status-none",
     }
 }
+
+/// Get the text representation of a build status
+pub fn build_status_text(status: &BuildStatus) -> &'static str {
+    match status {
+        BuildStatus::Success => "Success",
+        BuildStatus::Failure => "Failed",
+        BuildStatus::Pending => "Pending",
+        BuildStatus::None => "None",
+    }
+}

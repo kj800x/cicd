@@ -1,10 +1,66 @@
 use crate::db::functions::get_commits_since;
 use crate::db::git_repo::GitRepo;
 use crate::prelude::*;
-use crate::web::{build_status_helpers, formatting, header};
 use crate::web::team_prefs::ReposCookie;
+use crate::web::{build_status_helpers, formatting, header};
 
-/// Generate the HTML fragment for the build grid content
+/// Generate the HTML rows for the build table tbody
+fn render_build_rows(
+    builds: &Vec<(
+        crate::db::git_commit::GitCommit,
+        GitRepo,
+        Vec<crate::db::git_branch::GitBranch>,
+        Option<crate::db::git_commit_build::GitCommitBuild>,
+        Vec<crate::db::git_commit::GitCommit>,
+    )>,
+) -> Markup {
+    html! {
+        @for (commit, repo, branches, build_status, __parent_commits) in builds {
+            @let status: crate::build_status::BuildStatus = build_status.clone().into();
+            tr class=(format!("build-row {}", build_status_helpers::build_status_bg_class(&status))) {
+                td class="status-cell" {
+                    div class=(format!("status-indicator {}", build_status_helpers::build_status_class(&status))) {}
+                }
+                td class="repo-cell" {
+                    (format!("{}/{}", repo.owner_name, repo.name))
+                }
+                td class="branch-cell" {
+                    @if branches.is_empty() {
+                        span class="no-branch" { "—" }
+                    } @else {
+                        @for (i, branch) in branches.iter().enumerate() {
+                            @if i > 0 { ", " }
+                            (branch.name)
+                        }
+                    }
+                }
+                td class="message-cell" {
+                    span class="message-text" title=(commit.message.clone()) {
+                        (formatting::truncate_message(&commit.message, 80))
+                    }
+                }
+                td class="time-cell" {
+                    (formatting::format_relative_time(commit.timestamp))
+                }
+                td class="links-cell" {
+                    a href=(format!("https://github.com/{}/{}/commit/{}", repo.owner_name, repo.name, commit.sha))
+                        target="_blank"
+                        class="link-icon"
+                        title="View commit" {
+                        i class="fa fa-external-link" {}
+                    }
+                    @if let Some(url) = build_status.as_ref().map(|x| &x.url) {
+                        a href=(url) target="_blank" class="link-icon" title="Build logs" {
+                            i class="fa fa-file-text-o" {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Generate the HTML fragment for the build grid content (full table)
 pub fn render_build_grid_fragment(
     pool: &Pool<SqliteConnectionManager>,
     req: &actix_web::HttpRequest,
@@ -51,56 +107,72 @@ pub fn render_build_grid_fragment(
                 p { "There are no builds in the last 24 hours." }
             }
         } @else {
-            div class="build-grid" {
-                @for (commit, repo, branches, build_status, __parent_commits) in builds {
-                    div class=(format!("build-card {}", build_status_helpers::build_card_status_class(&build_status.clone().into()))) {
-                        div class="build-header" {
-                            div class=(format!("status-indicator {}", build_status_helpers::build_status_class(&build_status.clone().into()))) {}
-                            div class="build-info" {
-                                div class="repo-name" { (format!("{}/{}", repo.owner_name, repo.name)) }
-                                div class="branch-name" {
-                                    @if branches.is_empty() {
-                                        "No branch"
-                                    } @else {
-                                        @for (i, branch) in branches.iter().enumerate() {
-                                            @if i > 0 { ", " }
-                                            (branch.name)
-                                        }
-                                    }
-                                }
-                            }
-                            div class="build-time" {
-                                (formatting::format_relative_time(commit.timestamp))
-                            }
-                        }
-                        div class="build-body" {
-                            div class="commit-message" { (commit.message) }
-                        }
-                        div class="build-footer" {
-                            div class="sha" { (formatting::format_short_sha(&commit.sha)) }
-                            div class="links" {
-                                a href=(format!("https://github.com/{}/{}/commit/{}", repo.owner_name, repo.name, commit.sha))
-                                    target="_blank" { "View code" }
-
-                                @if let Some(url) = &build_status.map(|x| x.url) {
-                                    a href=(url) target="_blank" { "Build logs" }
-                                }
-                            }
-                        }
+            table class="build-table" {
+                thead {
+                    tr {
+                        th class="col-status" { "" }
+                        th class="col-repo" { "Repo" }
+                        th class="col-branch" { "Branch" }
+                        th class="col-message" { "Message" }
+                        th class="col-time" { "Time" }
+                        th class="col-links" { "" }
                     }
+                }
+                tbody hx-get="/build-grid-fragment"
+                       hx-trigger="load, every 5s"
+                       hx-swap="morph:innerHTML"
+                       hx-ext="morph" {
+                    (render_build_rows(&builds))
                 }
             }
         }
     }
 }
 
-/// Handler for the build grid fragment endpoint
+/// Handler for the build grid fragment endpoint (returns only tbody rows)
 #[get("/build-grid-fragment")]
 pub async fn build_grid_fragment(
     pool: web::Data<Pool<SqliteConnectionManager>>,
     req: actix_web::HttpRequest,
 ) -> impl Responder {
-    let fragment = render_build_grid_fragment(&pool, &req);
+    let conn = match pool.get() {
+        Ok(c) => c,
+        Err(e) => {
+            log::error!("Failed to get database connection: {}", e);
+            return HttpResponse::InternalServerError()
+                .content_type("text/html; charset=utf-8")
+                .body("Error: Failed to connect to database");
+        }
+    };
+    let since = Utc::now() - chrono::Duration::hours(24);
+    let commits_result = get_commits_since(&conn, since.timestamp_millis());
+
+    let repos_cookie = ReposCookie::from_request(&req);
+
+    let mut builds = Vec::new();
+
+    if let Ok(commits) = commits_result {
+        for commit in commits {
+            // FIXME:
+            #[allow(clippy::expect_used)]
+            let repo = GitRepo::get_by_id(&commit.repo_id, &conn)
+                .expect("Expect")
+                .expect("Expect");
+
+            // Filter repos based on visibility cookie
+            if !repos_cookie.is_visible(&repo.owner_name) {
+                continue;
+            }
+
+            let parent_commits = commit.get_parents(&conn).unwrap_or_default();
+            let branches = commit.get_branches(&conn).unwrap_or_default();
+            let build_status = commit.get_build_status(&conn).unwrap_or_default();
+
+            builds.push((commit, repo, branches, build_status, parent_commits));
+        }
+    };
+
+    let fragment = render_build_rows(&builds);
 
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
@@ -129,14 +201,11 @@ pub async fn all_recent_builds(
                 div class="content" {
                     header {
                         h1 { "CI/CD Build Status Dashboard" }
-                        div class="subtitle" { "Recent builds from the last 24 hours" }
+                        div class="subtitle" { "Build status from the last 24 hours" }
                     }
 
                     // Add container with HTMX attributes for auto-refresh
-                    div id="build-grid-container"
-                        hx-get="/build-grid-fragment"
-                        hx-trigger="every 5s"
-                        hx-swap="morph:innerHTML" {
+                    div id="build-grid-container" {
                         (render_build_grid_fragment(&pool, &req))
                     }
                 }

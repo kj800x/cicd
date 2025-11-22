@@ -794,68 +794,160 @@ header {
 }
 
 .index-page {
-  .branch-grid {
-    display: grid;
-    grid-template-columns: 1fr;
-    grid-gap: 24px;
-    max-width: 1200px;
-    margin: 0 auto;
+  .branch-table {
+    width: 100%;
+    border-collapse: collapse;
+    background-color: var(--card-bg);
+    border-radius: 4px;
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
   }
 
-  @media (min-width: 992px) {
-    .branch-grid {
-      grid-template-columns: repeat(auto-fill, minmax(800px, 1fr));
+  .branch-table thead {
+    background-color: rgba(0, 0, 0, 0.03);
+    border-bottom: 2px solid var(--border-color);
+  }
+
+  .branch-table th {
+    padding: 8px 12px;
+    text-align: left;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #666;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .branch-table tbody tr {
+    border-bottom: 1px solid var(--border-color);
+    transition: background-color 0.15s;
+  }
+
+  .branch-table tbody tr:hover {
+    background-color: rgba(0, 0, 0, 0.02);
+  }
+
+  .branch-table tbody tr:last-child {
+    border-bottom: none;
+  }
+
+  .branch-table td {
+    padding: 6px 12px;
+    font-size: 0.9rem;
+    vertical-align: middle;
+  }
+
+  .col-status {
+    width: 40px;
+  }
+
+  .col-repo {
+    width: 200px;
+  }
+
+  .col-branch {
+    width: 150px;
+  }
+
+  .col-latest {
+    width: 100px;
+  }
+
+  .col-message {
+    min-width: 0;
+  }
+
+  .col-time {
+    width: 100px;
+    text-align: right;
+  }
+
+  .col-links {
+    width: 60px;
+    text-align: center;
+  }
+
+  .status-cell {
+    text-align: center;
+  }
+
+  .status-indicator {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    display: inline-block;
+    flex-shrink: 0;
+  }
+
+  .status-success {
+    background-color: var(--success-color);
+  }
+
+  .status-failure {
+    background-color: var(--failure-color);
+  }
+
+  .status-pending {
+    background-color: var(--pending-color);
+    position: relative;
+    overflow: hidden;
+  }
+
+  .status-pending::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 200%;
+    height: 100%;
+    background: linear-gradient(to right, transparent, rgba(255, 255, 255, 0.3), transparent);
+    animation: shimmer 1.5s infinite;
+  }
+
+  @keyframes shimmer {
+    100% {
+      transform: translateX(100%);
     }
   }
 
-  .branch-card {
-    background-color: var(--card-bg);
-    border-radius: 8px;
-    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
-    overflow: hidden;
-    position: relative;
-    transition: transform 0.2s;
-    display: flex;
-    flex-direction: column;
-    border: 2px solid var(--border-color);
+  .status-none {
+    background-color: var(--none-color);
   }
 
-  .branch-card:hover {
-    transform: translateY(-3px);
+  .branch-row.bg-success {
+    background-color: rgba(46, 204, 113, 0.08);
   }
 
-  .branch-header {
-    display: flex;
-    align-items: center;
-    padding: 16px;
-    border-bottom: 1px solid var(--border-color);
-    background-color: rgba(52, 152, 219, 0.05);
+  .branch-row.bg-failure {
+    background-color: rgba(231, 76, 60, 0.08);
   }
 
-  .branch-info {
-    flex-grow: 1;
+  .branch-row.bg-pending {
+    background-color: rgba(243, 156, 18, 0.08);
   }
 
-  .repo-name {
-    font-weight: 600;
-    font-size: 1.1rem;
-    margin-bottom: 8px;
+  .branch-row.bg-none {
+    background-color: rgba(127, 140, 141, 0.05);
   }
 
-  .branch-name-wrapper {
-    display: flex;
-    align-items: center;
+  .repo-cell {
+    font-weight: 500;
+    font-size: 0.9rem;
+  }
+
+  .branch-cell {
+    color: #555;
+    font-size: 0.85rem;
   }
 
   .branch-badge {
     display: inline-block;
-    padding: 4px 10px;
-    border-radius: 12px;
+    padding: 2px 8px;
+    border-radius: 10px;
     border: 1px solid var(--border-color);
     background-color: #f8f9fa;
-    font-size: 0.85rem;
+    font-size: 0.8rem;
     color: #555;
-    margin-right: 8px;
   }
 
   .branch-badge.default {
@@ -864,236 +956,155 @@ header {
     color: #0d47a1;
   }
 
-  .commit-list {
-    padding: 0;
-    margin: 0;
-    list-style-type: none;
-  }
-
-  .commit-row {
-    display: flex;
-    align-items: center;
-    padding: 12px 16px;
-    border-bottom: 1px solid var(--border-color);
-  }
-
-  .commit-row:last-child {
-    border-bottom: none;
-  }
-
-  .commit-row:hover {
-    background-color: rgba(0, 0, 0, 0.01);
-  }
-
-  .commit-row.bg-success {
-    background-color: rgba(46, 204, 113, 0.15);
-  }
-
-  .commit-row.bg-failure {
-    background-color: rgba(231, 76, 60, 0.15);
-  }
-
-  .commit-row.bg-pending {
-    background-color: rgba(243, 156, 18, 0.15);
-  }
-
-  .commit-row.bg-none {
-    background-color: rgba(127, 140, 141, 0.15);
-  }
-
-  .commit-status {
-    width: 16px;
-    height: 16px;
-    border-radius: 50%;
-    margin-right: 12px;
-    flex-shrink: 0;
-  }
-
-  .status-success {
-    background-color: var(--success-color);
-  }
-
-  .status-failure {
-    background-color: var(--failure-color);
-  }
-
-  .status-pending {
-    background-color: var(--pending-color);
-    position: relative;
-    overflow: hidden;
-  }
-
-  .status-pending::after {
-    content: '';
-    position: absolute;
-    top: 0;
-    left: -100%;
-    width: 200%;
-    height: 100%;
-    background: linear-gradient(to right, transparent, rgba(255, 255, 255, 0.2), transparent);
-    animation: shimmer 1.5s infinite;
-  }
-
-  @keyframes shimmer {
-    100% {
-      transform: translateX(100%);
-    }
-  }
-
-  .status-none {
-    background-color: var(--none-color);
-  }
-
-  .commit-sha {
-    font-family: monospace;
+  .latest-cell {
     font-size: 0.85rem;
-    width: 65px;
-    color: #555;
-    margin-right: 12px;
   }
 
-  .commit-message-cell {
-    flex: 1;
+  .build-status-text {
+    font-weight: 500;
+  }
+
+  .branch-row.bg-success .build-status-text {
+    color: var(--success-color);
+  }
+
+  .branch-row.bg-failure .build-status-text {
+    color: var(--failure-color);
+  }
+
+  .branch-row.bg-pending .build-status-text {
+    color: var(--pending-color);
+  }
+
+  .no-status {
+    color: #999;
+    font-style: italic;
+  }
+
+  .message-cell {
     min-width: 0;
-    margin-right: 12px;
   }
 
-  .commit-message-text {
-    font-size: 0.95rem;
+  .message-text {
+    display: block;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    color: #333;
   }
 
-  .commit-time {
-    font-size: 0.8rem;
+  .time-cell {
     color: #888;
+    font-size: 0.85rem;
     white-space: nowrap;
-    margin-right: 12px;
   }
 
-  .commit-links a {
-    color: var(--primary-blue);
+  .links-cell {
+    text-align: center;
+  }
+
+  .link-icon {
     text-decoration: none;
-    font-size: 0.85rem;
-    margin-left: 12px;
+    font-size: 0.9rem;
+    margin: 0 4px;
+    opacity: 0.6;
+    transition: opacity 0.2s;
   }
 
-  .commit-links a:hover {
-    text-decoration: underline;
-  }
-
-  .tooltipped {
-    position: relative;
-    cursor: pointer;
-  }
-
-  .tooltipped:hover::after {
-    content: attr(data-tooltip);
-    position: absolute;
-    z-index: 10;
-    bottom: 125%;
-    left: 50%;
-    transform: translateX(-50%);
-    width: max-content;
-    max-width: 300px;
-    padding: 6px 10px;
-    border-radius: 4px;
-    background-color: #333;
-    color: white;
-    font-size: 0.85rem;
-    pointer-events: none;
-    opacity: 0;
-    animation: fadeIn 0.2s ease-out forwards;
-  }
-
-  @keyframes fadeIn {
-    to {
-      opacity: 1;
-    }
+  .link-icon:hover {
+    opacity: 1;
   }
 }
 
 
 .recent-builds-page {
-  .build-grid {
-    display: grid;
-    grid-template-columns: 1fr;
-    grid-gap: 16px;
-    max-width: 1200px;
-    margin: 0 auto;
-  }
-
-  .build-card {
+  .build-table {
+    width: 100%;
+    border-collapse: collapse;
     background-color: var(--card-bg);
-    border-radius: 8px;
-    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+    border-radius: 4px;
     overflow: hidden;
-    position: relative;
-    transition: transform 0.2s;
-    display: flex;
-    flex-direction: column;
-    border: 2px solid var(--border-color);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
   }
 
-  .build-card:hover {
-    transform: translateY(-3px);
+  .build-table thead {
+    background-color: rgba(0, 0, 0, 0.03);
+    border-bottom: 2px solid var(--border-color);
   }
 
-  .build-header {
-    display: flex;
-    align-items: center;
-    padding: 16px;
+  .build-table th {
+    padding: 8px 12px;
+    text-align: left;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #666;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .build-table tbody tr {
     border-bottom: 1px solid var(--border-color);
+    transition: background-color 0.15s;
+  }
+
+  .build-table tbody tr:hover {
+    background-color: rgba(0, 0, 0, 0.02);
+  }
+
+  .build-table tbody tr:last-child {
+    border-bottom: none;
+  }
+
+  .build-table td {
+    padding: 6px 12px;
+    font-size: 0.9rem;
+    vertical-align: middle;
+  }
+
+  .col-status {
+    width: 40px;
+  }
+
+  .col-repo {
+    width: 200px;
+  }
+
+  .col-branch {
+    width: 150px;
+  }
+
+  .col-message {
+    min-width: 0;
+  }
+
+  .col-time {
+    width: 100px;
+    text-align: right;
+  }
+
+  .col-links {
+    width: 60px;
+    text-align: center;
+  }
+
+  .status-cell {
+    text-align: center;
   }
 
   .status-indicator {
-    width: 20px;
-    height: 20px;
+    width: 12px;
+    height: 12px;
     border-radius: 50%;
-    margin-right: 12px;
+    display: inline-block;
     flex-shrink: 0;
   }
 
-  /* Status-specific styling */
-  .card-status-success {
-    border-color: var(--success-color);
-    background-color: rgba(46, 204, 113, 0.05);
+  .status-success {
+    background-color: var(--success-color);
   }
 
-  .card-status-success .build-header {
-    background-color: rgba(46, 204, 113, 0.15);
-    border-bottom-color: var(--success-color);
-  }
-
-  .card-status-failure {
-    border-color: var(--failure-color);
-    background-color: rgba(231, 76, 60, 0.05);
-  }
-
-  .card-status-failure .build-header {
-    background-color: rgba(231, 76, 60, 0.15);
-    border-bottom-color: var(--failure-color);
-  }
-
-  .card-status-pending {
-    border-color: var(--pending-color);
-    background-color: rgba(243, 156, 18, 0.05);
-  }
-
-  .card-status-pending .build-header {
-    background-color: rgba(243, 156, 18, 0.15);
-    border-bottom-color: var(--pending-color);
-  }
-
-  .card-status-none {
-    border-color: var(--none-color);
-    background-color: rgba(127, 140, 141, 0.05);
-  }
-
-  .card-status-none .build-header {
-    background-color: rgba(127, 140, 141, 0.15);
-    border-bottom-color: var(--none-color);
+  .status-failure {
+    background-color: var(--failure-color);
   }
 
   .status-pending {
@@ -1109,7 +1120,7 @@ header {
     left: -100%;
     width: 200%;
     height: 100%;
-    background: linear-gradient(to right, transparent, rgba(255, 255, 255, 0.2), transparent);
+    background: linear-gradient(to right, transparent, rgba(255, 255, 255, 0.3), transparent);
     animation: shimmer 1.5s infinite;
   }
 
@@ -1119,76 +1130,73 @@ header {
     }
   }
 
-  .status-success {
-    background-color: var(--success-color);
-  }
-
-  .status-failure {
-    background-color: var(--failure-color);
-  }
-
   .status-none {
     background-color: var(--none-color);
   }
 
-  .build-info {
-    flex-grow: 1;
+  .build-row.bg-success {
+    background-color: rgba(46, 204, 113, 0.08);
   }
 
-  .repo-name {
-    font-weight: 600;
-    font-size: 1.1rem;
-    margin-bottom: 4px;
+  .build-row.bg-failure {
+    background-color: rgba(231, 76, 60, 0.08);
   }
 
-  .branch-name {
-    color: #555;
+  .build-row.bg-pending {
+    background-color: rgba(243, 156, 18, 0.08);
+  }
+
+  .build-row.bg-none {
+    background-color: rgba(127, 140, 141, 0.05);
+  }
+
+  .repo-cell {
+    font-weight: 500;
     font-size: 0.9rem;
   }
 
-  .build-time {
-    font-size: 0.85rem;
-    color: #888;
-    text-align: right;
-    min-width: 100px;
-  }
-
-  .build-body {
-    padding: 16px;
-    flex: 1;
-  }
-
-  .commit-message {
-    font-size: 1rem;
-    line-height: 1.4;
-    margin-bottom: 12px;
-    word-break: break-word;
-  }
-
-  .build-footer {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 12px 16px;
-    background-color: rgba(0, 0, 0, 0.02);
-    border-top: 1px solid var(--border-color);
-  }
-
-  .sha {
-    font-family: monospace;
-    font-size: 0.85rem;
+  .branch-cell {
     color: #555;
+    font-size: 0.85rem;
   }
 
-  .links a {
-    color: var(--primary-blue);
+  .no-branch {
+    color: #999;
+    font-style: italic;
+  }
+
+  .message-cell {
+    min-width: 0;
+  }
+
+  .message-text {
+    display: block;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: #333;
+  }
+
+  .time-cell {
+    color: #888;
+    font-size: 0.85rem;
+    white-space: nowrap;
+  }
+
+  .links-cell {
+    text-align: center;
+  }
+
+  .link-icon {
     text-decoration: none;
     font-size: 0.9rem;
-    margin-left: 16px;
+    margin: 0 4px;
+    opacity: 0.6;
+    transition: opacity 0.2s;
   }
 
-  .links a:hover {
-    text-decoration: underline;
+  .link-icon:hover {
+    opacity: 1;
   }
 }
 
