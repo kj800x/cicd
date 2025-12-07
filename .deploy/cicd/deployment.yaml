@@ -21,7 +21,7 @@ spec:
             - cicd
           env:
             - name: WEBSOCKET_URL
-              value: ws://apps.coolkev.com:8080/ws
+              value: ws://apps.coolkev.com.:8080/ws
             - name: ENABLE_K8S_CONTROLLER
               value: 'true'
             - name: TEMPLATE_NAMESPACE
