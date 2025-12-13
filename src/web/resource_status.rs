@@ -10,6 +10,7 @@ use k8s_openapi::api::{
     networking::v1::Ingress as KIngress,
 };
 use maud::{html, Markup};
+use url;
 
 use chrono::Utc;
 use chrono_tz::America::New_York;
@@ -963,9 +964,10 @@ impl LiteResource {
                 })
                 .and_then(|o| o.metadata.uid.as_ref())
                 .map(|uid| {
+                    let encoded_ns: String = url::form_urlencoded::byte_serialize(self.namespace.as_bytes()).collect();
                     html! {
                         " · "
-                        a href=(format!("/resource-logs/{}", uid)) { "Logs" }
+                        a href=(format!("/resource-logs/{}?namespace={}", uid, encoded_ns)) { "Logs" }
                     }
                 })
         } else {

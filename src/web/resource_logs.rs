@@ -21,6 +21,37 @@ fn find_resource_by_uid<'a>(
         .find(|o| o.metadata.uid.as_deref() == Some(uid))
 }
 
+/// Find a resource by UID in a specific namespace
+async fn find_resource_by_uid_in_namespace(
+    client: &Client,
+    uid: &str,
+    namespace: &str,
+) -> AppResult<Option<(DynamicObject, Vec<DynamicObject>)>> {
+    let objs = list_namespace_objects(client, namespace, crate::kubernetes::api::ListMode::All).await?;
+    if let Some(obj) = find_resource_by_uid(uid, &objs) {
+        Ok(Some((obj.clone(), objs)))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Find a resource by UID by searching all namespaces (fallback)
+async fn find_resource_by_uid_all_namespaces(
+    client: &Client,
+    uid: &str,
+) -> AppResult<Option<(DynamicObject, Vec<DynamicObject>, String)>> {
+    let deploy_configs = crate::kubernetes::api::get_all_deploy_configs(client).await?;
+
+    for config in deploy_configs {
+        let ns = config.namespace().unwrap_or_else(|| "default".to_string());
+        if let Ok(Some((obj, objs))) = find_resource_by_uid_in_namespace(client, uid, &ns).await {
+            return Ok(Some((obj, objs, ns)));
+        }
+    }
+
+    Ok(None)
+}
+
 /// Get pods owned by a resource
 fn get_owned_pods<'a>(
     obj: &DynamicObject,
@@ -202,57 +233,57 @@ fn get_resource_info(obj: &DynamicObject) -> (String, String, String) {
     (name, namespace, kind.to_string())
 }
 
+#[derive(serde::Deserialize)]
+struct LogsQuery {
+    namespace: Option<String>,
+}
+
 /// Handler for the log page
 #[get("/resource-logs/{uid}")]
 pub async fn resource_logs_page(
     client: web::Data<Client>,
     _pool: web::Data<Pool<SqliteConnectionManager>>,
     path: web::Path<String>,
+    query: web::Query<LogsQuery>,
 ) -> impl Responder {
     let uid = path.into_inner();
 
-    // We need to find which namespace this resource is in
-    // For now, we'll search all namespaces (could be optimized)
-
-    // Get all deploy configs to find namespaces
-    let deploy_configs = match crate::kubernetes::api::get_all_deploy_configs(&client).await {
-        Ok(configs) => configs,
-        Err(e) => {
-            log::error!("Failed to get deploy configs: {}", e);
-            return HttpResponse::InternalServerError()
-                .content_type("text/html; charset=utf-8")
-                .body("Failed to fetch deploy configs");
-        }
-    };
-
-    // Try to find the resource by searching namespaces
-    let mut found_obj: Option<DynamicObject> = None;
-
-    for config in deploy_configs {
-        let ns = config.namespace().unwrap_or_else(|| "default".to_string());
-        match list_namespace_objects(&client, &ns, crate::kubernetes::api::ListMode::All).await {
-            Ok(objs) => {
-                if let Some(obj) = find_resource_by_uid(&uid, &objs) {
-                    found_obj = Some(obj.clone());
-                    break;
-                }
+    // Try to find the resource - use namespace from query if provided, otherwise search all
+    let (obj, namespace) = if let Some(ref ns) = query.namespace {
+        // Fast path: namespace provided in query parameter
+        match find_resource_by_uid_in_namespace(&client, &uid, ns).await {
+            Ok(Some((obj, _))) => (obj, ns.clone()),
+            Ok(None) => {
+                return HttpResponse::NotFound()
+                    .content_type("text/html; charset=utf-8")
+                    .body("Resource not found in specified namespace");
             }
             Err(e) => {
-                log::warn!("Failed to list objects in namespace {}: {}", ns, e);
+                log::error!("Failed to find resource in namespace {}: {}", ns, e);
+                return HttpResponse::InternalServerError()
+                    .content_type("text/html; charset=utf-8")
+                    .body("Failed to fetch resource");
             }
         }
-    }
-
-    let obj = match found_obj {
-        Some(o) => o,
-        None => {
-            return HttpResponse::NotFound()
-                .content_type("text/html; charset=utf-8")
-                .body("Resource not found");
+    } else {
+        // Fallback: search all namespaces
+        match find_resource_by_uid_all_namespaces(&client, &uid).await {
+            Ok(Some((obj, _, ns))) => (obj, ns),
+            Ok(None) => {
+                return HttpResponse::NotFound()
+                    .content_type("text/html; charset=utf-8")
+                    .body("Resource not found");
+            }
+            Err(e) => {
+                log::error!("Failed to search for resource: {}", e);
+                return HttpResponse::InternalServerError()
+                    .content_type("text/html; charset=utf-8")
+                    .body("Failed to search for resource");
+            }
         }
     };
 
-    let (name, namespace, kind) = get_resource_info(&obj);
+    let (name, _, kind) = get_resource_info(&obj);
 
     let markup = html! {
         (DOCTYPE)
@@ -272,11 +303,11 @@ pub async fn resource_logs_page(
                         div.subtitle {
                             "Namespace: " (namespace)
                             " · "
-                            a href=(format!("/resource-logs-download/{}", uid)) { "Download logs" }
+                            a href=(format!("/resource-logs-download/{}?namespace={}", uid, namespace)) { "Download logs" }
                         }
                     }
                     div.resource-logs__container
-                        hx-get=(format!("/resource-logs-fragment/{}", uid))
+                        hx-get=(format!("/resource-logs-fragment/{}?namespace={}", uid, namespace))
                         hx-trigger="load, every 2s"
                         hx-swap="morph:innerHTML" {
                         pre.resource-logs__content {
@@ -299,46 +330,42 @@ pub async fn resource_logs_fragment(
     client: web::Data<Client>,
     _pool: web::Data<Pool<SqliteConnectionManager>>,
     path: web::Path<String>,
+    query: web::Query<LogsQuery>,
 ) -> impl Responder {
     let uid = path.into_inner();
 
-    // Get all deploy configs to find namespaces
-    let deploy_configs = match crate::kubernetes::api::get_all_deploy_configs(&client).await {
-        Ok(configs) => configs,
-        Err(e) => {
-            log::error!("Failed to get deploy configs: {}", e);
-            return HttpResponse::InternalServerError()
-                .content_type("text/html; charset=utf-8")
-                .body(format!("Error: {}", format_error_chain(&e)));
-        }
-    };
-
-    // Try to find the resource by searching namespaces
-    let mut found_obj: Option<DynamicObject> = None;
-    let mut namespaced_objs: Vec<DynamicObject> = Vec::new();
-
-    for config in deploy_configs {
-        let ns = config.namespace().unwrap_or_else(|| "default".to_string());
-        match list_namespace_objects(&client, &ns, crate::kubernetes::api::ListMode::All).await {
-            Ok(objs) => {
-                if let Some(obj) = find_resource_by_uid(&uid, &objs) {
-                    found_obj = Some(obj.clone());
-                    namespaced_objs = objs;
-                    break;
-                }
+    // Try to find the resource - use namespace from query if provided, otherwise search all
+    let (obj, namespaced_objs) = if let Some(ref ns) = query.namespace {
+        // Fast path: namespace provided in query parameter
+        match find_resource_by_uid_in_namespace(&client, &uid, ns).await {
+            Ok(Some((obj, objs))) => (obj, objs),
+            Ok(None) => {
+                return HttpResponse::NotFound()
+                    .content_type("text/html; charset=utf-8")
+                    .body("Resource not found in specified namespace");
             }
             Err(e) => {
-                log::warn!("Failed to list objects in namespace {}: {}", ns, e);
+                log::error!("Failed to find resource in namespace {}: {}", ns, e);
+                return HttpResponse::InternalServerError()
+                    .content_type("text/html; charset=utf-8")
+                    .body(format!("Error: {}", format_error_chain(&e)));
             }
         }
-    }
-
-    let obj = match found_obj {
-        Some(o) => o,
-        None => {
-            return HttpResponse::NotFound()
-                .content_type("text/html; charset=utf-8")
-                .body("Resource not found");
+    } else {
+        // Fallback: search all namespaces
+        match find_resource_by_uid_all_namespaces(&client, &uid).await {
+            Ok(Some((obj, objs, _))) => (obj, objs),
+            Ok(None) => {
+                return HttpResponse::NotFound()
+                    .content_type("text/html; charset=utf-8")
+                    .body("Resource not found");
+            }
+            Err(e) => {
+                log::error!("Failed to search for resource: {}", e);
+                return HttpResponse::InternalServerError()
+                    .content_type("text/html; charset=utf-8")
+                    .body(format!("Error: {}", format_error_chain(&e)));
+            }
         }
     };
 
@@ -377,46 +404,42 @@ pub async fn resource_logs_download(
     client: web::Data<Client>,
     _pool: web::Data<Pool<SqliteConnectionManager>>,
     path: web::Path<String>,
+    query: web::Query<LogsQuery>,
 ) -> impl Responder {
     let uid = path.into_inner();
 
-    // Get all deploy configs to find namespaces
-    let deploy_configs = match crate::kubernetes::api::get_all_deploy_configs(&client).await {
-        Ok(configs) => configs,
-        Err(e) => {
-            log::error!("Failed to get deploy configs: {}", e);
-            return HttpResponse::InternalServerError()
-                .content_type("text/plain")
-                .body(format!("Error: {}", format_error_chain(&e)));
-        }
-    };
-
-    // Try to find the resource by searching namespaces
-    let mut found_obj: Option<DynamicObject> = None;
-    let mut namespaced_objs: Vec<DynamicObject> = Vec::new();
-
-    for config in deploy_configs {
-        let ns = config.namespace().unwrap_or_else(|| "default".to_string());
-        match list_namespace_objects(&client, &ns, crate::kubernetes::api::ListMode::All).await {
-            Ok(objs) => {
-                if let Some(obj) = find_resource_by_uid(&uid, &objs) {
-                    found_obj = Some(obj.clone());
-                    namespaced_objs = objs;
-                    break;
-                }
+    // Try to find the resource - use namespace from query if provided, otherwise search all
+    let (obj, namespaced_objs) = if let Some(ref ns) = query.namespace {
+        // Fast path: namespace provided in query parameter
+        match find_resource_by_uid_in_namespace(&client, &uid, ns).await {
+            Ok(Some((obj, objs))) => (obj, objs),
+            Ok(None) => {
+                return HttpResponse::NotFound()
+                    .content_type("text/plain")
+                    .body("Resource not found in specified namespace");
             }
             Err(e) => {
-                log::warn!("Failed to list objects in namespace {}: {}", ns, e);
+                log::error!("Failed to find resource in namespace {}: {}", ns, e);
+                return HttpResponse::InternalServerError()
+                    .content_type("text/plain")
+                    .body(format!("Error: {}", format_error_chain(&e)));
             }
         }
-    }
-
-    let obj = match found_obj {
-        Some(o) => o,
-        None => {
-            return HttpResponse::NotFound()
-                .content_type("text/plain")
-                .body("Resource not found");
+    } else {
+        // Fallback: search all namespaces
+        match find_resource_by_uid_all_namespaces(&client, &uid).await {
+            Ok(Some((obj, objs, _))) => (obj, objs),
+            Ok(None) => {
+                return HttpResponse::NotFound()
+                    .content_type("text/plain")
+                    .body("Resource not found");
+            }
+            Err(e) => {
+                log::error!("Failed to search for resource: {}", e);
+                return HttpResponse::InternalServerError()
+                    .content_type("text/plain")
+                    .body(format!("Error: {}", format_error_chain(&e)));
+            }
         }
     };
 
