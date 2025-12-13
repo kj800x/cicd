@@ -624,6 +624,90 @@ fn summarize_ingress_status_markup(ing: &KIngress) -> Option<Markup> {
     }
 }
 fn summarize_job_status_markup(job: &KJob) -> Option<Markup> {
+    // Check job status conditions first
+    if let Some(status) = job.status.as_ref() {
+        // Check for Failed condition (highest priority)
+        if let Some(conditions) = &status.conditions {
+            for condition in conditions {
+                if condition.type_ == "Failed" && condition.status == "True" {
+                    let reason = condition.reason.as_deref().unwrap_or("Failed");
+                    let message = condition.message.as_deref().unwrap_or("");
+                    let status_text = if !message.is_empty() {
+                        format!("Failed: {} - {}", reason, message)
+                    } else {
+                        format!("Failed: {}", reason)
+                    };
+                    return Some(render_state_span(&status_text, "error"));
+                }
+                // Check for FailureTarget condition
+                if condition.type_ == "FailureTarget" && condition.status == "True" {
+                    let reason = condition.reason.as_deref().unwrap_or("FailureTarget");
+                    let message = condition.message.as_deref().unwrap_or("");
+                    let status_text = if !message.is_empty() {
+                        format!("Failed: {} - {}", reason, message)
+                    } else {
+                        format!("Failed: {}", reason)
+                    };
+                    return Some(render_state_span(&status_text, "error"));
+                }
+                // Check for Complete condition
+                if condition.type_ == "Complete" && condition.status == "True" {
+                    if let Some(ts) = job.metadata.creation_timestamp.as_ref() {
+                        let ny_time = ts.0.with_timezone(&New_York);
+                        let formatted = ny_time.format("%b %-e %Y, %-I:%M %p").to_string();
+                        return Some(render_state_span(
+                            &format!("Completed {}", formatted),
+                            "neutral",
+                        ));
+                    } else {
+                        return Some(render_state_span("Completed", "neutral"));
+                    }
+                }
+            }
+        }
+
+        // Check failed count
+        if let Some(failed) = status.failed {
+            if failed > 0 {
+                return Some(render_state_span(
+                    &format!("Failed: {} pod(s)", failed),
+                    "error",
+                ));
+            }
+        }
+
+        // Check succeeded count
+        if let Some(succeeded) = status.succeeded {
+            if succeeded > 0 {
+                if let Some(ts) = job.metadata.creation_timestamp.as_ref() {
+                    let ny_time = ts.0.with_timezone(&New_York);
+                    let formatted = ny_time.format("%b %-e %Y, %-I:%M %p").to_string();
+                    return Some(render_state_span(
+                        &format!("Completed {}", formatted),
+                        "neutral",
+                    ));
+                } else {
+                    return Some(render_state_span("Completed", "neutral"));
+                }
+            }
+        }
+
+        // Check if job is still active
+        if status.active.is_some_and(|a| a > 0) {
+            if let Some(ts) = job.metadata.creation_timestamp.as_ref() {
+                let ny_time = ts.0.with_timezone(&New_York);
+                let formatted = ny_time.format("%b %-e %Y, %-I:%M %p").to_string();
+                return Some(render_state_span(
+                    &format!("Running {}", formatted),
+                    "neutral",
+                ));
+            } else {
+                return Some(render_state_span("Running", "neutral"));
+            }
+        }
+    }
+
+    // Fall back to "Enqueued" if no status information
     if let Some(ts) = job.metadata.creation_timestamp.as_ref() {
         let ny_time = ts.0.with_timezone(&New_York);
         let formatted = ny_time.format("%b %-e %Y, %-I:%M %p").to_string();
