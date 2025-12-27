@@ -65,3 +65,5 @@ spec:
           nfs:
             path: /data/services/cicd
             server: 10.60.1.15
+      nodeSelector:
+        dedicated: nas
