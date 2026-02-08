@@ -19,7 +19,7 @@ use kube::{
     ResourceExt,
 };
 use serde::de::DeserializeOwned;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::{
     error::{format_error_chain, AppError},
@@ -57,6 +57,25 @@ fn render_state_span_content(level: &str, inner: Markup) -> Markup {
         _ => html! {
             span.m-left-2.deployable-state.deployable-state--neutral { "(" (inner) ")" }
         },
+    }
+}
+
+#[derive(Clone)]
+pub struct ResourceStatus {
+    pub summary: String,
+    pub level: String,
+}
+
+impl ResourceStatus {
+    pub fn new(summary: impl Into<String>, level: impl Into<String>) -> Self {
+        Self {
+            summary: summary.into(),
+            level: level.into(),
+        }
+    }
+
+    pub fn to_markup(&self) -> Markup {
+        render_state_span(&self.summary, &self.level)
     }
 }
 
@@ -108,7 +127,7 @@ fn format_duration(seconds: i64) -> String {
     }
 }
 
-fn summarize_deployment_status_markup(deployment: &Deployment) -> Option<Markup> {
+fn summarize_deployment_status(deployment: &Deployment) -> Option<ResourceStatus> {
     let spec_replicas = deployment
         .spec
         .as_ref()
@@ -133,8 +152,8 @@ fn summarize_deployment_status_markup(deployment: &Deployment) -> Option<Markup>
                     .reason
                     .clone()
                     .unwrap_or_else(|| "Not progressing".to_string());
-                return Some(render_state_span(
-                    &format!("{} ({} ready / {})", reason, ready, spec_replicas),
+                return Some(ResourceStatus::new(
+                    format!("{} ({} ready / {})", reason, ready, spec_replicas),
                     "error",
                 ));
             }
@@ -144,8 +163,8 @@ fn summarize_deployment_status_markup(deployment: &Deployment) -> Option<Markup>
                     .reason
                     .clone()
                     .unwrap_or_else(|| "Replica failure".to_string());
-                return Some(render_state_span(
-                    &format!("{} ({} ready / {})", reason, ready, spec_replicas),
+                return Some(ResourceStatus::new(
+                    format!("{} ({} ready / {})", reason, ready, spec_replicas),
                     "error",
                 ));
             }
@@ -154,37 +173,37 @@ fn summarize_deployment_status_markup(deployment: &Deployment) -> Option<Markup>
 
     // Reconciling a new generation
     if observed_generation < desired_generation {
-        return Some(render_state_span(
-            &format!("Reconciling ({} ready / {})", ready, spec_replicas),
+        return Some(ResourceStatus::new(
+            format!("Reconciling ({} ready / {})", ready, spec_replicas),
             "warn",
         ));
     }
 
     // Mid-rollout / updating
     if updated < spec_replicas {
-        return Some(render_state_span(
-            &format!("Updating {} / {}", updated, spec_replicas),
+        return Some(ResourceStatus::new(
+            format!("Updating {} / {}", updated, spec_replicas),
             "warn",
         ));
     }
 
     // Waiting for pods to become ready
     if ready < spec_replicas {
-        return Some(render_state_span(
-            &format!("Waiting {} / {}", ready, spec_replicas),
+        return Some(ResourceStatus::new(
+            format!("Waiting {} / {}", ready, spec_replicas),
             "warn",
         ));
     }
 
     if unavailable > 0 {
-        return Some(render_state_span(
-            &format!("Unavailable {}", unavailable),
+        return Some(ResourceStatus::new(
+            format!("Unavailable {}", unavailable),
             "warn",
         ));
     }
 
-    Some(render_state_span(
-        &format!("Ready {} / {}", ready, spec_replicas),
+    Some(ResourceStatus::new(
+        format!("Ready {} / {}", ready, spec_replicas),
         "neutral",
     ))
 }
@@ -214,10 +233,10 @@ fn priority_for_reason(reason: &str) -> i32 {
     }
 }
 
-fn summarize_pod_status_markup(pod: &Pod) -> Option<Markup> {
+fn summarize_pod_status(pod: &Pod) -> Option<ResourceStatus> {
     // Pod-level terminal states first
     if pod.metadata.deletion_timestamp.is_some() {
-        return Some(render_state_span("Terminating", "warn"));
+        return Some(ResourceStatus::new("Terminating", "warn"));
     }
 
     let status = pod.status.as_ref()?;
@@ -249,12 +268,12 @@ fn summarize_pod_status_markup(pod: &Pod) -> Option<Markup> {
         } else {
             "Completed".to_string()
         };
-        return Some(render_state_span(&status_text, "neutral"));
+        return Some(ResourceStatus::new(status_text, "neutral"));
     }
 
     if let Some(r) = &status.reason {
         if r == "Evicted" {
-            return Some(render_state_span("Evicted", "error"));
+            return Some(ResourceStatus::new("Evicted", "error"));
         }
     }
 
@@ -268,7 +287,7 @@ fn summarize_pod_status_markup(pod: &Pod) -> Option<Markup> {
                 .reason
                 .clone()
                 .unwrap_or_else(|| "Unschedulable".to_string());
-            return Some(render_state_span(&reason, "warn"));
+            return Some(ResourceStatus::new(reason, "warn"));
         }
     }
 
@@ -381,7 +400,7 @@ fn summarize_pod_status_markup(pod: &Pod) -> Option<Markup> {
         } else {
             "neutral"
         };
-        return Some(render_state_span(&best.label, level));
+        return Some(ResourceStatus::new(best.label, level));
     }
 
     // Fall back to Pod phase if present
@@ -435,33 +454,32 @@ fn summarize_pod_status_markup(pod: &Pod) -> Option<Markup> {
             phase.clone()
         };
 
-        return Some(render_state_span(&status_text, level));
+        return Some(ResourceStatus::new(status_text, level));
     }
 
-    Some(render_state_span("Unknown", "warn"))
+    Some(ResourceStatus::new("Unknown", "warn"))
 }
 
-fn summarize_replicaset_status_markup(rs: &KReplicaSet) -> Option<Markup> {
+fn summarize_replicaset_status(rs: &KReplicaSet) -> Option<ResourceStatus> {
     let desired = rs.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1);
     let status = rs.status.as_ref();
     let ready = status.and_then(|s| s.ready_replicas).unwrap_or(0);
-    // Grey out when scaled to zero
     if desired == 0 {
-        return Some(render_state_span("0 / 0", "muted"));
+        return Some(ResourceStatus::new("0 / 0", "muted"));
     }
     if ready < desired {
-        return Some(render_state_span(
-            &format!("{} / {}", ready, desired),
+        return Some(ResourceStatus::new(
+            format!("{} / {}", ready, desired),
             "warn",
         ));
     }
-    Some(render_state_span(
-        &format!("{} / {}", ready, desired),
+    Some(ResourceStatus::new(
+        format!("{} / {}", ready, desired),
         "neutral",
     ))
 }
 
-fn summarize_service_status_markup(svc: &KService) -> Option<Markup> {
+fn summarize_service_status(svc: &KService) -> Option<ResourceStatus> {
     let spec = svc.spec.as_ref()?;
     let svc_type = spec
         .type_
@@ -476,7 +494,7 @@ fn summarize_service_status_markup(svc: &KService) -> Option<Markup> {
                 .and_then(|lb| lb.ingress.as_ref());
             if let Some(entries) = ing {
                 if entries.is_empty() {
-                    Some(render_state_span("LB: pending", "warn"))
+                    Some(ResourceStatus::new("LB: pending", "warn"))
                 } else {
                     let addrs: Vec<String> = entries
                         .iter()
@@ -487,13 +505,13 @@ fn summarize_service_status_markup(svc: &KService) -> Option<Markup> {
                                 .unwrap_or_else(|| "-".to_string())
                         })
                         .collect();
-                    Some(render_state_span(
-                        &format!("LB: {}", addrs.join(", ")),
+                    Some(ResourceStatus::new(
+                        format!("LB: {}", addrs.join(", ")),
                         "neutral",
                     ))
                 }
             } else {
-                Some(render_state_span("LB: pending", "warn"))
+                Some(ResourceStatus::new("LB: pending", "warn"))
             }
         }
         "NodePort" => {
@@ -503,15 +521,15 @@ fn summarize_service_status_markup(svc: &KService) -> Option<Markup> {
                     .filter_map(|p| p.node_port.map(|np| np.to_string()))
                     .collect();
                 if nodes.is_empty() {
-                    Some(render_state_span("NodePort", "warn"))
+                    Some(ResourceStatus::new("NodePort", "warn"))
                 } else {
-                    Some(render_state_span(
-                        &format!("NodePort: {}", nodes.join(",")),
+                    Some(ResourceStatus::new(
+                        format!("NodePort: {}", nodes.join(",")),
                         "neutral",
                     ))
                 }
             } else {
-                Some(render_state_span("NodePort", "warn"))
+                Some(ResourceStatus::new("NodePort", "warn"))
             }
         }
         "ExternalName" => {
@@ -519,8 +537,8 @@ fn summarize_service_status_markup(svc: &KService) -> Option<Markup> {
                 .external_name
                 .clone()
                 .unwrap_or_else(|| "-".to_string());
-            Some(render_state_span(
-                &format!("ExternalName: {}", name),
+            Some(ResourceStatus::new(
+                format!("ExternalName: {}", name),
                 "neutral",
             ))
         }
@@ -529,15 +547,82 @@ fn summarize_service_status_markup(svc: &KService) -> Option<Markup> {
             let cip = spec.cluster_ip.clone();
             if let Some(ci) = cip {
                 if ci == "None" {
-                    Some(render_state_span("Headless", "neutral"))
+                    Some(ResourceStatus::new("Headless", "neutral"))
                 } else {
-                    Some(render_state_span(&format!("ClusterIP: {}", ci), "neutral"))
+                    Some(ResourceStatus::new(
+                        format!("ClusterIP: {}", ci),
+                        "neutral",
+                    ))
                 }
             } else {
-                Some(render_state_span("ClusterIP: -", "warn"))
+                Some(ResourceStatus::new("ClusterIP: -", "warn"))
             }
         }
     }
+}
+
+fn summarize_ingress_status(ing: &KIngress) -> Option<ResourceStatus> {
+    fn extract_external_dns_hostname(ing: &KIngress) -> Option<String> {
+        let anns = ing.metadata.annotations.as_ref()?;
+        let value = anns.get("external-dns.alpha.kubernetes.io/hostname")?;
+        let first = value.split(',').next().map(|s| s.trim().to_string())?;
+        if first.is_empty() {
+            None
+        } else {
+            Some(first)
+        }
+    }
+
+    let ext_host = extract_external_dns_hostname(ing);
+    let lb_ing = ing
+        .status
+        .as_ref()
+        .and_then(|s| s.load_balancer.as_ref())
+        .and_then(|lb| lb.ingress.as_ref());
+
+    if let Some(entries) = lb_ing {
+        if entries.is_empty() {
+            let summary = match &ext_host {
+                Some(host) => format!("LB: pending · {}", host),
+                None => "LB: pending".to_string(),
+            };
+            return Some(ResourceStatus::new(summary, "warn"));
+        }
+        let addrs: Vec<String> = entries
+            .iter()
+            .map(|e| {
+                e.hostname
+                    .clone()
+                    .or(e.ip.clone())
+                    .unwrap_or_else(|| "-".to_string())
+            })
+            .collect();
+        let summary = match &ext_host {
+            Some(host) => format!("LB: {} · {}", addrs.join(", "), host),
+            None => format!("LB: {}", addrs.join(", ")),
+        };
+        return Some(ResourceStatus::new(summary, "neutral"));
+    }
+
+    let rules_len = ing
+        .spec
+        .as_ref()
+        .and_then(|s| s.rules.as_ref())
+        .map(|r| r.len())
+        .unwrap_or(0);
+    if rules_len > 0 {
+        let summary = match &ext_host {
+            Some(host) => format!("LB: pending · {}", host),
+            None => "LB: pending".to_string(),
+        };
+        return Some(ResourceStatus::new(summary, "warn"));
+    }
+
+    let summary = match &ext_host {
+        Some(host) => format!("Ingress · {}", host),
+        None => "Ingress".to_string(),
+    };
+    Some(ResourceStatus::new(summary, "neutral"))
 }
 
 fn summarize_ingress_status_markup(ing: &KIngress) -> Option<Markup> {
@@ -624,10 +709,8 @@ fn summarize_ingress_status_markup(ing: &KIngress) -> Option<Markup> {
         Some(render_state_span("Ingress", "neutral"))
     }
 }
-fn summarize_job_status_markup(job: &KJob) -> Option<Markup> {
-    // Check job status conditions first
+fn summarize_job_status(job: &KJob) -> Option<ResourceStatus> {
     if let Some(status) = job.status.as_ref() {
-        // Check for Failed condition (highest priority)
         if let Some(conditions) = &status.conditions {
             for condition in conditions {
                 if condition.type_ == "Failed" && condition.status == "True" {
@@ -638,9 +721,8 @@ fn summarize_job_status_markup(job: &KJob) -> Option<Markup> {
                     } else {
                         format!("Failed: {}", reason)
                     };
-                    return Some(render_state_span(&status_text, "error"));
+                    return Some(ResourceStatus::new(status_text, "error"));
                 }
-                // Check for FailureTarget condition
                 if condition.type_ == "FailureTarget" && condition.status == "True" {
                     let reason = condition.reason.as_deref().unwrap_or("FailureTarget");
                     let message = condition.message.as_deref().unwrap_or("");
@@ -649,77 +731,73 @@ fn summarize_job_status_markup(job: &KJob) -> Option<Markup> {
                     } else {
                         format!("Failed: {}", reason)
                     };
-                    return Some(render_state_span(&status_text, "error"));
+                    return Some(ResourceStatus::new(status_text, "error"));
                 }
-                // Check for Complete condition
                 if condition.type_ == "Complete" && condition.status == "True" {
                     if let Some(ts) = job.metadata.creation_timestamp.as_ref() {
                         let ny_time = ts.0.with_timezone(&New_York);
                         let formatted = ny_time.format("%b %-e %Y, %-I:%M %p").to_string();
-                        return Some(render_state_span(
-                            &format!("Completed {}", formatted),
+                        return Some(ResourceStatus::new(
+                            format!("Completed {}", formatted),
                             "neutral",
                         ));
                     } else {
-                        return Some(render_state_span("Completed", "neutral"));
+                        return Some(ResourceStatus::new("Completed", "neutral"));
                     }
                 }
             }
         }
 
-        // Check failed count
         if let Some(failed) = status.failed {
             if failed > 0 {
-                return Some(render_state_span(
-                    &format!("Failed: {} pod(s)", failed),
+                return Some(ResourceStatus::new(
+                    format!("Failed: {} pod(s)", failed),
                     "error",
                 ));
             }
         }
 
-        // Check succeeded count
         if let Some(succeeded) = status.succeeded {
             if succeeded > 0 {
                 if let Some(ts) = job.metadata.creation_timestamp.as_ref() {
                     let ny_time = ts.0.with_timezone(&New_York);
                     let formatted = ny_time.format("%b %-e %Y, %-I:%M %p").to_string();
-                    return Some(render_state_span(
-                        &format!("Completed {}", formatted),
+                    return Some(ResourceStatus::new(
+                        format!("Completed {}", formatted),
                         "neutral",
                     ));
                 } else {
-                    return Some(render_state_span("Completed", "neutral"));
+                    return Some(ResourceStatus::new("Completed", "neutral"));
                 }
             }
         }
 
-        // Check if job is still active
         if status.active.is_some_and(|a| a > 0) {
             if let Some(ts) = job.metadata.creation_timestamp.as_ref() {
                 let ny_time = ts.0.with_timezone(&New_York);
                 let formatted = ny_time.format("%b %-e %Y, %-I:%M %p").to_string();
-                return Some(render_state_span(
-                    &format!("Running {}", formatted),
+                return Some(ResourceStatus::new(
+                    format!("Running {}", formatted),
                     "neutral",
                 ));
             } else {
-                return Some(render_state_span("Running", "neutral"));
+                return Some(ResourceStatus::new("Running", "neutral"));
             }
         }
     }
 
-    // Fall back to "Enqueued" if no status information
     if let Some(ts) = job.metadata.creation_timestamp.as_ref() {
         let ny_time = ts.0.with_timezone(&New_York);
         let formatted = ny_time.format("%b %-e %Y, %-I:%M %p").to_string();
-        Some(render_state_span(
-            &format!("Enqueued {}", formatted),
+        Some(ResourceStatus::new(
+            format!("Enqueued {}", formatted),
             "neutral",
         ))
     } else {
-        Some(render_state_span("Enqueued -", "warn"))
+        Some(ResourceStatus::new("Enqueued -", "warn"))
     }
 }
+
 pub fn from_dynamic_object<T: DeserializeOwned>(obj: &DynamicObject) -> Result<T, AppError> {
     let value: Value = serde_json::to_value(obj)
         .map_err(|e| AppError::Internal(format!("Failed to serialize DynamicObject: {}", e)))?;
@@ -816,49 +894,48 @@ impl TryInto<GroupVersionKind> for &HandledResourceKind {
 }
 
 impl HandledResourceKind {
-    #[allow(clippy::expect_used)]
-    pub fn format_status(&self, obj: &DynamicObject) -> Markup {
+    pub fn resource_status(&self, obj: &DynamicObject) -> Option<ResourceStatus> {
         match self {
             HandledResourceKind::Deployment => {
-                let deployment = from_dynamic_object::<Deployment>(obj)
-                    .expect("Failed to deserialize Deployment");
-                let markup = summarize_deployment_status_markup(&deployment);
-                match markup {
-                    Some(m) => m,
-                    None => html! { "" },
-                }
+                let deployment = from_dynamic_object::<Deployment>(obj).ok()?;
+                summarize_deployment_status(&deployment)
             }
             HandledResourceKind::ReplicaSet => {
-                let rs = from_dynamic_object::<KReplicaSet>(obj)
-                    .expect("Failed to deserialize ReplicaSet");
-                summarize_replicaset_status_markup(&rs).unwrap_or_else(|| html! { "" })
+                let rs = from_dynamic_object::<KReplicaSet>(obj).ok()?;
+                summarize_replicaset_status(&rs)
             }
             HandledResourceKind::Pod => {
-                let pod = from_dynamic_object::<Pod>(obj).expect("Failed to deserialize Pod");
-
-                let markup = summarize_pod_status_markup(&pod);
-                match markup {
-                    Some(m) => m,
-                    None => html! { "" },
-                }
+                let pod = from_dynamic_object::<Pod>(obj).ok()?;
+                summarize_pod_status(&pod)
             }
             HandledResourceKind::Ingress => {
-                let ing =
-                    from_dynamic_object::<KIngress>(obj).expect("Failed to deserialize Ingress");
-                summarize_ingress_status_markup(&ing).unwrap_or_else(|| html! { "" })
+                let ing = from_dynamic_object::<KIngress>(obj).ok()?;
+                summarize_ingress_status(&ing)
             }
             HandledResourceKind::Service => {
-                let svc =
-                    from_dynamic_object::<KService>(obj).expect("Failed to deserialize Service");
-                summarize_service_status_markup(&svc).unwrap_or_else(|| html! { "" })
+                let svc = from_dynamic_object::<KService>(obj).ok()?;
+                summarize_service_status(&svc)
             }
             HandledResourceKind::Job => {
-                let job = from_dynamic_object::<KJob>(obj).expect("Failed to deserialize Job");
-                summarize_job_status_markup(&job).unwrap_or_else(|| html! { "" })
+                let job = from_dynamic_object::<KJob>(obj).ok()?;
+                summarize_job_status(&job)
             }
-            HandledResourceKind::CronJob => html! { "" }, // CronJobs don't have status markup yet
-            HandledResourceKind::Other(_) => html! { "" },
+            HandledResourceKind::CronJob | HandledResourceKind::Other(_) => None,
         }
+    }
+
+    #[allow(clippy::expect_used)]
+    pub fn format_status(&self, obj: &DynamicObject) -> Markup {
+        // Ingress needs special HTML rendering for links
+        if matches!(self, HandledResourceKind::Ingress) {
+            let ing =
+                from_dynamic_object::<KIngress>(obj).expect("Failed to deserialize Ingress");
+            return summarize_ingress_status_markup(&ing).unwrap_or_else(|| html! { "" });
+        }
+
+        self.resource_status(obj)
+            .map(|s| s.to_markup())
+            .unwrap_or_else(|| html! { "" })
     }
 }
 
@@ -1045,6 +1122,33 @@ impl LiteResource {
     fn format(&self, namespaced_objs: &[DynamicObject]) -> Markup {
         self.format_with_muted(namespaced_objs, false)
     }
+
+    fn self_status(&self, namespaced_objs: &[DynamicObject]) -> Option<ResourceStatus> {
+        let obj = namespaced_objs.iter().find(|o| {
+            o.name_any() == self.name
+                && o.namespace().as_deref() == Some(&self.namespace)
+                && o.types.as_ref().map(|t| t.kind.as_str()) == Some(&self.kind.to_string())
+        })?;
+
+        self.kind.resource_status(obj)
+    }
+
+    fn to_json(&self, namespaced_objs: &[DynamicObject]) -> Value {
+        let status = self.self_status(namespaced_objs);
+        let children: Vec<Value> = self
+            .children(namespaced_objs)
+            .iter()
+            .map(|c| c.to_json(namespaced_objs))
+            .collect();
+
+        json!({
+            "kind": self.kind.to_string(),
+            "name": self.name,
+            "status_summary": status.as_ref().map(|s| &s.summary),
+            "status_level": status.as_ref().map(|s| &s.level),
+            "children": children,
+        })
+    }
 }
 
 impl TryFrom<&serde_json::Value> for LiteResource {
@@ -1093,6 +1197,7 @@ impl TryFrom<&DynamicObject> for LiteResource {
 
 pub trait ResourceStatuses {
     async fn format_resources(&self, namespaced_objs: &[DynamicObject]) -> Markup;
+    fn format_resources_json(&self, namespaced_objs: &[DynamicObject]) -> Vec<Value>;
 }
 
 impl ResourceStatuses for DeployConfig {
@@ -1113,5 +1218,13 @@ impl ResourceStatuses for DeployConfig {
                 }
             }
         }
+    }
+
+    fn format_resources_json(&self, namespaced_objs: &[DynamicObject]) -> Vec<Value> {
+        self.resource_specs()
+            .iter()
+            .filter_map(|spec| LiteResource::try_from(spec).ok())
+            .map(|r| r.to_json(namespaced_objs))
+            .collect()
     }
 }

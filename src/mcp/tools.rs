@@ -8,9 +8,10 @@ use crate::crab_ext::Octocrabs;
 use crate::db::deploy_event::DeployEvent;
 use crate::db::git_branch::GitBranch;
 use crate::db::git_repo::GitRepo;
-use crate::kubernetes::api::{get_all_deploy_configs, get_deploy_config};
+use crate::kubernetes::api::{get_all_deploy_configs, get_deploy_config, list_namespace_objects, ListMode};
 use crate::kubernetes::deploy_handlers::DeployAction;
 use crate::kubernetes::repo::DeploymentState;
+use crate::web::ResourceStatuses;
 use crate::web::Action;
 
 use super::protocol::{Tool, ToolCallResult};
@@ -28,7 +29,7 @@ pub fn tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "get_deploy_config".to_string(),
-            description: "Get details of a single deploy config by name".to_string(),
+            description: "Get details of a single deploy config by name, including resource statuses (deployments, pods, services, ingresses, jobs)".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -238,10 +239,20 @@ async fn handle_get_deploy_config(
 
     let artifact_repo = config.artifact_repository();
     let config_repo = config.config_repository();
+    let namespace = config.namespace().unwrap_or_else(|| "default".to_string());
+
+    let namespaced_objs = match list_namespace_objects(client, &namespace, ListMode::All).await {
+        Ok(objs) => objs,
+        Err(e) => {
+            log::warn!("Failed to list namespace objects for {}: {}", namespace, e);
+            vec![]
+        }
+    };
+    let resources = config.format_resources_json(&namespaced_objs);
 
     let result = json!({
         "name": config.name_any(),
-        "namespace": config.namespace().unwrap_or_else(|| "default".to_string()),
+        "namespace": namespace,
         "team": config.team(),
         "kind": config.kind(),
         "state": state,
@@ -256,6 +267,7 @@ async fn handle_get_deploy_config(
         "artifact_branch": artifact_branch,
         "config_sha": config_sha,
         "config_branch": config_branch,
+        "resources": resources,
     });
 
     ToolCallResult::text(serde_json::to_string_pretty(&result).unwrap_or_default())
