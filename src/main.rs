@@ -34,6 +34,7 @@ mod crab_ext;
 mod db;
 mod error;
 mod kubernetes;
+mod mcp;
 mod web;
 mod webhooks;
 use crate::crab_ext::{initialize_octocrabs, Octocrabs};
@@ -82,6 +83,7 @@ async fn start_http(
             app = app
                 .app_data(Data::new(client.clone()))
                 .service(deploy_config)
+                .route("/mcp", actix_web::web::post().to(mcp::handle_mcp))
         }
 
         app.wrap(RequestTracing::new())
