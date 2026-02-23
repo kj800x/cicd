@@ -6,6 +6,7 @@ pub mod config_sync;
 pub mod database;
 pub mod log;
 pub mod manager;
+pub mod metrics;
 pub mod models;
 pub mod util;
 

@@ -40,6 +40,26 @@ pub enum DeployAction {
 }
 
 impl DeployAction {
+    pub fn config_name(&self) -> &str {
+        match self {
+            DeployAction::Bounce { name } => name,
+            DeployAction::ExecuteJob { name } => name,
+            DeployAction::Deploy { name, .. } => name,
+            DeployAction::Undeploy { name } => name,
+            DeployAction::ToggleAutodeploy { name } => name,
+        }
+    }
+
+    pub fn action_type(&self) -> &'static str {
+        match self {
+            DeployAction::Bounce { .. } => "bounce",
+            DeployAction::ExecuteJob { .. } => "execute_job",
+            DeployAction::Deploy { .. } => "deploy",
+            DeployAction::Undeploy { .. } => "undeploy",
+            DeployAction::ToggleAutodeploy { .. } => "toggle_autodeploy",
+        }
+    }
+
     // KNOWN LIMITATION: Changing a DeployConfig's namespace is not supported.
     // The deploy operation applies resources to the namespace in the current config,
     // not the new namespace specified in the updated .deploy/*.yaml file.

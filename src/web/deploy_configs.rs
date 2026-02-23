@@ -1246,11 +1246,30 @@ pub async fn deploy_config(
         Ok(()) => (),
         Err(e) => {
             log::error!("Failed to execute deploy action: {}", e);
+            crate::metrics::get().deploy_actions.add(
+                1,
+                &[
+                    opentelemetry::KeyValue::new(
+                        "name",
+                        deploy_action.config_name().to_string(),
+                    ),
+                    opentelemetry::KeyValue::new("action", deploy_action.action_type()),
+                    opentelemetry::KeyValue::new("result", "error"),
+                ],
+            );
             return HttpResponse::InternalServerError()
                 .content_type("text/html; charset=utf-8")
                 .body("Failed to execute deploy action");
         }
     }
+    crate::metrics::get().deploy_actions.add(
+        1,
+        &[
+            opentelemetry::KeyValue::new("name", deploy_action.config_name().to_string()),
+            opentelemetry::KeyValue::new("action", deploy_action.action_type()),
+            opentelemetry::KeyValue::new("result", "success"),
+        ],
+    );
 
     let Ok(maybe_deploy_event) =
         DeployEvent::from_user_deploy_action(&deploy_action, &conn, &config)

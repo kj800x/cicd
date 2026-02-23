@@ -35,6 +35,7 @@ mod db;
 mod error;
 mod kubernetes;
 mod mcp;
+mod metrics;
 mod web;
 mod webhooks;
 use crate::crab_ext::{initialize_octocrabs, Octocrabs};
@@ -45,6 +46,7 @@ use crate::web::{branch_grid_fragment, build_grid_fragment, deploy_configs, depl
 use crate::webhooks::config_sync::ConfigSyncHandler;
 use crate::webhooks::database::DatabaseHandler;
 use crate::webhooks::manager::WebhookManager;
+use crate::webhooks::metrics::MetricsHandler;
 use cicd::serve_static_file;
 use web::{
     all_recent_builds, bootstrap, deploy_config, deploy_history, deploy_history_index, index,
@@ -137,6 +139,25 @@ async fn start_http(
     .await
 }
 
+async fn poll_github_rate_limits(octocrabs: Octocrabs) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+    loop {
+        interval.tick().await;
+        for (idx, crab) in octocrabs.iter().enumerate() {
+            let label = (idx + 1).to_string();
+            if let Ok(rate_info) = crab.ratelimit().get().await {
+                let m = metrics::get();
+                m.github_rate_limit_remaining
+                    .with_label_values(&[&label])
+                    .set(rate_info.resources.core.remaining as i64);
+                m.github_rate_limit_limit
+                    .with_label_values(&[&label])
+                    .set(rate_info.resources.core.limit as i64);
+            }
+        }
+    }
+}
+
 async fn start_kubernetes_controller(
     pool: Pool<SqliteConnectionManager>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -175,6 +196,7 @@ async fn main() -> std::io::Result<()> {
         .expect("Failed to build OpenTelemetry Prometheus exporter");
     let provider = MeterProvider::builder().with_reader(exporter).build();
     global::set_meter_provider(provider);
+    metrics::init(&registry).expect("Failed to initialize metrics");
 
     // connect to SQLite DB
     let manager = SqliteConnectionManager::file(
@@ -203,6 +225,7 @@ async fn main() -> std::io::Result<()> {
         std::env::var("CLIENT_SECRET").expect("CLIENT_SECRET must be set"),
     );
     webhook_manager.add_handler(DatabaseHandler::new(pool.clone(), octocrabs.clone()));
+    webhook_manager.add_handler(MetricsHandler::new(pool.clone()));
     webhook_manager.add_handler(ConfigSyncHandler::new(
         pool.clone(),
         client.clone(),
@@ -218,7 +241,8 @@ async fn main() -> std::io::Result<()> {
         _ = Box::pin(webhook_manager.start()) => {},
         _ = Box::pin(start_kubernetes_controller(
             pool.clone()
-        )) => {}
+        )) => {},
+        _ = Box::pin(poll_github_rate_limits(octocrabs.clone())) => {},
     };
 
     Ok(())
