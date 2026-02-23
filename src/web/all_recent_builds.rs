@@ -18,6 +18,17 @@ fn render_build_rows(builds: &Vec<BuildRow>) -> Markup {
     html! {
         @for (commit, repo, branches, build_status, __parent_commits) in builds {
             @let status: crate::build_status::BuildStatus = build_status.clone().into();
+            @let build_duration: Option<(String, bool)> = {
+                let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+                match build_status {
+                    Some(b) => match (b.start_time, b.settle_time) {
+                        (Some(start), Some(settle)) => Some((formatting::format_duration_ms(settle.saturating_sub(start)), false)),
+                        (Some(start), None) => Some((formatting::format_duration_ms(now_ms.saturating_sub(start)), true)),
+                        _ => None,
+                    },
+                    None => None,
+                }
+            };
             tr class=(format!("build-row {}", build_status_helpers::build_status_bg_class(&status))) {
                 td class="status-cell" {
                     div class=(format!("status-indicator {}", build_status_helpers::build_status_class(&status))) {}
@@ -42,6 +53,13 @@ fn render_build_rows(builds: &Vec<BuildRow>) -> Markup {
                 }
                 td class="time-cell" {
                     (formatting::format_relative_time(commit.timestamp))
+                }
+                td class="duration-cell" {
+                    @match &build_duration {
+                        Some((dur, true)) => span class="duration-ongoing" title="Build in progress" { (dur) "…" },
+                        Some((dur, false)) => span { (dur) },
+                        None => span class="no-status" { "—" },
+                    }
                 }
                 td class="links-cell" {
                     a href=(format!("https://github.com/{}/{}/commit/{}", repo.owner_name, repo.name, commit.sha))
@@ -116,6 +134,7 @@ pub fn render_build_grid_fragment(
                         th class="col-branch" { "Branch" }
                         th class="col-message" { "Message" }
                         th class="col-time" { "Time" }
+                        th class="col-duration" { "Build time" }
                         th class="col-links" { "" }
                     }
                 }

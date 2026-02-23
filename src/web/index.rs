@@ -14,6 +14,18 @@ fn render_branch_rows(
             @let latest_commit = data.commits.first();
             @if let Some(commit) = latest_commit {
                 @let build_status = commit.get_build_status(conn).unwrap_or_default();
+                @let build_url = build_status.as_ref().map(|x| x.url.clone());
+                @let build_duration: Option<(String, bool)> = {
+                    let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+                    match &build_status {
+                        Some(b) => match (b.start_time, b.settle_time) {
+                            (Some(start), Some(settle)) => Some((formatting::format_duration_ms(settle.saturating_sub(start)), false)),
+                            (Some(start), None) => Some((formatting::format_duration_ms(now_ms.saturating_sub(start)), true)),
+                            _ => None,
+                        },
+                        None => None,
+                    }
+                };
                 tr class=(format!("branch-row {}", build_status_helpers::build_status_bg_class(&build_status.clone().into()))) {
                     td class="status-cell" {
                         div class=(format!("status-indicator {}", build_status_helpers::build_status_class(&build_status.clone().into()))) {}
@@ -38,6 +50,13 @@ fn render_branch_rows(
                             }
                         }
                     }
+                    td class="duration-cell" {
+                        @match &build_duration {
+                            Some((dur, true)) => span class="duration-ongoing" title="Build in progress" { (dur) "…" },
+                            Some((dur, false)) => span { (dur) },
+                            None => span class="no-status" { "—" },
+                        }
+                    }
                     td class="message-cell" {
                         span class="message-text" title=(commit.message.clone()) {
                             (formatting::truncate_message(&commit.message, 70))
@@ -53,7 +72,7 @@ fn render_branch_rows(
                             title="View branch" {
                             i class="fa fa-external-link" {}
                         }
-                        @if let Some(url) = &build_status.map(|x| x.url) {
+                        @if let Some(ref url) = build_url {
                             a href=(url) target="_blank" class="link-icon" title="Build logs" {
                                 i class="fa fa-file-text-o" {}
                             }
@@ -107,6 +126,7 @@ pub fn render_branch_grid_fragment(
                         th class="col-repo" { "Repo" }
                         th class="col-branch" { "Branch" }
                         th class="col-latest" { "Latest Build" }
+                        th class="col-duration" { "Build time" }
                         th class="col-message" { "Latest Commit" }
                         th class="col-time" { "Updated" }
                         th class="col-links" { "" }

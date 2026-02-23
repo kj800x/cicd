@@ -29,6 +29,22 @@ pub fn format_short_sha(sha: &str) -> &str {
     }
 }
 
+/// Format a duration in milliseconds as a compact human-readable string (e.g. "4m 23s", "1h 5m")
+pub fn format_duration_ms(ms: u64) -> String {
+    let total_secs = ms / 1000;
+    let hours = total_secs / 3600;
+    let minutes = (total_secs % 3600) / 60;
+    let secs = total_secs % 60;
+
+    if hours > 0 {
+        format!("{}h {}m", hours, minutes)
+    } else if minutes > 0 {
+        format!("{}m {}s", minutes, secs)
+    } else {
+        format!("{}s", secs)
+    }
+}
+
 /// Truncate a message to a maximum length
 pub fn truncate_message(message: &str, max_length: usize) -> String {
     if message.len() <= max_length {

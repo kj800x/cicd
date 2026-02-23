@@ -2,7 +2,7 @@
 
 use crate::{
     build_status::BuildStatus,
-    db::{git_commit::GitCommit, git_repo::GitRepo},
+    db::{git_commit::GitCommit, git_commit_build::GitCommitBuild, git_repo::GitRepo},
     kubernetes::{
         api::{get_deploy_config, ListMode},
         list_namespace_objects, DeployConfig,
@@ -306,6 +306,19 @@ pub async fn build_status(
     let git_commit_build = commit.get_build_status(conn).ok().flatten();
     let build_status: BuildStatus = git_commit_build.clone().into();
 
+    let build_url = git_commit_build.as_ref().map(|x| x.url.clone());
+    let build_start_time = git_commit_build.as_ref().and_then(|x| x.start_time);
+
+    // For pending builds, estimate completion based on the average of the last 10 builds.
+    let estimated_completion = if matches!(build_status, BuildStatus::Pending) {
+        let avg_duration = GitCommitBuild::avg_build_duration_ms(repo.id, 10, conn)
+            .ok()
+            .flatten();
+        avg_duration.and_then(|duration| build_start_time.map(|start| start + duration))
+    } else {
+        None
+    };
+
     match build_status {
         BuildStatus::Success => vec![],
         BuildStatus::Pending | BuildStatus::None | BuildStatus::Failure => vec![html! {
@@ -328,13 +341,20 @@ pub async fn build_status(
                     BuildStatus::None => " is pending build.",
                     BuildStatus::Success => "",
                   }
-                  @if let Some(build_url) = git_commit_build.map(|x| x.url) {
+                  @if let Some(ref url) = build_url {
                     " "
-                    a href=(build_url) { "Build log" }
+                    a href=(url) { "Build log" }
                     "."
                   }
                 }
-                commit.timestamp {
+                @if let Some(est) = estimated_completion {
+                  div {
+                    "Estimated completion: "
+                    (HumanTime(est))
+                    "."
+                  }
+                }
+                div {
                   "Committed at "
                   (HumanTime(commit.timestamp as u64))
                   "."

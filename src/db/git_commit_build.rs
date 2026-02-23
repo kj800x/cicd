@@ -73,4 +73,35 @@ impl GitCommitBuild {
 
         Ok(())
     }
+
+    /// Returns the average build duration in milliseconds for the last `limit` completed builds
+    /// for the given repo (builds with both start_time and settle_time set).
+    pub fn avg_build_duration_ms(
+        repo_id: u64,
+        limit: u64,
+        conn: &PooledConnection<SqliteConnectionManager>,
+    ) -> AppResult<Option<u64>> {
+        let durations: Vec<u64> = conn
+            .prepare(
+                "SELECT start_time, settle_time FROM git_commit_build \
+                 WHERE repo_id = ?1 \
+                 AND start_time IS NOT NULL AND settle_time IS NOT NULL \
+                 AND settle_time > start_time \
+                 ORDER BY settle_time DESC \
+                 LIMIT ?2",
+            )?
+            .query_map(params![repo_id, limit], |row| {
+                let start: u64 = row.get(0)?;
+                let settle: u64 = row.get(1)?;
+                Ok(settle - start)
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        if durations.is_empty() {
+            return Ok(None);
+        }
+
+        Ok(Some(durations.iter().sum::<u64>() / durations.len() as u64))
+    }
 }
