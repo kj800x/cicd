@@ -1021,6 +1021,20 @@ impl LiteResource {
     fn format_self(&self, namespaced_objs: &[DynamicObject]) -> Markup {
         let status = self.format_self_status(namespaced_objs);
 
+        let obj = namespaced_objs.iter().find(|o| {
+            o.name_any() == self.name
+                && o.namespace().as_deref() == Some(&self.namespace)
+                && o.types.as_ref().map(|t| t.kind.as_str()) == Some(&self.kind.to_string())
+        });
+
+        // For pods, extract the scheduled node name
+        let node_name = if matches!(self.kind, HandledResourceKind::Pod) {
+            obj.and_then(|o| from_dynamic_object::<Pod>(o).ok())
+                .and_then(|pod| pod.spec.and_then(|s| s.node_name))
+        } else {
+            None
+        };
+
         // Check if this resource type supports logs
         let supports_logs = matches!(
             self.kind,
@@ -1032,14 +1046,7 @@ impl LiteResource {
 
         // Get UID for log link
         let log_link = if supports_logs {
-            namespaced_objs
-                .iter()
-                .find(|o| {
-                    o.name_any() == self.name
-                        && o.namespace().as_deref() == Some(&self.namespace)
-                        && o.types.as_ref().map(|t| t.kind.as_str()) == Some(&self.kind.to_string())
-                })
-                .and_then(|o| o.metadata.uid.as_ref())
+            obj.and_then(|o| o.metadata.uid.as_ref())
                 .map(|uid| {
                     let encoded_ns: String = url::form_urlencoded::byte_serialize(self.namespace.as_bytes()).collect();
                     html! {
@@ -1057,6 +1064,9 @@ impl LiteResource {
                 ": "
                 (self.name)
                 (status)
+                @if let Some(node) = node_name {
+                    span.m-left-2.deployable-state.deployable-state--muted { "(@" (node) ")" }
+                }
                 @if let Some(link) = log_link {
                     (link)
                 }
