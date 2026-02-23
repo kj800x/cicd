@@ -8,7 +8,7 @@ use crate::{
         list_namespace_objects, DeployConfig,
     },
     prelude::*,
-    web::{render_preview_content, Action, BuildFilter, HumanTime, ResolvedVersion},
+    web::{formatting, render_preview_content, Action, BuildFilter, HumanTime, ResolvedVersion},
 };
 use k8s_openapi::api::{apps::v1::Deployment, core::v1::Pod};
 use kube::{api::DynamicObject, Client, ResourceExt};
@@ -309,12 +309,25 @@ pub async fn build_status(
     let build_url = git_commit_build.as_ref().map(|x| x.url.clone());
     let build_start_time = git_commit_build.as_ref().and_then(|x| x.start_time);
 
-    // For pending builds, estimate completion based on the average of the last 10 builds.
-    let estimated_completion = if matches!(build_status, BuildStatus::Pending) {
-        let avg_duration = GitCommitBuild::avg_build_duration_ms(repo.id, 10, conn)
-            .ok()
-            .flatten();
-        avg_duration.and_then(|duration| build_start_time.map(|start| start + duration))
+    // For pending builds, compute elapsed time, avg duration, percent complete, and remaining.
+    struct PendingProgress {
+        elapsed_ms: u64,
+        pct: Option<u64>,        // 0-100, None if no historical data
+        remaining_ms: Option<u64>,
+    }
+    let pending_progress: Option<PendingProgress> = if matches!(build_status, BuildStatus::Pending) {
+        let now_ms = Utc::now().timestamp_millis() as u64;
+        build_start_time.map(|start| {
+            let elapsed_ms = now_ms.saturating_sub(start);
+            let avg_duration_ms = GitCommitBuild::avg_build_duration_ms(repo.id, 10, conn)
+                .ok()
+                .flatten();
+            let pct = avg_duration_ms
+                .filter(|&avg| avg > 0)
+                .map(|avg| ((elapsed_ms * 100) / avg).min(100));
+            let remaining_ms = avg_duration_ms.map(|avg| avg.saturating_sub(elapsed_ms));
+            PendingProgress { elapsed_ms, pct, remaining_ms }
+        })
     } else {
         None
     };
@@ -347,11 +360,24 @@ pub async fn build_status(
                     "."
                   }
                 }
-                @if let Some(est) = estimated_completion {
+                @if let Some(ref p) = pending_progress {
                   div {
-                    "Estimated completion: "
-                    (HumanTime(est))
-                    "."
+                    "Running for " (formatting::format_duration_ms(p.elapsed_ms)) "."
+                  }
+                  @if let Some(pct) = p.pct {
+                    div class="build-progress" {
+                      div class="build-progress__bar" {
+                        div class="build-progress__fill" style=(format!("width: {}%", pct)) {}
+                      }
+                      span class="build-progress__label" {
+                        (pct) "%"
+                        @if let Some(remaining_ms) = p.remaining_ms {
+                          " — "
+                          (format_remaining(remaining_ms))
+                          " estimated remaining"
+                        }
+                      }
+                    }
                   }
                 }
                 div {
@@ -366,6 +392,20 @@ pub async fn build_status(
             }
           }
         }],
+    }
+}
+
+fn format_remaining(ms: u64) -> String {
+    let total_secs = ms / 1000;
+    let minutes = total_secs / 60;
+    let secs = total_secs % 60;
+    match (minutes, secs) {
+        (0, s) => format!("{} second{}", s, if s == 1 { "" } else { "s" }),
+        (m, s) => format!(
+            "{} minute{} {} second{}",
+            m, if m == 1 { "" } else { "s" },
+            s, if s == 1 { "" } else { "s" }
+        ),
     }
 }
 
