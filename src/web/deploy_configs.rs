@@ -369,6 +369,8 @@ impl DeployTransition {
 
     /// Formats the transition for display
     async fn format(&self, owner: &str, repo: &str) -> Markup {
+        let config_owner = self.current_config.config_repository().owner.clone();
+        let config_repo = self.current_config.config_repository().repo.clone();
         if self.to == Ok(self.from.clone()) {
             match self.from.clone() {
                 DeploymentState::Undeployed => {
@@ -382,7 +384,7 @@ impl DeployTransition {
                             .icon {
                                 span.deploy-config__icon.m-right-1 {}
                             }
-                            (GitRef(config.sha.clone(), owner.to_string(), repo.to_string(), false, Some(format!(".deploy/{}", &self.current_config.name_any()))))
+                            (GitRef(config.sha.clone(), config_owner.clone(), config_repo.clone(), false, Some(format!(".deploy/{}", &self.current_config.name_any()))))
                         }
                         div {
                             .icon {
@@ -398,7 +400,7 @@ impl DeployTransition {
                             .icon {
                                 span.deploy-config__icon.m-right-1 {}
                             }
-                            (GitRef(config.sha.clone(), owner.to_string(), repo.to_string(), false, Some(format!(".deploy/{}", &self.current_config.name_any()))))
+                            (GitRef(config.sha.clone(), config_owner.clone(), config_repo.clone(), false, Some(format!(".deploy/{}", &self.current_config.name_any()))))
                         }
                     }
                 }
@@ -409,11 +411,9 @@ impl DeployTransition {
                     .icon {
                         span.deploy-config__icon.m-right-1 {}
                     }
-                    // FIXME: No guarantee that config repo is the artifact repo (fix this!!!)
-                    // Move repo info as well as build info into some sort of HydratedDeploymentState struct.
-                    (self.from.format_config(owner, repo, &self.current_config.name_any()))
+                    (self.from.format_config(&config_owner, &config_repo, &self.current_config.name_any()))
                     ( PreviewArrow {} )
-                    (self.to.format_config(owner, repo, &self.current_config.name_any()))
+                    (self.to.format_config(&config_owner, &config_repo, &self.current_config.name_any()))
                 }
                 div {
                     .icon {
