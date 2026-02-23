@@ -1,6 +1,7 @@
 #![allow(clippy::expect_used)]
 
 use crate::crab_ext::Octocrabs;
+use crate::db::deploy_config_version::DeployConfigVersion;
 use crate::db::deploy_event::DeployEvent;
 use crate::db::git_branch::GitBranch;
 use crate::db::git_commit::GitCommit;
@@ -348,6 +349,9 @@ struct DeployTransition {
     from: DeploymentState,
     to: AppResult<DeploymentState>,
     current_config: DeployConfig,
+    /// Whether the kube manifests actually changed between from and to config SHAs.
+    /// None means we couldn't determine (e.g. hash not yet synced to DB).
+    config_manifest_changed: Option<bool>,
 }
 
 impl DeployTransition {
@@ -414,6 +418,10 @@ impl DeployTransition {
                     (self.from.format_config(&config_owner, &config_repo, &self.current_config.name_any()))
                     ( PreviewArrow {} )
                     (self.to.format_config(&config_owner, &config_repo, &self.current_config.name_any()))
+                    @if self.config_manifest_changed == Some(true) {
+                        " "
+                        span style="color: var(--warning-color); font-weight: 600;" { "[CONFIG CHANGED]" }
+                    }
                 }
                 div {
                     .icon {
@@ -652,10 +660,40 @@ pub async fn render_preview_content(
         .repo
         .to_string();
 
+    let from = selected_config.deployment_state();
+    let to = DeploymentState::from_action(action, selected_config, conn);
+
+    let config_manifest_changed = (|| -> Option<bool> {
+        let cfg_repo = selected_config.config_repository();
+        let repo_id = GitRepo::get_by_name(&cfg_repo.owner, &cfg_repo.repo, conn)
+            .ok()??
+            .id;
+        let name = selected_config.name_any();
+        let from_sha = match &from {
+            DeploymentState::DeployedWithArtifact { config, .. } => Some(config.sha.as_str()),
+            DeploymentState::DeployedOnlyConfig { config } => Some(config.sha.as_str()),
+            DeploymentState::Undeployed => None,
+        };
+        let to_sha = match to.as_ref().ok()? {
+            DeploymentState::DeployedWithArtifact { config, .. } => Some(config.sha.as_str()),
+            DeploymentState::DeployedOnlyConfig { config } => Some(config.sha.as_str()),
+            DeploymentState::Undeployed => None,
+        };
+        let from_hash = from_sha
+            .and_then(|sha| DeployConfigVersion::get_hash(&name, repo_id, sha, conn).ok().flatten());
+        let to_hash = to_sha
+            .and_then(|sha| DeployConfigVersion::get_hash(&name, repo_id, sha, conn).ok().flatten());
+        match (from_hash, to_hash) {
+            (Some(fh), Some(th)) => Some(fh != th),
+            _ => None,
+        }
+    })();
+
     let deploy_transition = DeployTransition {
-        from: selected_config.deployment_state(),
-        to: DeploymentState::from_action(action, selected_config, conn),
+        from,
+        to,
         current_config: selected_config.clone(),
+        config_manifest_changed,
     };
 
     let preview_content = match action {
