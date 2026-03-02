@@ -40,10 +40,10 @@ pub fn init(registry: &prometheus::Registry) -> Result<(), anyhow::Error> {
     registry.register(Box::new(github_rate_limit_limit.clone()))?;
 
     let metrics = Metrics {
-        deploy_actions: meter.u64_counter("cicd_deploy_actions_total").init(),
-        commits_observed: meter.u64_counter("cicd_commits_observed_total").init(),
-        builds_started: meter.u64_counter("cicd_builds_started_total").init(),
-        builds_resolved: meter.u64_counter("cicd_builds_resolved_total").init(),
+        deploy_actions: meter.u64_counter("cicd_deploy_actions").init(),
+        commits_observed: meter.u64_counter("cicd_commits_observed").init(),
+        builds_started: meter.u64_counter("cicd_builds_started").init(),
+        builds_resolved: meter.u64_counter("cicd_builds_resolved").init(),
         build_duration_seconds: meter.f64_histogram("cicd_build_duration_seconds").init(),
         github_rate_limit_remaining,
         github_rate_limit_limit,
