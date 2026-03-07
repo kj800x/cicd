@@ -59,13 +59,7 @@ impl WebhookHandler for MetricsHandler {
             "{}/{}",
             payload.repository.owner.login, payload.repository.name
         );
-        let check_name = payload
-            .check_run
-            .check_suite
-            .app
-            .as_ref()
-            .map(|a| a.slug.clone())
-            .unwrap_or_else(|| format!("suite-{}", payload.check_run.check_suite.id));
+        let check_name = format!("suite-{}", payload.check_run.check_suite.id);
         crate::metrics::get().builds_started.add(
             1,
             &[
@@ -87,12 +81,7 @@ impl WebhookHandler for MetricsHandler {
             payload.repository.owner.login, payload.repository.name
         );
 
-        let check_name = payload
-            .check_suite
-            .app
-            .as_ref()
-            .map(|a| a.slug.clone())
-            .unwrap_or_else(|| format!("suite-{}", payload.check_suite.id));
+        let check_name = format!("suite-{}", payload.check_suite.id);
 
         let build_status = BuildStatus::of(
             &payload.check_suite.status,

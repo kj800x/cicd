@@ -138,13 +138,7 @@ impl WebhookHandler for DatabaseHandler {
             .context("Error getting commit")?
             .ok_or(anyhow::Error::msg("Commit not found"))?;
 
-            let check_name = payload
-                .check_run
-                .check_suite
-                .app
-                .as_ref()
-                .map(|a| a.slug.clone())
-                .unwrap_or_else(|| format!("suite-{}", payload.check_run.check_suite.id));
+            let check_name = format!("suite-{}", payload.check_run.check_suite.id);
 
             let commit_build = GitCommitBuild {
                 repo_id: repo.id,
@@ -183,12 +177,7 @@ impl WebhookHandler for DatabaseHandler {
                     .context("Error getting commit")?
                     .ok_or(anyhow::Error::msg("Commit not found"))?;
 
-            let check_name = payload
-                .check_suite
-                .app
-                .as_ref()
-                .map(|a| a.slug.clone())
-                .unwrap_or_else(|| format!("suite-{}", payload.check_suite.id));
+            let check_name = format!("suite-{}", payload.check_suite.id);
 
             let build_url = format!(
                 "https://github.com/{}/{}/commit/{}/checks",
