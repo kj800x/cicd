@@ -39,12 +39,18 @@ impl From<&CommitAuthor> for String {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CheckSuiteApp {
+    pub slug: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CheckSuite {
     pub id: u64,
     pub head_sha: String,
     pub head_commit: Option<PushCommit>,
     pub status: String,
     pub conclusion: Option<String>,
+    pub app: Option<CheckSuiteApp>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

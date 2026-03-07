@@ -59,11 +59,18 @@ impl WebhookHandler for MetricsHandler {
             "{}/{}",
             payload.repository.owner.login, payload.repository.name
         );
+        let check_name = payload
+            .check_run
+            .check_suite
+            .app
+            .as_ref()
+            .map(|a| a.slug.clone())
+            .unwrap_or_else(|| format!("suite-{}", payload.check_run.check_suite.id));
         crate::metrics::get().builds_started.add(
             1,
             &[
                 KeyValue::new("repo", repo_label),
-                KeyValue::new("check_name", "default"),
+                KeyValue::new("check_name", check_name),
             ],
         );
 
@@ -80,6 +87,13 @@ impl WebhookHandler for MetricsHandler {
             payload.repository.owner.login, payload.repository.name
         );
 
+        let check_name = payload
+            .check_suite
+            .app
+            .as_ref()
+            .map(|a| a.slug.clone())
+            .unwrap_or_else(|| format!("suite-{}", payload.check_suite.id));
+
         let build_status = BuildStatus::of(
             &payload.check_suite.status,
             &payload.check_suite.conclusion.as_deref(),
@@ -90,7 +104,7 @@ impl WebhookHandler for MetricsHandler {
             1,
             &[
                 KeyValue::new("repo", repo_label.clone()),
-                KeyValue::new("check_name", "default"),
+                KeyValue::new("check_name", check_name.clone()),
                 KeyValue::new("status", status_str.clone()),
             ],
         );
@@ -109,10 +123,10 @@ impl WebhookHandler for MetricsHandler {
                 .context("Error getting commit")?;
 
         if let Some(commit) = maybe_commit {
-            let maybe_build = GitCommitBuild::get_by_commit_id(&commit.id, &repo.id, &conn)
-                .context("Error getting build")?;
+            let builds = GitCommitBuild::get_all_by_commit_id(&commit.id, &repo.id, &conn)
+                .context("Error getting builds")?;
 
-            if let Some(build) = maybe_build {
+            if let Some(build) = builds.iter().find(|b| b.check_name == check_name) {
                 if let Some(start_time) = build.start_time {
                     let now_ms = Utc::now().timestamp_millis() as u64;
                     if now_ms > start_time {
@@ -121,7 +135,7 @@ impl WebhookHandler for MetricsHandler {
                             duration_secs,
                             &[
                                 KeyValue::new("repo", repo_label),
-                                KeyValue::new("check_name", "default"),
+                                KeyValue::new("check_name", check_name),
                                 KeyValue::new("status", status_str),
                             ],
                         );

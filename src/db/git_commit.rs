@@ -102,7 +102,7 @@ impl GitCommit {
         &self,
         conn: &PooledConnection<SqliteConnectionManager>,
     ) -> AppResult<Option<GitCommitBuild>> {
-        GitCommitBuild::get_by_commit_id(&self.id, &self.repo_id, conn)
+        GitCommitBuild::get_aggregate_by_commit_id(&self.id, &self.repo_id, conn)
     }
 
     pub fn upsert(

@@ -138,10 +138,18 @@ impl WebhookHandler for DatabaseHandler {
             .context("Error getting commit")?
             .ok_or(anyhow::Error::msg("Commit not found"))?;
 
+            let check_name = payload
+                .check_run
+                .check_suite
+                .app
+                .as_ref()
+                .map(|a| a.slug.clone())
+                .unwrap_or_else(|| format!("suite-{}", payload.check_run.check_suite.id));
+
             let commit_build = GitCommitBuild {
                 repo_id: repo.id,
                 commit_id: head_commit.id,
-                check_name: "default".to_string(), // FIXME: Why can't we get the check name? Do we have to fetch it separately?
+                check_name,
                 status: build_status.into(),
                 url: payload.check_run.details_url.clone(),
                 start_time: Some(Utc::now().timestamp_millis() as u64),
@@ -175,6 +183,13 @@ impl WebhookHandler for DatabaseHandler {
                     .context("Error getting commit")?
                     .ok_or(anyhow::Error::msg("Commit not found"))?;
 
+            let check_name = payload
+                .check_suite
+                .app
+                .as_ref()
+                .map(|a| a.slug.clone())
+                .unwrap_or_else(|| format!("suite-{}", payload.check_suite.id));
+
             let build_url = format!(
                 "https://github.com/{}/{}/commit/{}/checks",
                 payload.repository.owner.login,
@@ -184,7 +199,7 @@ impl WebhookHandler for DatabaseHandler {
             let commit_build = GitCommitBuild {
                 repo_id: repo.id,
                 commit_id: head_commit.id,
-                check_name: "default".to_string(), // FIXME: Why can't we get the check name? Do we have to fetch it separately?
+                check_name,
                 status: build_status.into(),
                 url: build_url,
                 start_time: None,

@@ -27,18 +27,73 @@ impl GitCommitBuild {
         })
     }
 
-    pub fn get_by_commit_id(
+    pub fn get_all_by_commit_id(
+        commit_id: &i64,
+        repo_id: &u64,
+        conn: &PooledConnection<SqliteConnectionManager>,
+    ) -> AppResult<Vec<GitCommitBuild>> {
+        let builds = conn.prepare("SELECT repo_id, commit_id, check_name, status, url, start_time, settle_time FROM git_commit_build WHERE commit_id = ?1 AND repo_id = ?2")?
+          .query_and_then(params![commit_id, repo_id], |row| {
+            GitCommitBuild::from_row(row)
+          })?
+          .collect::<AppResult<Vec<GitCommitBuild>>>()?;
+
+        Ok(builds)
+    }
+
+    /// Returns a single aggregated build status for a commit.
+    /// If any build is pending, the aggregate is pending.
+    /// If any build failed, the aggregate is failure.
+    /// Only if all builds succeeded is the aggregate success.
+    pub fn get_aggregate_by_commit_id(
         commit_id: &i64,
         repo_id: &u64,
         conn: &PooledConnection<SqliteConnectionManager>,
     ) -> AppResult<Option<GitCommitBuild>> {
-        let build = conn.prepare("SELECT repo_id, commit_id, check_name, status, url, start_time, settle_time FROM git_commit_build WHERE commit_id = ?1 AND repo_id = ?2")?
-          .query_row(params![commit_id, repo_id], |row| {
-            Ok(GitCommitBuild::from_row(row))
-          })
-          .optional().map_err(AppError::from)?.transpose()?;
+        let builds = Self::get_all_by_commit_id(commit_id, repo_id, conn)?;
+        if builds.is_empty() {
+            return Ok(None);
+        }
 
-        Ok(build)
+        let any_pending = builds.iter().any(|b| b.status == "Pending");
+        let any_failure = builds.iter().any(|b| b.status == "Failure");
+        let all_none = builds.iter().all(|b| b.status == "None");
+
+        let status = if any_failure {
+            "Failure"
+        } else if any_pending {
+            "Pending"
+        } else if all_none {
+            "None"
+        } else {
+            "Success"
+        };
+
+        // Use the first build as a base, with the aggregated status.
+        // For url, prefer the failing or pending build's url, otherwise use the first.
+        let representative = builds.iter()
+            .find(|b| b.status == "Failure")
+            .or_else(|| builds.iter().find(|b| b.status == "Pending"))
+            .unwrap_or(&builds[0]);
+
+        // start_time: earliest start across all builds
+        let start_time = builds.iter().filter_map(|b| b.start_time).min();
+        // settle_time: latest settle, but only if no builds are still pending
+        let settle_time = if any_pending {
+            None
+        } else {
+            builds.iter().filter_map(|b| b.settle_time).max()
+        };
+
+        Ok(Some(GitCommitBuild {
+            repo_id: *repo_id,
+            commit_id: *commit_id,
+            check_name: "aggregate".to_string(),
+            status: status.to_string(),
+            url: representative.url.clone(),
+            start_time,
+            settle_time,
+        }))
     }
 
     pub fn upsert(
