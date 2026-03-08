@@ -147,17 +147,20 @@ async fn list_commits_for_branch(
     Ok(resp.items)
 }
 
-async fn get_status_state_for_sha(
+struct CheckSuiteResult {
+    check_name: String,
+    status: String,
+}
+
+async fn get_check_suites_for_sha(
     crab: &Octocrab,
     owner: &str,
     repo: &str,
     sha: &str,
-) -> anyhow::Result<Option<String>> {
-    let mut any_error_or_failure = false;
-    let mut any_pending = false;
-    let mut any_success = false;
+) -> anyhow::Result<Vec<CheckSuiteResult>> {
+    let mut results = Vec::new();
 
-    // Check the older Statuses API
+    // Check the older Statuses API - aggregate as a single pseudo-suite
     match crab
         .repos(owner, repo)
         .list_statuses(sha.to_string())
@@ -167,14 +170,33 @@ async fn get_status_state_for_sha(
         .await
     {
         Ok(resp) => {
-            for st in resp.items {
-                let state_str = format!("{:?}", st.state).to_lowercase();
-                match state_str.as_str() {
-                    "error" | "failure" => any_error_or_failure = true,
-                    "pending" => any_pending = true,
-                    "success" => any_success = true,
-                    _ => {}
+            if !resp.items.is_empty() {
+                let mut any_error_or_failure = false;
+                let mut any_pending = false;
+                let mut any_success = false;
+                for st in &resp.items {
+                    let state_str = format!("{:?}", st.state).to_lowercase();
+                    match state_str.as_str() {
+                        "error" | "failure" => any_error_or_failure = true,
+                        "pending" => any_pending = true,
+                        "success" => any_success = true,
+                        _ => {}
+                    }
                 }
+                let status = if any_error_or_failure {
+                    "Failure"
+                } else if any_pending {
+                    "Pending"
+                } else if any_success {
+                    "Success"
+                } else {
+                    "None"
+                };
+                // Use "suite-0" as a sentinel for the legacy Statuses API
+                results.push(CheckSuiteResult {
+                    check_name: "suite-0".to_string(),
+                    status: status.to_string(),
+                });
             }
         }
         Err(e) => {
@@ -197,24 +219,20 @@ async fn get_status_state_for_sha(
                 resp.check_suites.len()
             );
             for suite in resp.check_suites {
-                // status can be "queued", "in_progress", or "completed"
-                // conclusion can be "success", "failure", "neutral", "cancelled", "timed_out", "action_required", "skipped", null
                 log::debug!(
-                    "Check suite for {}: status={:?}, conclusion={:?}",
+                    "Check suite for {}: id={}, status={:?}, conclusion={:?}",
                     &sha[..7],
+                    suite.id,
                     suite.status,
                     suite.conclusion
                 );
-                match (suite.status.as_deref(), suite.conclusion.as_deref()) {
-                    (Some("completed"), Some("success")) => any_success = true,
+                let status = match (suite.status.as_deref(), suite.conclusion.as_deref()) {
+                    (Some("completed"), Some("success")) => "Success",
                     (Some("completed"), Some("failure" | "timed_out" | "action_required")) => {
-                        any_error_or_failure = true
+                        "Failure"
                     }
-                    (Some("queued" | "in_progress"), _) => any_pending = true,
-                    // Treat neutral, cancelled, and skipped as success for display purposes
-                    (Some("completed"), Some("neutral" | "cancelled" | "skipped")) => {
-                        any_success = true
-                    }
+                    (Some("queued" | "in_progress"), _) => "Pending",
+                    (Some("completed"), Some("neutral" | "cancelled" | "skipped")) => "Success",
                     _ => {
                         log::debug!(
                             "Unhandled check suite state for {}: status={:?}, conclusion={:?}",
@@ -222,8 +240,13 @@ async fn get_status_state_for_sha(
                             suite.status,
                             suite.conclusion
                         );
+                        continue;
                     }
-                }
+                };
+                results.push(CheckSuiteResult {
+                    check_name: format!("suite-{}", suite.id),
+                    status: status.to_string(),
+                });
             }
         }
         Err(e) => {
@@ -231,26 +254,9 @@ async fn get_status_state_for_sha(
         }
     }
 
-    let combined = if any_error_or_failure {
-        "failure"
-    } else if any_pending {
-        "pending"
-    } else if any_success {
-        "success"
-    } else {
-        return Ok(None); // No status information found
-    };
-    Ok(Some(combined.to_string()))
+    Ok(results)
 }
 
-fn map_state_to_status(state: &str) -> String {
-    match state {
-        "success" => "Success".to_string(),
-        "failure" | "error" => "Failure".to_string(),
-        "pending" => "Pending".to_string(),
-        _ => "None".to_string(),
-    }
-}
 
 enum BootstrapMode {
     Quick, // 1 commit, default branch only
@@ -522,8 +528,8 @@ async fn run_owner_bootstrap_impl(
                                 ));
                             }
 
-                            // Best-effort: fetch combined status
-                            match get_status_state_for_sha(
+                            // Best-effort: fetch check suite statuses
+                            match get_check_suites_for_sha(
                                 crab,
                                 &repo.owner_name,
                                 &repo.name,
@@ -531,41 +537,41 @@ async fn run_owner_bootstrap_impl(
                             )
                             .await
                             {
-                                Ok(Some(cs)) => {
-                                    let status = map_state_to_status(&cs);
-                                    let build = GitCommitBuild {
-                                        repo_id: repo.id,
-                                        commit_id: commit.id,
-                                        check_name: "default".to_string(),
-                                        status,
-                                        url: format!(
-                                            "https://github.com/{}/{}/commit/{}/checks",
-                                            repo.owner_name, repo.name, commit.sha
-                                        ),
-                                        start_time: None,
-                                        settle_time: None,
-                                    };
-                                    if let Err(e) = GitCommitBuild::upsert(&build, &conn) {
-                                        log::debug!(
-                                            "Bootstrap: upsert build for {} failed: {}",
-                                            commit.sha,
-                                            e
-                                        );
-                                        log_append(format!(
-                                            "repo {}/{}: upsert build for {} failed: {}",
-                                            repo.owner_name, repo.name, commit.sha, e
-                                        ));
+                                Ok(suites) => {
+                                    for suite in suites {
+                                        let build = GitCommitBuild {
+                                            repo_id: repo.id,
+                                            commit_id: commit.id,
+                                            check_name: suite.check_name,
+                                            status: suite.status,
+                                            url: format!(
+                                                "https://github.com/{}/{}/commit/{}/checks",
+                                                repo.owner_name, repo.name, commit.sha
+                                            ),
+                                            start_time: None,
+                                            settle_time: None,
+                                        };
+                                        if let Err(e) = GitCommitBuild::upsert(&build, &conn) {
+                                            log::debug!(
+                                                "Bootstrap: upsert build for {} failed: {}",
+                                                commit.sha,
+                                                e
+                                            );
+                                            log_append(format!(
+                                                "repo {}/{}: upsert build for {} failed: {}",
+                                                repo.owner_name, repo.name, commit.sha, e
+                                            ));
+                                        }
                                     }
                                 }
-                                Ok(None) => {}
                                 Err(e) => {
                                     log::debug!(
-                                        "Bootstrap: fetch combined status for {} failed: {:?}",
+                                        "Bootstrap: fetch check suites for {} failed: {:?}",
                                         commit.sha,
                                         e
                                     );
                                     log_append(format!(
-                                        "repo {}/{}: fetch combined status for {} failed: {:?}",
+                                        "repo {}/{}: fetch check suites for {} failed: {:?}",
                                         repo.owner_name, repo.name, commit.sha, e
                                     ));
                                 }
@@ -867,33 +873,33 @@ async fn run_repo_bootstrap_impl(
                     }
 
                     // Fetch build status for each commit
-                    match get_status_state_for_sha(crab, &owner, &repo_name, &commit.sha).await {
-                        Ok(Some(cs)) => {
-                            let status = map_state_to_status(&cs);
-                            let build = GitCommitBuild {
-                                repo_id: repo.id,
-                                commit_id: commit.id,
-                                check_name: "default".to_string(),
-                                status,
-                                url: format!(
-                                    "https://github.com/{}/{}/commit/{}/checks",
-                                    owner, repo_name, commit.sha
-                                ),
-                                start_time: None,
-                                settle_time: None,
-                            };
-                            if let Err(e) = GitCommitBuild::upsert(&build, &conn) {
-                                log::debug!(
-                                    "Bootstrap: upsert build for {} failed: {}",
-                                    commit.sha,
-                                    e
-                                );
+                    match get_check_suites_for_sha(crab, &owner, &repo_name, &commit.sha).await {
+                        Ok(suites) => {
+                            for suite in suites {
+                                let build = GitCommitBuild {
+                                    repo_id: repo.id,
+                                    commit_id: commit.id,
+                                    check_name: suite.check_name,
+                                    status: suite.status,
+                                    url: format!(
+                                        "https://github.com/{}/{}/commit/{}/checks",
+                                        owner, repo_name, commit.sha
+                                    ),
+                                    start_time: None,
+                                    settle_time: None,
+                                };
+                                if let Err(e) = GitCommitBuild::upsert(&build, &conn) {
+                                    log::debug!(
+                                        "Bootstrap: upsert build for {} failed: {}",
+                                        commit.sha,
+                                        e
+                                    );
+                                }
                             }
                         }
-                        Ok(None) => {}
                         Err(e) => {
                             log::debug!(
-                                "Bootstrap: fetch combined status for {} failed: {:?}",
+                                "Bootstrap: fetch check suites for {} failed: {:?}",
                                 commit.sha,
                                 e
                             );
@@ -1167,33 +1173,33 @@ async fn run_repo_resync_impl(
             }
 
             // Fetch build status for the commit
-            match get_status_state_for_sha(crab, &owner, &repo_name, &commit.sha).await {
-                Ok(Some(cs)) => {
-                    let status = map_state_to_status(&cs);
-                    let build = GitCommitBuild {
-                        repo_id: repo.id,
-                        commit_id: commit.id,
-                        check_name: "default".to_string(),
-                        status,
-                        url: format!(
-                            "https://github.com/{}/{}/commit/{}/checks",
-                            owner, repo_name, commit.sha
-                        ),
-                        start_time: None,
-                        settle_time: None,
-                    };
-                    if let Err(e) = GitCommitBuild::upsert(&build, &conn) {
-                        log::debug!("Bootstrap: upsert build for {} failed: {}", commit.sha, e);
-                        log_append(format!(
-                            "repo {}/{}: upsert build for {} failed: {}",
-                            owner, repo_name, commit.sha, e
-                        ));
+            match get_check_suites_for_sha(crab, &owner, &repo_name, &commit.sha).await {
+                Ok(suites) => {
+                    for suite in suites {
+                        let build = GitCommitBuild {
+                            repo_id: repo.id,
+                            commit_id: commit.id,
+                            check_name: suite.check_name,
+                            status: suite.status,
+                            url: format!(
+                                "https://github.com/{}/{}/commit/{}/checks",
+                                owner, repo_name, commit.sha
+                            ),
+                            start_time: None,
+                            settle_time: None,
+                        };
+                        if let Err(e) = GitCommitBuild::upsert(&build, &conn) {
+                            log::debug!("Bootstrap: upsert build for {} failed: {}", commit.sha, e);
+                            log_append(format!(
+                                "repo {}/{}: upsert build for {} failed: {}",
+                                owner, repo_name, commit.sha, e
+                            ));
+                        }
                     }
                 }
-                Ok(None) => {}
                 Err(e) => {
                     log::debug!(
-                        "Bootstrap: fetch combined status for {} failed: {:?}",
+                        "Bootstrap: fetch check suites for {} failed: {:?}",
                         commit.sha,
                         e
                     );
