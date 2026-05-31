@@ -1,9 +1,6 @@
 use crate::{
     build_status::BuildStatus,
-    db::{
-        git_branch::GitBranch,
-        git_repo::GitRepo,
-    },
+    db::{git_branch::GitBranch, git_repo::GitRepo},
     error::AppResult,
     kubernetes::{
         api::{get_all_deploy_configs, list_namespace_objects, ListMode},
@@ -11,7 +8,9 @@ use crate::{
     },
     prelude::*,
     web::{
-        resource_status::{from_dynamic_object, HandledResourceKind, is_error_reason, is_warn_reason},
+        resource_status::{
+            from_dynamic_object, is_error_reason, is_warn_reason, HandledResourceKind,
+        },
         team_prefs::{ReposCookie, TeamsCookie},
     },
 };
@@ -56,7 +55,13 @@ fn check_repo_health(
     // Get the master/default branch
     let branch = match GitBranch::get_by_name(&repo.default_branch, repo.id, conn)? {
         Some(b) => b,
-        None => return Ok((HealthStatus::Unknown, None, Some("Branch not found".to_string()))),
+        None => {
+            return Ok((
+                HealthStatus::Unknown,
+                None,
+                Some("Branch not found".to_string()),
+            ))
+        }
     };
 
     // Get the latest successful build for this branch
@@ -71,15 +76,35 @@ fn check_repo_health(
                     let status: BuildStatus = build.clone().into();
                     match status {
                         BuildStatus::Success => Ok((HealthStatus::Healthy, Some(commit.sha), None)),
-                        BuildStatus::Failure => Ok((HealthStatus::Error, Some(commit.sha), Some("Build failed".to_string()))),
-                        BuildStatus::Pending => Ok((HealthStatus::Warning, Some(commit.sha), Some("Build pending".to_string()))),
-                        BuildStatus::None => Ok((HealthStatus::Unknown, Some(commit.sha), Some("No build status".to_string()))),
+                        BuildStatus::Failure => Ok((
+                            HealthStatus::Error,
+                            Some(commit.sha),
+                            Some("Build failed".to_string()),
+                        )),
+                        BuildStatus::Pending => Ok((
+                            HealthStatus::Warning,
+                            Some(commit.sha),
+                            Some("Build pending".to_string()),
+                        )),
+                        BuildStatus::None => Ok((
+                            HealthStatus::Unknown,
+                            Some(commit.sha),
+                            Some("No build status".to_string()),
+                        )),
                     }
                 }
-                None => Ok((HealthStatus::Unknown, Some(commit.sha), Some("No build status".to_string()))),
+                None => Ok((
+                    HealthStatus::Unknown,
+                    Some(commit.sha),
+                    Some("No build status".to_string()),
+                )),
             }
         }
-        None => Ok((HealthStatus::Unknown, None, Some("No successful build found".to_string()))),
+        None => Ok((
+            HealthStatus::Unknown,
+            None,
+            Some("No successful build found".to_string()),
+        )),
     }
 }
 
@@ -103,7 +128,10 @@ async fn check_deploy_config_health(
         Ok(objs) => objs,
         Err(e) => {
             log::warn!("Failed to list namespace objects for {}: {}", namespace, e);
-            return Ok((HealthStatus::Unknown, Some(format!("Failed to list resources: {}", e))));
+            return Ok((
+                HealthStatus::Unknown,
+                Some(format!("Failed to list resources: {}", e)),
+            ));
         }
     };
 
@@ -156,35 +184,35 @@ async fn check_deploy_config_health(
             .unwrap_or(false)
             && is_owned_by_config(o, config, &uid_index)
     }) {
-                let (health, msg) = check_resource_health_with_message(obj, &namespaced_objs);
-                match health {
-                    HealthStatus::Error => {
-                        if let Some(m) = msg {
-                            errors.push(m);
-                        } else {
-                            errors.push(format!("Pod {}: Error", obj.name_any()));
-                        }
-                    }
-                    HealthStatus::Warning => {
-                        if let Some(m) = msg {
-                            warnings.push(m);
-                        } else {
-                            warnings.push(format!("Pod {}: Warning", obj.name_any()));
-                        }
-                    }
-                    HealthStatus::Info => {
-                        // Info statuses are informational
-                        if let Some(m) = msg {
-                            info_messages.push(m);
-                        } else {
-                            info_messages.push(format!("Pod {}: Info", obj.name_any()));
-                        }
-                    }
-                    HealthStatus::Unknown => {
-                        warnings.push(format!("Pod {}: Unknown status", obj.name_any()));
-                    }
-                    HealthStatus::Healthy => {}
+        let (health, msg) = check_resource_health_with_message(obj, &namespaced_objs);
+        match health {
+            HealthStatus::Error => {
+                if let Some(m) = msg {
+                    errors.push(m);
+                } else {
+                    errors.push(format!("Pod {}: Error", obj.name_any()));
                 }
+            }
+            HealthStatus::Warning => {
+                if let Some(m) = msg {
+                    warnings.push(m);
+                } else {
+                    warnings.push(format!("Pod {}: Warning", obj.name_any()));
+                }
+            }
+            HealthStatus::Info => {
+                // Info statuses are informational
+                if let Some(m) = msg {
+                    info_messages.push(m);
+                } else {
+                    info_messages.push(format!("Pod {}: Info", obj.name_any()));
+                }
+            }
+            HealthStatus::Unknown => {
+                warnings.push(format!("Pod {}: Unknown status", obj.name_any()));
+            }
+            HealthStatus::Healthy => {}
+        }
     }
 
     // Then check direct resources from specs (but skip if we already have pod errors)
@@ -206,11 +234,7 @@ async fn check_deploy_config_health(
                 // Find the resource in namespaced_objs
                 if let Some(obj) = namespaced_objs.iter().find(|o| {
                     o.name_any() == name
-                        && o.types
-                            .as_ref()
-                            .map(|t| t.kind.as_str())
-                            .unwrap_or("")
-                            == kind
+                        && o.types.as_ref().map(|t| t.kind.as_str()).unwrap_or("") == kind
                 }) {
                     // Check the health status of this resource
                     let (health, msg) = check_resource_health_with_message(obj, &namespaced_objs);
@@ -259,12 +283,11 @@ async fn check_deploy_config_health(
 }
 
 /// Check the health status of a single resource with error message
-fn check_resource_health_with_message(obj: &DynamicObject, namespaced_objs: &[DynamicObject]) -> (HealthStatus, Option<String>) {
-    let kind_str = obj
-        .types
-        .as_ref()
-        .map(|t| t.kind.as_str())
-        .unwrap_or("");
+fn check_resource_health_with_message(
+    obj: &DynamicObject,
+    namespaced_objs: &[DynamicObject],
+) -> (HealthStatus, Option<String>) {
+    let kind_str = obj.types.as_ref().map(|t| t.kind.as_str()).unwrap_or("");
 
     // Resources that don't have a meaningful status to check are healthy if they exist
     match kind_str {
@@ -285,12 +308,10 @@ fn check_resource_health_with_message(obj: &DynamicObject, namespaced_objs: &[Dy
 
     // Use the same logic as resource_status.rs but return health status and message
     match kind {
-        HandledResourceKind::Deployment => {
-            match from_dynamic_object::<Deployment>(obj) {
-                Ok(deployment) => check_deployment_health_with_message(&deployment),
-                Err(_) => (HealthStatus::Unknown, None),
-            }
-        }
+        HandledResourceKind::Deployment => match from_dynamic_object::<Deployment>(obj) {
+            Ok(deployment) => check_deployment_health_with_message(&deployment),
+            Err(_) => (HealthStatus::Unknown, None),
+        },
         HandledResourceKind::Pod => match from_dynamic_object::<Pod>(obj) {
             Ok(pod) => check_pod_health_with_message(&pod),
             Err(_) => (HealthStatus::Unknown, None),
@@ -308,7 +329,9 @@ fn check_resource_health_with_message(obj: &DynamicObject, namespaced_objs: &[Dy
             Err(_) => (HealthStatus::Unknown, None),
         },
         // Services and Ingresses are generally healthy if they exist
-        HandledResourceKind::Service | HandledResourceKind::Ingress => (HealthStatus::Healthy, None),
+        HandledResourceKind::Service | HandledResourceKind::Ingress => {
+            (HealthStatus::Healthy, None)
+        }
         // For other resource types we recognize but don't have specific checks for,
         // if they exist, consider them healthy
         HandledResourceKind::Other(_) => (HealthStatus::Healthy, None),
@@ -339,27 +362,45 @@ fn check_deployment_health_with_message(deployment: &Deployment) -> (HealthStatu
                 && (c.reason.as_deref() == Some("ProgressDeadlineExceeded") || c.status == "False")
             {
                 let reason = c.reason.as_deref().unwrap_or("Not progressing");
-                return (HealthStatus::Error, Some(format!("{} ({} ready / {})", reason, ready, spec_replicas)));
+                return (
+                    HealthStatus::Error,
+                    Some(format!("{} ({} ready / {})", reason, ready, spec_replicas)),
+                );
             }
             if c.type_ == "ReplicaFailure" && c.status == "True" {
                 let reason = c.reason.as_deref().unwrap_or("Replica failure");
-                return (HealthStatus::Error, Some(format!("{} ({} ready / {})", reason, ready, spec_replicas)));
+                return (
+                    HealthStatus::Error,
+                    Some(format!("{} ({} ready / {})", reason, ready, spec_replicas)),
+                );
             }
         }
     }
 
     // Reconciling or updating
     if observed_generation < desired_generation {
-        return (HealthStatus::Warning, Some(format!("Reconciling ({} ready / {})", ready, spec_replicas)));
+        return (
+            HealthStatus::Warning,
+            Some(format!("Reconciling ({} ready / {})", ready, spec_replicas)),
+        );
     }
     if updated < spec_replicas {
-        return (HealthStatus::Warning, Some(format!("Updating {} / {}", updated, spec_replicas)));
+        return (
+            HealthStatus::Warning,
+            Some(format!("Updating {} / {}", updated, spec_replicas)),
+        );
     }
     if ready < spec_replicas {
-        return (HealthStatus::Warning, Some(format!("Waiting {} / {}", ready, spec_replicas)));
+        return (
+            HealthStatus::Warning,
+            Some(format!("Waiting {} / {}", ready, spec_replicas)),
+        );
     }
     if unavailable > 0 {
-        return (HealthStatus::Warning, Some(format!("Unavailable {}", unavailable)));
+        return (
+            HealthStatus::Warning,
+            Some(format!("Unavailable {}", unavailable)),
+        );
     }
 
     (HealthStatus::Healthy, None)
@@ -378,7 +419,8 @@ fn check_pod_health_with_message(pod: &Pod) -> (HealthStatus, Option<String>) {
     };
 
     // Completed pods are healthy
-    if status.phase.as_deref() == Some("Succeeded") || status.reason.as_deref() == Some("Completed") {
+    if status.phase.as_deref() == Some("Succeeded") || status.reason.as_deref() == Some("Completed")
+    {
         return (HealthStatus::Healthy, None);
     }
 
@@ -395,13 +437,18 @@ fn check_pod_health_with_message(pod: &Pod) -> (HealthStatus, Option<String>) {
                 if let Some(waiting) = state.waiting.as_ref() {
                     let reason = waiting.reason.as_deref().unwrap_or("Waiting");
                     if is_error_reason(reason) {
-                        let msg = waiting.message.as_ref()
+                        let msg = waiting
+                            .message
+                            .as_ref()
                             .map(|m| format!("{}: {}", reason, m))
                             .unwrap_or_else(|| reason.to_string());
                         return (HealthStatus::Error, Some(format!("{} / {}", pod_name, msg)));
                     }
                     if is_warn_reason(reason) {
-                        return (HealthStatus::Warning, Some(format!("{} / {}: {}", pod_name, cs.name, reason)));
+                        return (
+                            HealthStatus::Warning,
+                            Some(format!("{} / {}: {}", pod_name, cs.name, reason)),
+                        );
                     }
                 }
                 if let Some(terminated) = state.terminated.as_ref() {
@@ -412,15 +459,23 @@ fn check_pod_health_with_message(pod: &Pod) -> (HealthStatus, Option<String>) {
                             .filter(|r| !r.is_empty())
                             .map(|r| r.to_string())
                             .unwrap_or_else(|| format!("ExitCode {}", terminated.exit_code));
-                        let msg = terminated.message.as_ref()
+                        let msg = terminated
+                            .message
+                            .as_ref()
                             .map(|m| format!("{}: {}", reason_str, m))
                             .unwrap_or_else(|| reason_str.clone());
-                        return (HealthStatus::Error, Some(format!("{} / {}: {}", pod_name, cs.name, msg)));
+                        return (
+                            HealthStatus::Error,
+                            Some(format!("{} / {}: {}", pod_name, cs.name, msg)),
+                        );
                     }
                 }
             }
             if !cs.ready {
-                return (HealthStatus::Warning, Some(format!("{} / {}: NotReady", pod_name, cs.name)));
+                return (
+                    HealthStatus::Warning,
+                    Some(format!("{} / {}: NotReady", pod_name, cs.name)),
+                );
             }
         }
     }
@@ -429,7 +484,13 @@ fn check_pod_health_with_message(pod: &Pod) -> (HealthStatus, Option<String>) {
     match status.phase.as_deref() {
         Some("Running") | Some("Succeeded") => (HealthStatus::Healthy, None),
         Some("Failed") => (HealthStatus::Error, Some("Failed".to_string())),
-        Some("Pending") | Some("Unknown") => (HealthStatus::Warning, Some(format!("Phase: {}", status.phase.as_deref().unwrap_or("Unknown")))),
+        Some("Pending") | Some("Unknown") => (
+            HealthStatus::Warning,
+            Some(format!(
+                "Phase: {}",
+                status.phase.as_deref().unwrap_or("Unknown")
+            )),
+        ),
         _ => (HealthStatus::Warning, Some("Unknown phase".to_string())),
     }
 }
@@ -444,7 +505,10 @@ fn check_replicaset_health_with_message(rs: &KReplicaSet) -> (HealthStatus, Opti
     }
 
     if ready < desired {
-        (HealthStatus::Warning, Some(format!("{} / {} ready", ready, desired)))
+        (
+            HealthStatus::Warning,
+            Some(format!("{} / {} ready", ready, desired)),
+        )
     } else {
         (HealthStatus::Healthy, None)
     }
@@ -464,9 +528,15 @@ fn check_job_health_with_message(job: &KJob) -> (HealthStatus, Option<String>) {
                 let reason = condition.reason.as_deref().unwrap_or("Failed");
                 let message = condition.message.as_deref().unwrap_or("");
                 if !message.is_empty() {
-                    return (HealthStatus::Error, Some(format!("{}: {} - {}", job_name, reason, message)));
+                    return (
+                        HealthStatus::Error,
+                        Some(format!("{}: {} - {}", job_name, reason, message)),
+                    );
                 } else {
-                    return (HealthStatus::Error, Some(format!("{}: {}", job_name, reason)));
+                    return (
+                        HealthStatus::Error,
+                        Some(format!("{}: {}", job_name, reason)),
+                    );
                 }
             }
             if condition.type_ == "Complete" && condition.status == "True" {
@@ -479,7 +549,10 @@ fn check_job_health_with_message(job: &KJob) -> (HealthStatus, Option<String>) {
     // Check failed count
     if let Some(failed) = status.failed {
         if failed > 0 {
-            return (HealthStatus::Error, Some(format!("{}: {} failed pods", job_name, failed)));
+            return (
+                HealthStatus::Error,
+                Some(format!("{}: {} failed pods", job_name, failed)),
+            );
         }
     }
 
@@ -493,11 +566,17 @@ fn check_job_health_with_message(job: &KJob) -> (HealthStatus, Option<String>) {
     if status.succeeded.is_some_and(|s| s > 0) {
         (HealthStatus::Healthy, None)
     } else {
-        (HealthStatus::Warning, Some(format!("{}: Unknown state", job_name)))
+        (
+            HealthStatus::Warning,
+            Some(format!("{}: Unknown state", job_name)),
+        )
     }
 }
 
-fn check_cronjob_health_with_message(cronjob: &KCronJob, namespaced_objs: &[DynamicObject]) -> (HealthStatus, Option<String>) {
+fn check_cronjob_health_with_message(
+    cronjob: &KCronJob,
+    namespaced_objs: &[DynamicObject],
+) -> (HealthStatus, Option<String>) {
     let cronjob_name = cronjob.name_any();
     let cronjob_uid = match cronjob.metadata.uid.as_ref() {
         Some(uid) => uid,
@@ -511,7 +590,8 @@ fn check_cronjob_health_with_message(cronjob: &KCronJob, namespaced_objs: &[Dyna
             if o.types.as_ref().map(|t| t.kind.as_str()) != Some("Job") {
                 return false;
             }
-            if !o.metadata
+            if !o
+                .metadata
                 .owner_references
                 .as_ref()
                 .unwrap_or(&Vec::new())
@@ -533,7 +613,10 @@ fn check_cronjob_health_with_message(cronjob: &KCronJob, namespaced_objs: &[Dyna
         .collect();
 
     if !active_jobs.is_empty() {
-        return (HealthStatus::Info, Some(format!("CronJob {}: Currently executing", cronjob_name)));
+        return (
+            HealthStatus::Info,
+            Some(format!("CronJob {}: Currently executing", cronjob_name)),
+        );
     }
 
     // If there are no active jobs and no errors, CronJob is healthy
@@ -569,7 +652,6 @@ pub async fn watchdog_page(
     _pool: web::Data<Pool<SqliteConnectionManager>>,
     _client: web::Data<Client>,
 ) -> impl Responder {
-
     let markup = html! {
         (DOCTYPE)
         html lang="en" {
@@ -653,7 +735,12 @@ pub async fn watchdog_fragment(
                 });
             }
             Err(e) => {
-                log::warn!("Failed to check health for repo {}/{}: {}", repo.owner_name, repo.name, e);
+                log::warn!(
+                    "Failed to check health for repo {}/{}: {}",
+                    repo.owner_name,
+                    repo.name,
+                    e
+                );
                 repo_healths.push(RepoHealth {
                     repo,
                     status: HealthStatus::Unknown,
@@ -677,7 +764,11 @@ pub async fn watchdog_fragment(
                 });
             }
             Err(e) => {
-                log::warn!("Failed to check health for deploy config {}: {}", config.name_any(), e);
+                log::warn!(
+                    "Failed to check health for deploy config {}: {}",
+                    config.name_any(),
+                    e
+                );
                 deploy_config_healths.push(DeployConfigHealth {
                     config,
                     status: HealthStatus::Unknown,
@@ -712,8 +803,12 @@ pub async fn watchdog_fragment(
     });
 
     // Separate healthy from unhealthy (Info counts as "unhealthy" for display purposes - it needs an alert)
-    let (healthy_repos, unhealthy_repos): (Vec<_>, Vec<_>) = repo_healths.into_iter().partition(|r| r.status == HealthStatus::Healthy);
-    let (healthy_configs, unhealthy_configs): (Vec<_>, Vec<_>) = deploy_config_healths.into_iter().partition(|c| c.status == HealthStatus::Healthy);
+    let (healthy_repos, unhealthy_repos): (Vec<_>, Vec<_>) = repo_healths
+        .into_iter()
+        .partition(|r| r.status == HealthStatus::Healthy);
+    let (healthy_configs, unhealthy_configs): (Vec<_>, Vec<_>) = deploy_config_healths
+        .into_iter()
+        .partition(|c| c.status == HealthStatus::Healthy);
 
     let markup = html! {
         div.watchdog-content {
@@ -856,4 +951,3 @@ pub async fn watchdog_fragment(
         .content_type("text/html; charset=utf-8")
         .body(markup.into_string())
 }
-

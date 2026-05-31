@@ -114,10 +114,12 @@ fn render_sidebar(section: &str) -> Markup {
 
 #[get("/settings")]
 pub async fn settings_index(req: actix_web::HttpRequest) -> impl Responder {
-    let query: web::Query<HashMap<String, String>> = web::Query::from_query(req.query_string())
-        .unwrap_or_else(|_| web::Query(HashMap::new()));
-    let section = query.get("section").map(|s| s.as_str()).unwrap_or("rate-limits");
-
+    let query: web::Query<HashMap<String, String>> =
+        web::Query::from_query(req.query_string()).unwrap_or_else(|_| web::Query(HashMap::new()));
+    let section = query
+        .get("section")
+        .map(|s| s.as_str())
+        .unwrap_or("rate-limits");
 
     let markup = html! {
         (DOCTYPE)
@@ -157,7 +159,10 @@ pub async fn settings_fragment(
     req: actix_web::HttpRequest,
     query: web::Query<HashMap<String, String>>,
 ) -> impl Responder {
-    let section = query.get("section").map(|s| s.as_str()).unwrap_or("rate-limits");
+    let section = query
+        .get("section")
+        .map(|s| s.as_str())
+        .unwrap_or("rate-limits");
 
     let pool = match req.app_data::<web::Data<Pool<SqliteConnectionManager>>>() {
         Some(p) => p.clone(),
@@ -176,7 +181,6 @@ pub async fn settings_fragment(
         _ => team_visibility_fragment(req).await,
     }
 }
-
 
 async fn team_visibility_fragment(req: actix_web::HttpRequest) -> HttpResponse {
     // Initialize Kubernetes client

@@ -312,10 +312,11 @@ pub async fn build_status(
     // For pending builds, compute elapsed time, avg duration, percent complete, and remaining.
     struct PendingProgress {
         elapsed_ms: u64,
-        pct: Option<u64>,        // 0-100, None if no historical data
+        pct: Option<u64>, // 0-100, None if no historical data
         remaining_ms: Option<u64>,
     }
-    let pending_progress: Option<PendingProgress> = if matches!(build_status, BuildStatus::Pending) {
+    let pending_progress: Option<PendingProgress> = if matches!(build_status, BuildStatus::Pending)
+    {
         let now_ms = Utc::now().timestamp_millis() as u64;
         build_start_time.map(|start| {
             let elapsed_ms = now_ms.saturating_sub(start);
@@ -326,7 +327,11 @@ pub async fn build_status(
                 .filter(|&avg| avg > 0)
                 .map(|avg| ((elapsed_ms * 100) / avg).min(100));
             let remaining_ms = avg_duration_ms.map(|avg| avg.saturating_sub(elapsed_ms));
-            PendingProgress { elapsed_ms, pct, remaining_ms }
+            PendingProgress {
+                elapsed_ms,
+                pct,
+                remaining_ms,
+            }
         })
     } else {
         None
@@ -403,8 +408,10 @@ fn format_remaining(ms: u64) -> String {
         (0, s) => format!("{} second{}", s, if s == 1 { "" } else { "s" }),
         (m, s) => format!(
             "{} minute{} {} second{}",
-            m, if m == 1 { "" } else { "s" },
-            s, if s == 1 { "" } else { "s" }
+            m,
+            if m == 1 { "" } else { "s" },
+            s,
+            if s == 1 { "" } else { "s" }
         ),
     }
 }
