@@ -77,7 +77,8 @@ impl GitCommitBuild {
 
         // Use the first build as a base, with the aggregated status.
         // For url, prefer the failing or pending build's url, otherwise use the first.
-        let representative = builds.iter()
+        let representative = builds
+            .iter()
             .find(|b| b.status == "Failure")
             .or_else(|| builds.iter().find(|b| b.status == "Pending"))
             .unwrap_or(&builds[0]);

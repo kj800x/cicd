@@ -10,7 +10,6 @@ use k8s_openapi::api::{
     networking::v1::Ingress as KIngress,
 };
 use maud::{html, Markup};
-use url;
 
 use chrono::Utc;
 use chrono_tz::America::New_York;
@@ -245,7 +244,10 @@ fn summarize_pod_status(pod: &Pod) -> Option<ResourceStatus> {
     };
     // Pod-level terminal states first
     if pod.metadata.deletion_timestamp.is_some() {
-        return Some(ResourceStatus::new(on_node("Terminating".to_string()), "warn"));
+        return Some(ResourceStatus::new(
+            on_node("Terminating".to_string()),
+            "warn",
+        ));
     }
 
     let status = pod.status.as_ref()?;
@@ -558,10 +560,7 @@ fn summarize_service_status(svc: &KService) -> Option<ResourceStatus> {
                 if ci == "None" {
                     Some(ResourceStatus::new("Headless", "neutral"))
                 } else {
-                    Some(ResourceStatus::new(
-                        format!("ClusterIP: {}", ci),
-                        "neutral",
-                    ))
+                    Some(ResourceStatus::new(format!("ClusterIP: {}", ci), "neutral"))
                 }
             } else {
                 Some(ResourceStatus::new("ClusterIP: -", "warn"))
@@ -937,8 +936,7 @@ impl HandledResourceKind {
     pub fn format_status(&self, obj: &DynamicObject) -> Markup {
         // Ingress needs special HTML rendering for links
         if matches!(self, HandledResourceKind::Ingress) {
-            let ing =
-                from_dynamic_object::<KIngress>(obj).expect("Failed to deserialize Ingress");
+            let ing = from_dynamic_object::<KIngress>(obj).expect("Failed to deserialize Ingress");
             return summarize_ingress_status_markup(&ing).unwrap_or_else(|| html! { "" });
         }
 
@@ -1216,7 +1214,7 @@ impl ResourceStatuses for DeployConfig {
                 @for resource in self.resource_specs() {
                     @match TryInto::<LiteResource>::try_into(resource) {
                         Ok(resource) => {
-                            (resource.format(&namespaced_objs))
+                            (resource.format(namespaced_objs))
                         }
                         Err(e) => {
                             li.deployables-tree__item {

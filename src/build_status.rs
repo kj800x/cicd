@@ -47,7 +47,9 @@ impl BuildStatus {
             // block deploys (matches GitHub's own green-check rollup).
             Some("success") | Some("neutral") | Some("skipped") | Some("cancelled")
             | Some("stale") => BuildStatus::Success,
-            Some("failure") | Some("timed_out") | Some("action_required")
+            Some("failure")
+            | Some("timed_out")
+            | Some("action_required")
             | Some("startup_failure") => BuildStatus::Failure,
             // Unknown/unexpected conclusions: don't block, but don't claim success.
             Some(_) => BuildStatus::None,

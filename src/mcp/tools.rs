@@ -8,11 +8,13 @@ use crate::crab_ext::Octocrabs;
 use crate::db::deploy_event::DeployEvent;
 use crate::db::git_branch::GitBranch;
 use crate::db::git_repo::GitRepo;
-use crate::kubernetes::api::{get_all_deploy_configs, get_deploy_config, list_namespace_objects, ListMode};
+use crate::kubernetes::api::{
+    get_all_deploy_configs, get_deploy_config, list_namespace_objects, ListMode,
+};
 use crate::kubernetes::deploy_handlers::DeployAction;
 use crate::kubernetes::repo::DeploymentState;
-use crate::web::ResourceStatuses;
 use crate::web::Action;
+use crate::web::ResourceStatuses;
 
 use super::protocol::{Tool, ToolCallResult};
 
@@ -200,10 +202,7 @@ async fn handle_list_deploy_configs(
     ToolCallResult::text(serde_json::to_string_pretty(&results).unwrap_or_default())
 }
 
-async fn handle_get_deploy_config(
-    arguments: Value,
-    client: &Client,
-) -> ToolCallResult {
+async fn handle_get_deploy_config(arguments: Value, client: &Client) -> ToolCallResult {
     let name = match arguments.get("name").and_then(|v| v.as_str()) {
         Some(n) => n,
         None => return ToolCallResult::error("Missing required parameter: name".to_string()),
@@ -218,24 +217,24 @@ async fn handle_get_deploy_config(
     };
 
     let deployment_state = config.deployment_state();
-    let (artifact_sha, artifact_branch, config_sha, config_branch, state) =
-        match &deployment_state {
-            DeploymentState::DeployedWithArtifact { artifact, config } => (
-                Some(artifact.sha.as_str()),
-                artifact.branch.as_deref(),
-                Some(config.sha.as_str()),
-                config.branch.as_deref(),
-                "deployed",
-            ),
-            DeploymentState::DeployedOnlyConfig { config } => (
-                None,
-                None,
-                Some(config.sha.as_str()),
-                config.branch.as_deref(),
-                "deployed_config_only",
-            ),
-            DeploymentState::Undeployed => (None, None, None, None, "undeployed"),
-        };
+    let (artifact_sha, artifact_branch, config_sha, config_branch, state) = match &deployment_state
+    {
+        DeploymentState::DeployedWithArtifact { artifact, config } => (
+            Some(artifact.sha.as_str()),
+            artifact.branch.as_deref(),
+            Some(config.sha.as_str()),
+            config.branch.as_deref(),
+            "deployed",
+        ),
+        DeploymentState::DeployedOnlyConfig { config } => (
+            None,
+            None,
+            Some(config.sha.as_str()),
+            config.branch.as_deref(),
+            "deployed_config_only",
+        ),
+        DeploymentState::Undeployed => (None, None, None, None, "undeployed"),
+    };
 
     let artifact_repo = config.artifact_repository();
     let config_repo = config.config_repository();
@@ -325,11 +324,7 @@ async fn handle_get_build_status(
             Err(e) => return ToolCallResult::error(format!("Failed to get head commit: {}", e)),
         };
 
-    let build_status: BuildStatus = head_commit
-        .get_build_status(&conn)
-        .ok()
-        .flatten()
-        .into();
+    let build_status: BuildStatus = head_commit.get_build_status(&conn).ok().flatten().into();
 
     let status_str: String = build_status.into();
 
@@ -419,9 +414,7 @@ async fn handle_action(
         "undeploy" => Action::Undeploy,
         "bounce" => {
             if config.is_orphaned() {
-                return ToolCallResult::error(
-                    "Cannot bounce an orphaned config.".to_string(),
-                );
+                return ToolCallResult::error("Cannot bounce an orphaned config.".to_string());
             }
             Action::Bounce
         }
@@ -527,5 +520,8 @@ async fn execute_deploy_action(
         Action::ToggleAutodeploy => "Toggle autodeploy".to_string(),
     };
 
-    ToolCallResult::text(format!("Successfully executed: {} on {}", action_desc, name))
+    ToolCallResult::text(format!(
+        "Successfully executed: {} on {}",
+        action_desc, name
+    ))
 }

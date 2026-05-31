@@ -245,7 +245,10 @@ async fn get_check_runs_for_sha(
                 results.push(CheckResult {
                     check_name: "legacy-status".to_string(),
                     status: status.to_string(),
-                    url: format!("https://github.com/{}/{}/commit/{}/checks", owner, repo, sha),
+                    url: format!(
+                        "https://github.com/{}/{}/commit/{}/checks",
+                        owner, repo, sha
+                    ),
                     start_time: None,
                     settle_time: None,
                     app_id: None,
@@ -260,7 +263,10 @@ async fn get_check_runs_for_sha(
     // Modern Checks API (GitHub Actions and most CI). Deserialized via a custom
     // type so we can keep `app.id`, which octocrab's typed model drops. The
     // default `filter=latest` returns one run per check (re-runs collapsed).
-    let route = format!("/repos/{}/{}/commits/{}/check-runs?per_page=100", owner, repo, sha);
+    let route = format!(
+        "/repos/{}/{}/commits/{}/check-runs?per_page=100",
+        owner, repo, sha
+    );
     match crab.get::<ScanCheckRunsResponse, _, ()>(&route, None).await {
         Ok(resp) => {
             log::debug!(
@@ -279,7 +285,10 @@ async fn get_check_runs_for_sha(
                     .filter(|u| !u.is_empty())
                     .or(run.details_url)
                     .unwrap_or_else(|| {
-                        format!("https://github.com/{}/{}/commit/{}/checks", owner, repo, sha)
+                        format!(
+                            "https://github.com/{}/{}/commit/{}/checks",
+                            owner, repo, sha
+                        )
                     });
                 results.push(CheckResult {
                     check_name: format!("run-{}", run.id),
@@ -298,7 +307,6 @@ async fn get_check_runs_for_sha(
 
     Ok(results)
 }
-
 
 enum BootstrapMode {
     Quick, // 1 commit, default branch only

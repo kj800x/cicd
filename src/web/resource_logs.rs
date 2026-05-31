@@ -27,7 +27,8 @@ async fn find_resource_by_uid_in_namespace(
     uid: &str,
     namespace: &str,
 ) -> AppResult<Option<(DynamicObject, Vec<DynamicObject>)>> {
-    let objs = list_namespace_objects(client, namespace, crate::kubernetes::api::ListMode::All).await?;
+    let objs =
+        list_namespace_objects(client, namespace, crate::kubernetes::api::ListMode::All).await?;
     if let Some(obj) = find_resource_by_uid(uid, &objs) {
         Ok(Some((obj.clone(), objs)))
     } else {

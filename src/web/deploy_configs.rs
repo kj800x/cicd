@@ -679,10 +679,16 @@ pub async fn render_preview_content(
             DeploymentState::DeployedOnlyConfig { config } => Some(config.sha.as_str()),
             DeploymentState::Undeployed => None,
         };
-        let from_hash = from_sha
-            .and_then(|sha| DeployConfigVersion::get_hash(&name, repo_id, sha, conn).ok().flatten());
-        let to_hash = to_sha
-            .and_then(|sha| DeployConfigVersion::get_hash(&name, repo_id, sha, conn).ok().flatten());
+        let from_hash = from_sha.and_then(|sha| {
+            DeployConfigVersion::get_hash(&name, repo_id, sha, conn)
+                .ok()
+                .flatten()
+        });
+        let to_hash = to_sha.and_then(|sha| {
+            DeployConfigVersion::get_hash(&name, repo_id, sha, conn)
+                .ok()
+                .flatten()
+        });
         match (from_hash, to_hash) {
             (Some(fh), Some(th)) => Some(fh != th),
             _ => None,
@@ -1249,10 +1255,7 @@ pub async fn deploy_config(
             crate::metrics::get().deploy_actions.add(
                 1,
                 &[
-                    opentelemetry::KeyValue::new(
-                        "name",
-                        deploy_action.config_name().to_string(),
-                    ),
+                    opentelemetry::KeyValue::new("name", deploy_action.config_name().to_string()),
                     opentelemetry::KeyValue::new("action", deploy_action.action_type()),
                     opentelemetry::KeyValue::new("result", "error"),
                 ],
