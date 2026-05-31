@@ -101,9 +101,13 @@ pub fn migrate(mut conn: PooledConnection<SqliteConnectionManager>) -> AppResult
           );
           CREATE INDEX IF NOT EXISTS idx_deploy_event_name_ts ON deploy_event(name, timestamp);
       "#}),
-        // M::up( indoc! { r#"
-        //     SQL GOES HERE
-        // "#}),
+        // Track the GitHub App that produced each check run, so deploy configs
+        // can eventually depend on specific checks (keyed by app + name) rather
+        // than on all checks. Nullable: legacy rows and the REST scan (whose
+        // typed model omits the app) leave this empty.
+        M::up(indoc! { r#"
+          ALTER TABLE git_commit_build ADD COLUMN app_id INTEGER;
+        "#}),
     ]);
 
     conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))?;

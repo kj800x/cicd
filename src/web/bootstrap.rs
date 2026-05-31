@@ -147,20 +147,70 @@ async fn list_commits_for_branch(
     Ok(resp.items)
 }
 
-struct CheckSuiteResult {
+/// One resolved check for a commit, ready to persist as a GitCommitBuild.
+struct CheckResult {
+    /// Stable per-commit key: `run-<id>` for Checks API runs, `legacy-status`
+    /// for the collapsed older Statuses API.
     check_name: String,
     status: String,
+    url: String,
+    start_time: Option<u64>,
+    settle_time: Option<u64>,
+    app_id: Option<u64>,
 }
 
-async fn get_check_suites_for_sha(
+fn datetime_to_millis(dt: Option<chrono::DateTime<chrono::Utc>>) -> Option<u64> {
+    dt.map(|d| d.timestamp_millis())
+        .filter(|ms| *ms >= 0)
+        .map(|ms| ms as u64)
+}
+
+// Minimal shape of the "list check runs for a git ref" response. octocrab's
+// typed `CheckRun` model omits the `app` object (true across 0.46 through the
+// current release), so we deserialize the endpoint ourselves to capture
+// `app.id`. octocrab's `crab.get::<R, _, _>(route, _)` is the intended hook for
+// deserializing into a custom type.
+#[derive(serde::Deserialize)]
+struct ScanCheckRunsResponse {
+    check_runs: Vec<ScanCheckRun>,
+}
+
+#[derive(serde::Deserialize)]
+struct ScanCheckRun {
+    id: u64,
+    conclusion: Option<String>,
+    started_at: Option<chrono::DateTime<chrono::Utc>>,
+    completed_at: Option<chrono::DateTime<chrono::Utc>>,
+    html_url: Option<String>,
+    details_url: Option<String>,
+    app: Option<ScanApp>,
+}
+
+#[derive(serde::Deserialize)]
+struct ScanApp {
+    id: u64,
+}
+
+/// Fetch the build state of a commit from GitHub at the check-RUN level.
+///
+/// We deliberately use check runs (the real units of work) rather than check
+/// suites. GitHub auto-creates a suite for every installed App on each push,
+/// including Apps that never run anything; those empty suites report as
+/// `queued` forever and, if ingested, pin a commit at Pending permanently. The
+/// check-runs endpoint (default `filter=latest`) only returns actual runs and
+/// already collapses re-runs to the latest attempt — which is exactly GitHub's
+/// own green-check rollup.
+async fn get_check_runs_for_sha(
     crab: &Octocrab,
     owner: &str,
     repo: &str,
     sha: &str,
-) -> anyhow::Result<Vec<CheckSuiteResult>> {
+) -> anyhow::Result<Vec<CheckResult>> {
     let mut results = Vec::new();
 
-    // Check the older Statuses API - aggregate as a single pseudo-suite
+    // Older Statuses API: kept as a fallback for third-party tools that still
+    // post commit statuses. GitHub Actions does not use this. Collapsed into a
+    // single entry since legacy statuses carry no per-run identity or timing.
     match crab
         .repos(owner, repo)
         .list_statuses(sha.to_string())
@@ -192,10 +242,13 @@ async fn get_check_suites_for_sha(
                 } else {
                     "None"
                 };
-                // Use "suite-0" as a sentinel for the legacy Statuses API
-                results.push(CheckSuiteResult {
-                    check_name: "suite-0".to_string(),
+                results.push(CheckResult {
+                    check_name: "legacy-status".to_string(),
                     status: status.to_string(),
+                    url: format!("https://github.com/{}/{}/commit/{}/checks", owner, repo, sha),
+                    start_time: None,
+                    settle_time: None,
+                    app_id: None,
                 });
             }
         }
@@ -204,53 +257,42 @@ async fn get_check_suites_for_sha(
         }
     }
 
-    // Check the newer Checks API (used by GitHub Actions and most modern CI)
-    match crab
-        .checks(owner, repo)
-        .list_check_suites_for_git_ref(octocrab::params::repos::Commitish(sha.to_string()))
-        .per_page(100)
-        .send()
-        .await
-    {
+    // Modern Checks API (GitHub Actions and most CI). Deserialized via a custom
+    // type so we can keep `app.id`, which octocrab's typed model drops. The
+    // default `filter=latest` returns one run per check (re-runs collapsed).
+    let route = format!("/repos/{}/{}/commits/{}/check-runs?per_page=100", owner, repo, sha);
+    match crab.get::<ScanCheckRunsResponse, _, ()>(&route, None).await {
         Ok(resp) => {
             log::debug!(
-                "Check suites for {}: found {} suites",
+                "Check runs for {}: found {} runs",
                 &sha[..7],
-                resp.check_suites.len()
+                resp.check_runs.len()
             );
-            for suite in resp.check_suites {
-                log::debug!(
-                    "Check suite for {}: id={}, status={:?}, conclusion={:?}",
-                    &sha[..7],
-                    suite.id,
-                    suite.status,
-                    suite.conclusion
-                );
-                let status = match (suite.status.as_deref(), suite.conclusion.as_deref()) {
-                    (Some("completed"), Some("success")) => "Success",
-                    (Some("completed"), Some("failure" | "timed_out" | "action_required")) => {
-                        "Failure"
-                    }
-                    (Some("queued" | "in_progress"), _) => "Pending",
-                    (Some("completed"), Some("neutral" | "cancelled" | "skipped")) => "Success",
-                    _ => {
-                        log::debug!(
-                            "Unhandled check suite state for {}: status={:?}, conclusion={:?}",
-                            &sha[..7],
-                            suite.status,
-                            suite.conclusion
-                        );
-                        continue;
-                    }
-                };
-                results.push(CheckSuiteResult {
-                    check_name: format!("suite-{}", suite.id),
-                    status: status.to_string(),
+            for run in resp.check_runs {
+                // The list-check-runs payload has no separate status field; a
+                // missing conclusion means the run hasn't finished yet.
+                let status: String =
+                    crate::build_status::BuildStatus::from_conclusion(run.conclusion.as_deref())
+                        .into();
+                let url = run
+                    .html_url
+                    .filter(|u| !u.is_empty())
+                    .or(run.details_url)
+                    .unwrap_or_else(|| {
+                        format!("https://github.com/{}/{}/commit/{}/checks", owner, repo, sha)
+                    });
+                results.push(CheckResult {
+                    check_name: format!("run-{}", run.id),
+                    status,
+                    url,
+                    start_time: datetime_to_millis(run.started_at),
+                    settle_time: datetime_to_millis(run.completed_at),
+                    app_id: run.app.map(|a| a.id),
                 });
             }
         }
         Err(e) => {
-            log::debug!("Failed to fetch check suites for {}: {:?}", &sha[..7], e);
+            log::debug!("Failed to fetch check runs for {}: {:?}", &sha[..7], e);
         }
     }
 
@@ -528,8 +570,9 @@ async fn run_owner_bootstrap_impl(
                                 ));
                             }
 
-                            // Best-effort: fetch check suite statuses
-                            match get_check_suites_for_sha(
+                            // Best-effort: fetch check-run statuses and make the
+                            // stored builds for this commit match GitHub exactly.
+                            match get_check_runs_for_sha(
                                 crab,
                                 &repo.owner_name,
                                 &repo.name,
@@ -537,41 +580,42 @@ async fn run_owner_bootstrap_impl(
                             )
                             .await
                             {
-                                Ok(suites) => {
-                                    for suite in suites {
-                                        let build = GitCommitBuild {
+                                Ok(checks) => {
+                                    let builds: Vec<GitCommitBuild> = checks
+                                        .into_iter()
+                                        .map(|c| GitCommitBuild {
                                             repo_id: repo.id,
                                             commit_id: commit.id,
-                                            check_name: suite.check_name,
-                                            status: suite.status,
-                                            url: format!(
-                                                "https://github.com/{}/{}/commit/{}/checks",
-                                                repo.owner_name, repo.name, commit.sha
-                                            ),
-                                            start_time: None,
-                                            settle_time: None,
-                                        };
-                                        if let Err(e) = GitCommitBuild::upsert(&build, &conn) {
-                                            log::debug!(
-                                                "Bootstrap: upsert build for {} failed: {}",
-                                                commit.sha,
-                                                e
-                                            );
-                                            log_append(format!(
-                                                "repo {}/{}: upsert build for {} failed: {}",
-                                                repo.owner_name, repo.name, commit.sha, e
-                                            ));
-                                        }
+                                            check_name: c.check_name,
+                                            status: c.status,
+                                            url: c.url,
+                                            start_time: c.start_time,
+                                            settle_time: c.settle_time,
+                                            app_id: c.app_id,
+                                        })
+                                        .collect();
+                                    if let Err(e) = GitCommitBuild::reconcile_for_commit(
+                                        repo.id, commit.id, &builds, &conn,
+                                    ) {
+                                        log::debug!(
+                                            "Bootstrap: reconcile builds for {} failed: {}",
+                                            commit.sha,
+                                            e
+                                        );
+                                        log_append(format!(
+                                            "repo {}/{}: reconcile builds for {} failed: {}",
+                                            repo.owner_name, repo.name, commit.sha, e
+                                        ));
                                     }
                                 }
                                 Err(e) => {
                                     log::debug!(
-                                        "Bootstrap: fetch check suites for {} failed: {:?}",
+                                        "Bootstrap: fetch check runs for {} failed: {:?}",
                                         commit.sha,
                                         e
                                     );
                                     log_append(format!(
-                                        "repo {}/{}: fetch check suites for {} failed: {:?}",
+                                        "repo {}/{}: fetch check runs for {} failed: {:?}",
                                         repo.owner_name, repo.name, commit.sha, e
                                     ));
                                 }
@@ -872,34 +916,35 @@ async fn run_repo_bootstrap_impl(
                         );
                     }
 
-                    // Fetch build status for each commit
-                    match get_check_suites_for_sha(crab, &owner, &repo_name, &commit.sha).await {
-                        Ok(suites) => {
-                            for suite in suites {
-                                let build = GitCommitBuild {
+                    // Fetch check runs and reconcile stored builds with GitHub.
+                    match get_check_runs_for_sha(crab, &owner, &repo_name, &commit.sha).await {
+                        Ok(checks) => {
+                            let builds: Vec<GitCommitBuild> = checks
+                                .into_iter()
+                                .map(|c| GitCommitBuild {
                                     repo_id: repo.id,
                                     commit_id: commit.id,
-                                    check_name: suite.check_name,
-                                    status: suite.status,
-                                    url: format!(
-                                        "https://github.com/{}/{}/commit/{}/checks",
-                                        owner, repo_name, commit.sha
-                                    ),
-                                    start_time: None,
-                                    settle_time: None,
-                                };
-                                if let Err(e) = GitCommitBuild::upsert(&build, &conn) {
-                                    log::debug!(
-                                        "Bootstrap: upsert build for {} failed: {}",
-                                        commit.sha,
-                                        e
-                                    );
-                                }
+                                    check_name: c.check_name,
+                                    status: c.status,
+                                    url: c.url,
+                                    start_time: c.start_time,
+                                    settle_time: c.settle_time,
+                                    app_id: c.app_id,
+                                })
+                                .collect();
+                            if let Err(e) = GitCommitBuild::reconcile_for_commit(
+                                repo.id, commit.id, &builds, &conn,
+                            ) {
+                                log::debug!(
+                                    "Bootstrap: reconcile builds for {} failed: {}",
+                                    commit.sha,
+                                    e
+                                );
                             }
                         }
                         Err(e) => {
                             log::debug!(
-                                "Bootstrap: fetch check suites for {} failed: {:?}",
+                                "Bootstrap: fetch check runs for {} failed: {:?}",
                                 commit.sha,
                                 e
                             );
@@ -1172,34 +1217,39 @@ async fn run_repo_resync_impl(
                 );
             }
 
-            // Fetch build status for the commit
-            match get_check_suites_for_sha(crab, &owner, &repo_name, &commit.sha).await {
-                Ok(suites) => {
-                    for suite in suites {
-                        let build = GitCommitBuild {
+            // Fetch check runs and reconcile stored builds with GitHub.
+            match get_check_runs_for_sha(crab, &owner, &repo_name, &commit.sha).await {
+                Ok(checks) => {
+                    let builds: Vec<GitCommitBuild> = checks
+                        .into_iter()
+                        .map(|c| GitCommitBuild {
                             repo_id: repo.id,
                             commit_id: commit.id,
-                            check_name: suite.check_name,
-                            status: suite.status,
-                            url: format!(
-                                "https://github.com/{}/{}/commit/{}/checks",
-                                owner, repo_name, commit.sha
-                            ),
-                            start_time: None,
-                            settle_time: None,
-                        };
-                        if let Err(e) = GitCommitBuild::upsert(&build, &conn) {
-                            log::debug!("Bootstrap: upsert build for {} failed: {}", commit.sha, e);
-                            log_append(format!(
-                                "repo {}/{}: upsert build for {} failed: {}",
-                                owner, repo_name, commit.sha, e
-                            ));
-                        }
+                            check_name: c.check_name,
+                            status: c.status,
+                            url: c.url,
+                            start_time: c.start_time,
+                            settle_time: c.settle_time,
+                            app_id: c.app_id,
+                        })
+                        .collect();
+                    if let Err(e) =
+                        GitCommitBuild::reconcile_for_commit(repo.id, commit.id, &builds, &conn)
+                    {
+                        log::debug!(
+                            "Bootstrap: reconcile builds for {} failed: {}",
+                            commit.sha,
+                            e
+                        );
+                        log_append(format!(
+                            "repo {}/{}: reconcile builds for {} failed: {}",
+                            owner, repo_name, commit.sha, e
+                        ));
                     }
                 }
                 Err(e) => {
                     log::debug!(
-                        "Bootstrap: fetch check suites for {} failed: {:?}",
+                        "Bootstrap: fetch check runs for {} failed: {:?}",
                         commit.sha,
                         e
                     );

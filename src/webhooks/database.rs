@@ -15,8 +15,8 @@ use crate::{
         git_repo::GitRepo,
     },
     webhooks::{
-        models::{CheckRunEvent, CheckSuiteEvent, DeleteEvent, PushEvent},
-        util::extract_branch_name,
+        models::{CheckRunEvent, DeleteEvent, PushEvent},
+        util::{extract_branch_name, rfc3339_to_millis},
         WebhookHandler,
     },
 };
@@ -121,84 +121,52 @@ impl WebhookHandler for DatabaseHandler {
             .get()
             .context("Failed to get database connection")?;
 
-        if payload.action.as_str() == "created" {
-            let build_status = BuildStatus::of(
-                &payload.check_run.check_suite.status,
-                &payload.check_run.check_suite.conclusion.as_deref(),
-            );
+        let run = &payload.check_run;
 
-            let repo: GitRepo = payload.repository.clone().into();
-            repo.upsert(&conn).context("Error upserting repository")?;
+        // We track build state at the check-run level (the actual unit of work),
+        // not the check-suite level. GitHub auto-creates a suite per installed
+        // App on every push even when that App never runs anything (e.g. an
+        // empty "queued" suite with zero runs); keying on suites lets those
+        // phantoms pin a commit at Pending forever. Runs only exist when there
+        // is real work, and they carry their own status/conclusion/timestamps.
+        let build_status = BuildStatus::of(&run.status, &run.conclusion.as_deref());
 
-            let head_commit = GitCommit::get_by_sha(
-                &payload.check_run.check_suite.head_sha.clone(),
-                repo.id,
-                &conn,
-            )
+        let repo: GitRepo = payload.repository.clone().into();
+        repo.upsert(&conn).context("Error upserting repository")?;
+
+        let head_commit = GitCommit::get_by_sha(&run.check_suite.head_sha, repo.id, &conn)
             .context("Error getting commit")?
             .ok_or(anyhow::Error::msg("Commit not found"))?;
 
-            let check_name = format!("suite-{}", payload.check_run.check_suite.id);
+        let check_name = format!("run-{}", run.id);
 
-            let commit_build = GitCommitBuild {
-                repo_id: repo.id,
-                commit_id: head_commit.id,
-                check_name,
-                status: build_status.into(),
-                url: payload.check_run.details_url.clone(),
-                start_time: Some(Utc::now().timestamp_millis() as u64),
-                settle_time: None,
-            };
-            GitCommitBuild::upsert(&commit_build, &conn).context("Error upserting commit build")?;
-        }
+        let url = run
+            .html_url
+            .clone()
+            .filter(|u| !u.is_empty())
+            .unwrap_or_else(|| run.details_url.clone());
 
-        Ok(())
-    }
-
-    async fn handle_check_suite(&self, payload: CheckSuiteEvent) -> Result<(), anyhow::Error> {
-        log::debug!("Received check suite event:\n{:#?}", payload);
-
-        let conn = self
-            .pool
-            .get()
-            .context("Failed to get database connection")?;
-
-        if payload.action.as_str() == "completed" {
-            let build_status = BuildStatus::of(
-                &payload.check_suite.status,
-                &payload.check_suite.conclusion.as_deref(),
-            );
-
-            let repo: GitRepo = payload.repository.clone().into();
-            repo.upsert(&conn).context("Error upserting repository")?;
-
-            let head_commit =
-                GitCommit::get_by_sha(&payload.check_suite.head_sha.clone(), repo.id, &conn)
-                    .context("Error getting commit")?
-                    .ok_or(anyhow::Error::msg("Commit not found"))?;
-
-            let check_name = format!("suite-{}", payload.check_suite.id);
-
-            let build_url = format!(
-                "https://github.com/{}/{}/commit/{}/checks",
-                payload.repository.owner.login,
-                payload.repository.name,
-                payload.check_suite.head_sha
-            );
-            let commit_build = GitCommitBuild {
-                repo_id: repo.id,
-                commit_id: head_commit.id,
-                check_name,
-                status: build_status.into(),
-                url: build_url,
-                start_time: None,
-                settle_time: Some(Utc::now().timestamp_millis() as u64),
-            };
-            GitCommitBuild::upsert(&commit_build, &conn).context("Error upserting commit build")?;
-        }
+        let commit_build = GitCommitBuild {
+            repo_id: repo.id,
+            commit_id: head_commit.id,
+            check_name,
+            status: build_status.into(),
+            url,
+            // Prefer GitHub's own timestamps; fall back to event-receipt time
+            // for start so an in-flight run still shows elapsed progress.
+            start_time: rfc3339_to_millis(run.started_at.as_deref())
+                .or_else(|| Some(Utc::now().timestamp_millis() as u64)),
+            settle_time: rfc3339_to_millis(run.completed_at.as_deref()),
+            app_id: run.app.as_ref().map(|a| a.id),
+        };
+        GitCommitBuild::upsert(&commit_build, &conn).context("Error upserting commit build")?;
 
         Ok(())
     }
+
+    // check_suite events are intentionally not used to write build rows. Suites
+    // are containers, not units of work, and an empty/abandoned suite would
+    // otherwise mask the real per-run status. See handle_check_run above.
 
     async fn handle_delete(&self, payload: DeleteEvent) -> Result<(), anyhow::Error> {
         log::debug!("Received delete event:\n{:#?}", payload);

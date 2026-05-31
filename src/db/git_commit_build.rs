@@ -12,6 +12,11 @@ pub struct GitCommitBuild {
     pub url: String,
     pub start_time: Option<u64>,
     pub settle_time: Option<u64>,
+    /// GitHub App id that produced this check run (e.g. 15368 for GitHub
+    /// Actions). Nullable: legacy rows and the collapsed legacy-status entry
+    /// have no single app. Lets deploy configs eventually depend on specific
+    /// checks keyed by (app_id, check name).
+    pub app_id: Option<u64>,
 }
 
 impl GitCommitBuild {
@@ -24,6 +29,7 @@ impl GitCommitBuild {
             url: row.get(4)?,
             start_time: row.get::<_, Option<u64>>(5)?,
             settle_time: row.get::<_, Option<u64>>(6)?,
+            app_id: row.get::<_, Option<u64>>(7)?,
         })
     }
 
@@ -32,7 +38,7 @@ impl GitCommitBuild {
         repo_id: &u64,
         conn: &PooledConnection<SqliteConnectionManager>,
     ) -> AppResult<Vec<GitCommitBuild>> {
-        let builds = conn.prepare("SELECT repo_id, commit_id, check_name, status, url, start_time, settle_time FROM git_commit_build WHERE commit_id = ?1 AND repo_id = ?2")?
+        let builds = conn.prepare("SELECT repo_id, commit_id, check_name, status, url, start_time, settle_time, app_id FROM git_commit_build WHERE commit_id = ?1 AND repo_id = ?2")?
           .query_and_then(params![commit_id, repo_id], |row| {
             GitCommitBuild::from_row(row)
           })?
@@ -93,6 +99,8 @@ impl GitCommitBuild {
             url: representative.url.clone(),
             start_time,
             settle_time,
+            // The aggregate spans every check, so it has no single producing app.
+            app_id: None,
         }))
     }
 
@@ -108,8 +116,8 @@ impl GitCommitBuild {
             .map_err(AppError::from)?
             .transpose()?.flatten();
 
-        conn.prepare("INSERT OR REPLACE INTO git_commit_build (repo_id, commit_id, check_name, status, url, start_time, settle_time) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)")?
-            .execute(params![build.repo_id, build.commit_id, build.check_name, build.status, build.url, existing_start_time.or(build.start_time), build.settle_time])?;
+        conn.prepare("INSERT OR REPLACE INTO git_commit_build (repo_id, commit_id, check_name, status, url, start_time, settle_time, app_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)")?
+            .execute(params![build.repo_id, build.commit_id, build.check_name, build.status, build.url, existing_start_time.or(build.start_time), build.settle_time, build.app_id])?;
 
         Ok(Self {
             repo_id: build.repo_id,
@@ -119,7 +127,55 @@ impl GitCommitBuild {
             url: build.url.clone(),
             start_time: existing_start_time.or(build.start_time),
             settle_time: build.settle_time,
+            app_id: build.app_id,
         })
+    }
+
+    /// Make the stored builds for a commit match `builds` exactly.
+    ///
+    /// Upserts every build in `builds`, then deletes any existing rows for the
+    /// commit whose `check_name` is not present in `builds`. This is what makes
+    /// a scan authoritative: stale rows (e.g. an old per-suite phantom that
+    /// GitHub no longer reports, or a check that was removed) are pruned instead
+    /// of lingering and pinning the aggregate.
+    ///
+    /// If `builds` is empty, all rows for the commit are removed.
+    pub fn reconcile_for_commit(
+        repo_id: u64,
+        commit_id: i64,
+        builds: &[GitCommitBuild],
+        conn: &PooledConnection<SqliteConnectionManager>,
+    ) -> AppResult<()> {
+        for build in builds {
+            debug_assert_eq!(build.repo_id, repo_id);
+            debug_assert_eq!(build.commit_id, commit_id);
+            Self::upsert(build, conn)?;
+        }
+
+        if builds.is_empty() {
+            conn.prepare("DELETE FROM git_commit_build WHERE commit_id = ?1 AND repo_id = ?2")?
+                .execute(params![commit_id, repo_id])?;
+            return Ok(());
+        }
+
+        // Delete rows for this commit whose check_name isn't in the kept set.
+        // SQLite's parameter limit is high enough that listing names inline via
+        // carrying-bound placeholders is fine for realistic check counts.
+        let placeholders = vec!["?"; builds.len()].join(", ");
+        let sql = format!(
+            "DELETE FROM git_commit_build \
+             WHERE commit_id = ?1 AND repo_id = ?2 \
+             AND check_name NOT IN ({})",
+            placeholders
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&commit_id, &repo_id];
+        for build in builds {
+            bound.push(&build.check_name);
+        }
+        stmt.execute(bound.as_slice())?;
+
+        Ok(())
     }
 
     pub fn update(&self, conn: &PooledConnection<SqliteConnectionManager>) -> AppResult<()> {
