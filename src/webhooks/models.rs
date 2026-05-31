@@ -48,8 +48,26 @@ pub struct CheckSuite {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CheckApp {
+    pub id: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CheckRun {
+    pub id: u64,
+    pub name: String,
+    /// queued | in_progress | completed (and occasionally waiting/requested/pending)
+    pub status: String,
+    pub conclusion: Option<String>,
     pub details_url: String,
+    pub html_url: Option<String>,
+    /// RFC3339 timestamp for when the run started, if reported.
+    pub started_at: Option<String>,
+    /// RFC3339 timestamp for when the run completed, if reported.
+    pub completed_at: Option<String>,
+    /// GitHub App that produced this run. Optional for robustness, though the
+    /// webhook payload always includes it.
+    pub app: Option<CheckApp>,
     pub check_suite: CheckSuite,
 }
 

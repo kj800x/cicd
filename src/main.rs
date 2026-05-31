@@ -225,7 +225,7 @@ async fn main() -> std::io::Result<()> {
         std::env::var("CLIENT_SECRET").expect("CLIENT_SECRET must be set"),
     );
     webhook_manager.add_handler(DatabaseHandler::new(pool.clone(), octocrabs.clone()));
-    webhook_manager.add_handler(MetricsHandler::new(pool.clone()));
+    webhook_manager.add_handler(MetricsHandler::new());
     webhook_manager.add_handler(ConfigSyncHandler::new(
         pool.clone(),
         client.clone(),

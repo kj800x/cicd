@@ -1,27 +1,21 @@
-use anyhow::Context;
-use chrono::Utc;
 use opentelemetry::KeyValue;
-use r2d2::Pool;
-use r2d2_sqlite::SqliteConnectionManager;
 use serenity::async_trait;
 
 use crate::{
     build_status::BuildStatus,
-    db::{git_commit::GitCommit, git_commit_build::GitCommitBuild, git_repo::GitRepo},
     webhooks::{
-        models::{CheckRunEvent, CheckSuiteEvent, PushEvent},
-        util::extract_branch_name,
+        models::{CheckRunEvent, PushEvent},
+        util::{extract_branch_name, rfc3339_to_millis},
         WebhookHandler,
     },
 };
 
-pub struct MetricsHandler {
-    pool: Pool<SqliteConnectionManager>,
-}
+#[derive(Default)]
+pub struct MetricsHandler {}
 
 impl MetricsHandler {
-    pub fn new(pool: Pool<SqliteConnectionManager>) -> Self {
-        Self { pool }
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 
@@ -51,84 +45,55 @@ impl WebhookHandler for MetricsHandler {
     }
 
     async fn handle_check_run(&self, payload: CheckRunEvent) -> Result<(), anyhow::Error> {
-        if payload.action.as_str() != "created" {
-            return Ok(());
-        }
-
         let repo_label = format!(
             "{}/{}",
             payload.repository.owner.login, payload.repository.name
         );
-        let check_name = format!("suite-{}", payload.check_run.check_suite.id);
-        crate::metrics::get().builds_started.add(
-            1,
-            &[
-                KeyValue::new("repo", repo_label),
-                KeyValue::new("check_name", check_name),
-            ],
-        );
+        let run = &payload.check_run;
+        // Label metrics by the run name (e.g. "build") rather than an opaque,
+        // per-commit suite id. The name is stable across commits, which is what
+        // makes per-check trends (e.g. duration over time) meaningful.
+        let check_name = run.name.clone();
 
-        Ok(())
-    }
-
-    async fn handle_check_suite(&self, payload: CheckSuiteEvent) -> Result<(), anyhow::Error> {
-        if payload.action.as_str() != "completed" {
-            return Ok(());
+        if payload.action.as_str() == "created" {
+            crate::metrics::get().builds_started.add(
+                1,
+                &[
+                    KeyValue::new("repo", repo_label.clone()),
+                    KeyValue::new("check_name", check_name.clone()),
+                ],
+            );
         }
 
-        let repo_label = format!(
-            "{}/{}",
-            payload.repository.owner.login, payload.repository.name
-        );
+        // Resolve metrics fire when the run reaches a terminal state.
+        if run.status.as_str() == "completed" {
+            let status_str: String = BuildStatus::from_conclusion(run.conclusion.as_deref()).into();
 
-        let check_name = format!("suite-{}", payload.check_suite.id);
+            crate::metrics::get().builds_resolved.add(
+                1,
+                &[
+                    KeyValue::new("repo", repo_label.clone()),
+                    KeyValue::new("check_name", check_name.clone()),
+                    KeyValue::new("status", status_str.clone()),
+                ],
+            );
 
-        let build_status = BuildStatus::of(
-            &payload.check_suite.status,
-            &payload.check_suite.conclusion.as_deref(),
-        );
-        let status_str: String = build_status.into();
-
-        crate::metrics::get().builds_resolved.add(
-            1,
-            &[
-                KeyValue::new("repo", repo_label.clone()),
-                KeyValue::new("check_name", check_name.clone()),
-                KeyValue::new("status", status_str.clone()),
-            ],
-        );
-
-        // Look up the build to get start_time for duration calculation.
-        // DatabaseHandler runs first, so the build row is already present.
-        let conn = self
-            .pool
-            .get()
-            .context("Failed to get database connection")?;
-
-        let repo: GitRepo = payload.repository.clone().into();
-
-        let maybe_commit =
-            GitCommit::get_by_sha(&payload.check_suite.head_sha, repo.id, &conn)
-                .context("Error getting commit")?;
-
-        if let Some(commit) = maybe_commit {
-            let builds = GitCommitBuild::get_all_by_commit_id(&commit.id, &repo.id, &conn)
-                .context("Error getting builds")?;
-
-            if let Some(build) = builds.iter().find(|b| b.check_name == check_name) {
-                if let Some(start_time) = build.start_time {
-                    let now_ms = Utc::now().timestamp_millis() as u64;
-                    if now_ms > start_time {
-                        let duration_secs = (now_ms - start_time) as f64 / 1000.0;
-                        crate::metrics::get().build_duration_seconds.record(
-                            duration_secs,
-                            &[
-                                KeyValue::new("repo", repo_label),
-                                KeyValue::new("check_name", check_name),
-                                KeyValue::new("status", status_str),
-                            ],
-                        );
-                    }
+            // Duration straight from GitHub's own timestamps (no DB round-trip
+            // and no dependency on handler ordering).
+            if let (Some(start), Some(end)) = (
+                rfc3339_to_millis(run.started_at.as_deref()),
+                rfc3339_to_millis(run.completed_at.as_deref()),
+            ) {
+                if end > start {
+                    let duration_secs = (end - start) as f64 / 1000.0;
+                    crate::metrics::get().build_duration_seconds.record(
+                        duration_secs,
+                        &[
+                            KeyValue::new("repo", repo_label),
+                            KeyValue::new("check_name", check_name),
+                            KeyValue::new("status", status_str),
+                        ],
+                    );
                 }
             }
         }
