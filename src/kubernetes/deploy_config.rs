@@ -142,6 +142,70 @@ impl DeployConfig {
         }
     }
 
+    /// Whether this deploy is "non-latest": a branch other than the artifact's
+    /// tracking (default) branch, or a pinned SHA override (no branch).
+    ///
+    /// Consumers use this to fail closed on dangerous actions (e.g. refusing DB
+    /// schema migrations on a branch/pinned deploy).
+    pub fn is_non_latest_deploy(&self) -> bool {
+        match self.deployment_state() {
+            DeploymentState::DeployedWithArtifact { artifact, .. } => {
+                // None (pinned SHA) never equals Some(default), so a pinned
+                // deploy is always non-latest, as is any non-default branch.
+                let default_branch = self.artifact_repository().map(|r| r.branch);
+                artifact.branch.as_deref() != default_branch.as_deref()
+            }
+            // Config-only deploys don't track a config default branch yet, so
+            // they can't be classified as non-latest. Wire this up when config
+            // branch/SHA control lands.
+            DeploymentState::DeployedOnlyConfig { .. } => false,
+            DeploymentState::Undeployed => false,
+        }
+    }
+
+    /// The `CICD_*` environment variables to inject into every container of the
+    /// deployed workloads. Describes the deploy so apps can report their version
+    /// and make deploy-aware decisions (see [`Self::is_non_latest_deploy`]).
+    pub fn deploy_env_vars(&self) -> Vec<(String, String)> {
+        let mut vars: Vec<(String, String)> = vec![
+            ("CICD_DEPLOY_CONFIG".to_string(), self.name_any()),
+            ("CICD_TEAM".to_string(), self.team().to_string()),
+            (
+                "CICD_NON_LATEST_DEPLOY".to_string(),
+                self.is_non_latest_deploy().to_string(),
+            ),
+        ];
+
+        if let Some(default_branch) = self.artifact_repository().map(|r| r.branch) {
+            vars.push(("CICD_DEFAULT_BRANCH".to_string(), default_branch));
+        }
+
+        match self.deployment_state() {
+            DeploymentState::DeployedWithArtifact { artifact, config } => {
+                vars.push(("CICD_ARTIFACT_SHA".to_string(), artifact.sha));
+                vars.push((
+                    "CICD_ARTIFACT_BRANCH".to_string(),
+                    artifact.branch.unwrap_or_default(),
+                ));
+                vars.push(("CICD_CONFIG_SHA".to_string(), config.sha));
+                vars.push((
+                    "CICD_CONFIG_BRANCH".to_string(),
+                    config.branch.unwrap_or_default(),
+                ));
+            }
+            DeploymentState::DeployedOnlyConfig { config } => {
+                vars.push(("CICD_CONFIG_SHA".to_string(), config.sha));
+                vars.push((
+                    "CICD_CONFIG_BRANCH".to_string(),
+                    config.branch.unwrap_or_default(),
+                ));
+            }
+            DeploymentState::Undeployed => {}
+        }
+
+        vars
+    }
+
     /// Returns the owner reference to be applied to child resources
     pub fn child_owner_reference(&self) -> OwnerReference {
         OwnerReference {
