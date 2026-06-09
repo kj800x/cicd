@@ -33,6 +33,7 @@ mod build_status;
 mod crab_ext;
 mod db;
 mod error;
+mod github_deployments;
 mod kubernetes;
 mod mcp;
 mod metrics;
