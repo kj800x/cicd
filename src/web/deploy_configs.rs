@@ -1274,6 +1274,9 @@ pub async fn deploy_config(
         ],
     );
 
+    // Best-effort: mirror the new state into the GitHub Deployments API.
+    crate::github_deployments::report_deploy_action(&octocrabs, &config, &deploy_action).await;
+
     let Ok(maybe_deploy_event) =
         DeployEvent::from_user_deploy_action(&deploy_action, &conn, &config)
     else {

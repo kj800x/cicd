@@ -497,6 +497,9 @@ async fn execute_deploy_action(
         return ToolCallResult::error(format!("Failed to execute action: {}", e));
     }
 
+    // Best-effort: mirror the new state into the GitHub Deployments API.
+    crate::github_deployments::report_deploy_action(octocrabs, config, &deploy_action).await;
+
     // Log deploy event
     match DeployEvent::from_user_deploy_action(&deploy_action, &conn, config) {
         Ok(Some(event)) => {
