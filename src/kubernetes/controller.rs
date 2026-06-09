@@ -2,7 +2,7 @@ use super::DeployConfig;
 use crate::error::format_error_chain;
 use crate::kubernetes::api::ListMode;
 use crate::kubernetes::repo::DeploymentState;
-use crate::kubernetes::spec_editing::WithVersion;
+use crate::kubernetes::spec_editing::{WithInjectedEnv, WithVersion};
 use crate::kubernetes::{
     apply, delete_dynamic_object, ensure_namespace_exists, list_namespace_objects,
 };
@@ -41,6 +41,9 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> AppRes
         // Continue anyway - namespace might already exist
     }
 
+    // CICD_* env vars describing this deploy, injected into every container.
+    let deploy_env_vars = dc.deploy_env_vars();
+
     // Create or update resources as needed
     for resource in dc.resource_specs() {
         let mut obj: DynamicObject = serde_json::from_value(resource.clone()).map_err(|e| {
@@ -53,6 +56,8 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> AppRes
         if let DeploymentState::DeployedWithArtifact { artifact, .. } = dc.deployment_state() {
             obj = obj.with_version(&artifact.sha);
         }
+
+        obj = obj.with_injected_env(&deploy_env_vars);
 
         dc.ensure_owner_reference(&mut obj);
         dc.ensure_labels(&mut obj);
