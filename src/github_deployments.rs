@@ -17,7 +17,7 @@
 
 use serde_json::json;
 
-use crate::crab_ext::{IRepo, OctocrabExt, Octocrabs};
+use crate::crab_ext::{IRepo, Octocrabs};
 use crate::error::{AppError, AppResult};
 use crate::kubernetes::deploy_handlers::DeployAction;
 use crate::kubernetes::DeployConfig;
@@ -84,7 +84,7 @@ async fn report_success(octocrabs: &Octocrabs, repo: &impl IRepo, sha: &str, env
         return;
     };
 
-    if let Err(e) = create_success(crab, repo, sha, environment).await {
+    if let Err(e) = create_success(&crab, repo, sha, environment).await {
         log::warn!(
             "GitHub deployment report failed for {}/{} env={}: {}",
             repo.owner(),
@@ -154,7 +154,7 @@ async fn report_inactive(octocrabs: &Octocrabs, repo: &impl IRepo, environment: 
         return;
     };
 
-    if let Err(e) = set_inactive(crab, repo, environment).await {
+    if let Err(e) = set_inactive(&crab, repo, environment).await {
         log::warn!(
             "GitHub deployment deactivate failed for {}/{} env={}: {}",
             repo.owner(),

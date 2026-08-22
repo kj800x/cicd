@@ -1,6 +1,9 @@
 use serenity::async_trait;
 
-use crate::webhooks::models::{CheckRunEvent, CheckSuiteEvent, DeleteEvent, PushEvent};
+use crate::webhooks::models::{
+    CheckRunEvent, CheckSuiteEvent, DeleteEvent, InstallationRepositoriesEvent, PushEvent,
+    RepositoryEvent,
+};
 
 pub mod config_sync;
 pub mod database;
@@ -22,6 +25,15 @@ pub trait WebhookHandler {
         Ok(())
     }
     async fn handle_delete(&self, __event: DeleteEvent) -> Result<(), anyhow::Error> {
+        Ok(())
+    }
+    async fn handle_repository(&self, __event: RepositoryEvent) -> Result<(), anyhow::Error> {
+        Ok(())
+    }
+    async fn handle_installation_repositories(
+        &self,
+        __event: InstallationRepositoriesEvent,
+    ) -> Result<(), anyhow::Error> {
         Ok(())
     }
     async fn handle_unknown(&self, __event_type: &str) -> Result<(), anyhow::Error> {

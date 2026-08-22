@@ -116,3 +116,34 @@ pub struct CheckSuiteEvent {
     pub check_suite: CheckSuite,
     pub repository: Repository,
 }
+
+/// Sent to a GitHub App for repositories it is installed on. With an
+/// "all repositories" installation this includes `created`, which is the
+/// only way to learn about a brand-new repo before its first push.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RepositoryEvent {
+    /// created | deleted | archived | unarchived | edited | renamed |
+    /// transferred | publicized | privatized
+    pub action: String,
+    pub repository: Repository,
+}
+
+/// The trimmed repository shape used in `installation_repositories`
+/// payloads. No default branch or language, so a full fetch is needed
+/// before the repo can be stored.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct InstallationRepository {
+    pub id: u64,
+    pub name: String,
+    pub full_name: String,
+    pub private: bool,
+}
+
+/// Sent when repositories are added to or removed from the App installation.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct InstallationRepositoriesEvent {
+    /// added | removed
+    pub action: String,
+    pub repositories_added: Vec<InstallationRepository>,
+    pub repositories_removed: Vec<InstallationRepository>,
+}

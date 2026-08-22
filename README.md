@@ -74,7 +74,36 @@ The application requires the following environment variables:
 
 - `WEBSOCKET_URL`: URL for the websocket proxy that forwards GitHub webhooks
 - `CLIENT_SECRET`: Secret for authenticating with the websocket proxy
+- `GITHUB_APP_ID`: Numeric ID of the GitHub App cicd authenticates as (see below)
+- `GITHUB_APP_PRIVATE_KEY`: The App's RSA private key, PEM text
 - `DATABASE_PATH`: (Optional) Path to the SQLite database file (defaults to "db.db")
+
+If `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY` are both unset, the application runs
+without GitHub API access (webhook ingestion still works, but bootstrap, commit
+parent lookup, deploy config fetching and deployment reporting are disabled).
+
+#### GitHub App Configuration
+
+cicd talks to GitHub as a [GitHub App](https://docs.github.com/en/apps) rather
+than with personal access tokens. The App is installed on each user or
+organization whose repositories should be tracked; each installation gets its
+own short-lived token, minted on demand. Installing with **All repositories**
+means new repos are covered the moment they are created, with no per-repo
+webhook to set up.
+
+The App needs:
+
+| Setting | Value |
+|---------|-------|
+| Webhook URL | The `/github` endpoint of the webhooks proxy |
+| Webhook secret | Must match the proxy's `WEBHOOK_SECRET` |
+| Repository permissions | Metadata: read, Contents: read, Checks: read, Deployments: read & write |
+| Subscribed events | Push, Check run, Delete, Repository |
+
+The `Repository` event is what tells cicd about repositories as soon as they
+are created. Installations are discovered at startup and re-listed at the start
+of every owner-wide bootstrap scan; installing the App on a new account is
+also picked up lazily on first use.
 
 #### Discord Notification Configuration
 
@@ -114,6 +143,8 @@ docker build -t cicd-dashboard .
 docker run -p 8080:8080 \
   -e WEBSOCKET_URL=your_websocket_url \
   -e CLIENT_SECRET=your_client_secret \
+  -e GITHUB_APP_ID=your_app_id \
+  -e GITHUB_APP_PRIVATE_KEY="$(cat your-app.private-key.pem)" \
   -v /path/to/data:/app/data \
   cicd-dashboard
 ```

@@ -40,6 +40,35 @@ impl From<WebhookRepository> for GitRepo {
     }
 }
 
+/// From the REST API's repository model, as returned by `GET /repos/{owner}/{repo}`
+/// and the list endpoints. Fails only if GitHub omitted the owner, which it
+/// does not do for real repositories.
+impl TryFrom<octocrab::models::Repository> for GitRepo {
+    type Error = AppError;
+
+    fn try_from(repo: octocrab::models::Repository) -> AppResult<Self> {
+        let owner_name = repo
+            .owner
+            .as_ref()
+            .map(|owner| owner.login.clone())
+            .ok_or_else(|| {
+                AppError::Parse(format!("GitHub repository {} has no owner", repo.name))
+            })?;
+
+        Ok(Self {
+            id: repo.id.0,
+            owner_name,
+            name: repo.name,
+            default_branch: repo.default_branch.unwrap_or_else(|| "main".to_string()),
+            private: repo.private.unwrap_or(false),
+            language: repo
+                .language
+                .as_ref()
+                .and_then(|v| v.as_str().map(|s| s.to_string())),
+        })
+    }
+}
+
 impl GitRepo {
     pub fn from_row(row: &rusqlite::Row) -> AppResult<Self> {
         Ok(GitRepo {

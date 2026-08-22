@@ -6,7 +6,9 @@ use crate::prelude::*;
 use crate::webhooks::models::CheckRunEvent;
 use crate::webhooks::models::CheckSuiteEvent;
 use crate::webhooks::models::DeleteEvent;
+use crate::webhooks::models::InstallationRepositoriesEvent;
 use crate::webhooks::models::PushEvent;
+use crate::webhooks::models::RepositoryEvent;
 use crate::webhooks::models::WebhookEvent;
 use crate::webhooks::WebhookHandler;
 use futures_util::SinkExt;
@@ -227,6 +229,43 @@ impl WebhookManager {
                     e
                 ))),
             },
+            "repository" => match serde_json::from_value::<RepositoryEvent>(event.payload) {
+                Ok(payload) => {
+                    for handler in &self.handlers {
+                        let handler_result = handler.handle_repository(payload.clone()).await;
+                        if let Err(e) = handler_result {
+                            log::error!("Error handling repository:\n{}", format_anyhow_chain(&e));
+                        }
+                    }
+                    Ok(())
+                }
+                Err(e) => Err(anyhow::Error::msg(format!(
+                    "Error parsing repository event: {}",
+                    e
+                ))),
+            },
+            "installation_repositories" => {
+                match serde_json::from_value::<InstallationRepositoriesEvent>(event.payload) {
+                    Ok(payload) => {
+                        for handler in &self.handlers {
+                            let handler_result = handler
+                                .handle_installation_repositories(payload.clone())
+                                .await;
+                            if let Err(e) = handler_result {
+                                log::error!(
+                                    "Error handling installation_repositories:\n{}",
+                                    format_anyhow_chain(&e)
+                                );
+                            }
+                        }
+                        Ok(())
+                    }
+                    Err(e) => Err(anyhow::Error::msg(format!(
+                        "Error parsing installation_repositories event: {}",
+                        e
+                    ))),
+                }
+            }
             _ => {
                 log::debug!("Received unknown event: {}", event.event_type);
                 for handler in &self.handlers {
