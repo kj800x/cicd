@@ -18,6 +18,11 @@ use crate::web::ResourceStatuses;
 
 use super::protocol::{Tool, ToolCallResult};
 
+// NOTE: The `autodeploy` flag and the `toggle_autodeploy` action are deliberately
+// not exposed over MCP. Autodeploy is not implemented yet (see
+// https://github.com/kj800x/cicd/issues/20), and surfacing the flag misleads
+// agents into assuming new builds roll out on their own. Re-add both once the
+// feature is actually wired up.
 pub fn tool_definitions() -> Vec<Tool> {
     vec![
         Tool {
@@ -99,17 +104,6 @@ pub fn tool_definitions() -> Vec<Tool> {
                 "required": ["name"]
             }),
         },
-        Tool {
-            name: "toggle_autodeploy".to_string(),
-            description: "Toggle the autodeploy setting on a deploy config".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "Name of the deploy config" }
-                },
-                "required": ["name"]
-            }),
-        },
     ]
 }
 
@@ -128,9 +122,6 @@ pub async fn dispatch(
         "undeploy" => handle_action("undeploy", arguments, client, pool, octocrabs).await,
         "bounce" => handle_action("bounce", arguments, client, pool, octocrabs).await,
         "execute_job" => handle_action("execute_job", arguments, client, pool, octocrabs).await,
-        "toggle_autodeploy" => {
-            handle_action("toggle_autodeploy", arguments, client, pool, octocrabs).await
-        }
         _ => ToolCallResult::error(format!("Unknown tool: {}", tool_name)),
     }
 }
@@ -184,7 +175,6 @@ async fn handle_list_deploy_configs(
                 "team": config.team(),
                 "kind": config.kind(),
                 "state": state,
-                "autodeploy": config.autodeploy(),
                 "orphaned": config.is_orphaned(),
                 "artifact_repo": artifact_repo_name,
                 "config_repo": config_repo_name,
@@ -255,7 +245,6 @@ async fn handle_get_deploy_config(arguments: Value, client: &Client) -> ToolCall
         "team": config.team(),
         "kind": config.kind(),
         "state": state,
-        "autodeploy": config.autodeploy(),
         "orphaned": config.is_orphaned(),
         "supports_bounce": config.supports_bounce(),
         "supports_execute_job": config.supports_execute_job(),
@@ -425,14 +414,6 @@ async fn handle_action(
                 );
             }
             Action::ExecuteJob
-        }
-        "toggle_autodeploy" => {
-            if config.is_orphaned() {
-                return ToolCallResult::error(
-                    "Cannot toggle autodeploy on an orphaned config.".to_string(),
-                );
-            }
-            Action::ToggleAutodeploy
         }
         _ => return ToolCallResult::error(format!("Unknown action: {}", action_type)),
     };
