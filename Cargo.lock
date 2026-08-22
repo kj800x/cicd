@@ -776,6 +776,7 @@ dependencies = [
  "futures-util",
  "indoc",
  "itertools",
+ "jsonwebtoken",
  "k8s-openapi",
  "kube",
  "log",

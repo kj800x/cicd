@@ -7,7 +7,7 @@ use serenity::async_trait;
 
 use crate::{
     build_status::BuildStatus,
-    crab_ext::{OctocrabExt, Octocrabs},
+    crab_ext::{Octocrabs, RepoRef},
     db::{
         git_branch::{GitBranch, GitBranchEgg},
         git_commit::{GitCommit, GitCommitEgg},
@@ -15,7 +15,9 @@ use crate::{
         git_repo::GitRepo,
     },
     webhooks::{
-        models::{CheckRunEvent, DeleteEvent, PushEvent},
+        models::{
+            CheckRunEvent, DeleteEvent, InstallationRepositoriesEvent, PushEvent, RepositoryEvent,
+        },
         util::{extract_branch_name, rfc3339_to_millis},
         WebhookHandler,
     },
@@ -188,6 +190,97 @@ impl WebhookHandler for DatabaseHandler {
                 branch
                     .mark_inactive(&conn)
                     .context("Error marking branch inactive")?;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn handle_repository(&self, payload: RepositoryEvent) -> Result<(), anyhow::Error> {
+        log::debug!("Received repository event:\n{:#?}", payload);
+
+        match payload.action.as_str() {
+            // Each of these carries the full, current repository object, so
+            // upserting keeps our row in step with GitHub. `created` is the
+            // important one: it lets a brand-new repo show up before its
+            // first push.
+            "created" | "edited" | "renamed" | "transferred" | "publicized" | "privatized"
+            | "unarchived" => {
+                let conn = self
+                    .pool
+                    .get()
+                    .context("Failed to get database connection")?;
+
+                let repo: GitRepo = payload.repository.into();
+                repo.upsert(&conn).context("Error upserting repository")?;
+                log::info!(
+                    "Repository {}/{} {}",
+                    repo.owner_name,
+                    repo.name,
+                    payload.action
+                );
+            }
+            // Deleted and archived repos keep their rows: there is no repo
+            // removal path today, and their history stays useful.
+            _ => log::debug!(
+                "Ignoring repository {} for {}/{}",
+                payload.action,
+                payload.repository.owner.login,
+                payload.repository.name
+            ),
+        }
+
+        Ok(())
+    }
+
+    async fn handle_installation_repositories(
+        &self,
+        payload: InstallationRepositoriesEvent,
+    ) -> Result<(), anyhow::Error> {
+        log::debug!("Received installation_repositories event:\n{:#?}", payload);
+
+        // Removal keeps rows for the same reason repository.deleted does.
+        if payload.action != "added" {
+            return Ok(());
+        }
+
+        let conn = self
+            .pool
+            .get()
+            .context("Failed to get database connection")?;
+
+        for added in payload.repositories_added {
+            let Some((owner, name)) = added.full_name.split_once('/') else {
+                log::warn!("Malformed repository full_name: {}", added.full_name);
+                continue;
+            };
+
+            // The payload only carries id/name/private; fetch the rest so the
+            // row is complete. Best-effort per repo so one failure doesn't
+            // hide the others.
+            let Some(crab) = self
+                .octocrabs
+                .crab_for(&RepoRef { owner, repo: name })
+                .await
+            else {
+                log::warn!("No GitHub App installation can access {}", added.full_name);
+                continue;
+            };
+
+            let repo = match crab.repos(owner, name).get().await {
+                Ok(repo_data) => GitRepo::try_from(repo_data),
+                Err(e) => {
+                    log::warn!("Failed to fetch {}: {}", added.full_name, e);
+                    continue;
+                }
+            };
+
+            match repo {
+                Ok(repo) => {
+                    repo.upsert(&conn).context("Error upserting repository")?;
+                    log::info!("Repository {} added to installation", added.full_name);
+                }
+                Err(e) => log::warn!("Failed to convert {}: {}", added.full_name, e),
             }
         }
 

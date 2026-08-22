@@ -26,7 +26,7 @@ pub fn init(registry: &prometheus::Registry) -> Result<(), anyhow::Error> {
             "cicd_github_rate_limit_remaining",
             "GitHub API rate limit remaining requests",
         ),
-        &["token"],
+        &["installation"],
     )?;
     registry.register(Box::new(github_rate_limit_remaining.clone()))?;
 
@@ -35,7 +35,7 @@ pub fn init(registry: &prometheus::Registry) -> Result<(), anyhow::Error> {
             "cicd_github_rate_limit_limit",
             "GitHub API rate limit total requests allowed",
         ),
-        &["token"],
+        &["installation"],
     )?;
     registry.register(Box::new(github_rate_limit_limit.clone()))?;
 

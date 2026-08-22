@@ -2,7 +2,10 @@
 use serenity::async_trait;
 
 use crate::webhooks::{
-    models::{CheckRunEvent, CheckSuiteEvent, DeleteEvent, PushEvent},
+    models::{
+        CheckRunEvent, CheckSuiteEvent, DeleteEvent, InstallationRepositoriesEvent, PushEvent,
+        RepositoryEvent,
+    },
     WebhookHandler,
 };
 
@@ -33,6 +36,19 @@ impl WebhookHandler for LogHandler {
 
     async fn handle_delete(&self, event: DeleteEvent) -> Result<(), anyhow::Error> {
         log::info!("Received delete event:\n{:#?}", event);
+        Ok(())
+    }
+
+    async fn handle_repository(&self, event: RepositoryEvent) -> Result<(), anyhow::Error> {
+        log::info!("Received repository event:\n{:#?}", event);
+        Ok(())
+    }
+
+    async fn handle_installation_repositories(
+        &self,
+        event: InstallationRepositoriesEvent,
+    ) -> Result<(), anyhow::Error> {
+        log::info!("Received installation_repositories event:\n{:#?}", event);
         Ok(())
     }
 

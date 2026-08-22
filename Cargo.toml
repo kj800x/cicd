@@ -65,6 +65,7 @@ opentelemetry_sdk = { version = "0.21", features = [
 opentelemetry-prometheus = { version = "0.14" }
 prometheus = { version = "0.13" }
 octocrab = "0.46.0"
+jsonwebtoken = "9.3" # for octocrab App auth (EncodingKey)
 serde_yaml = "0.9.34"
 itertools = "0.14.0"
 sha2 = "0.10.9"

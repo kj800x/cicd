@@ -28,10 +28,15 @@ spec:
               value: 'template-namespace'
             - name: DATABASE_PATH
               value: /data/db.db
-            - name: GITHUB_PATS
+            - name: GITHUB_APP_ID
               valueFrom:
                 secretKeyRef:
-                  key: GITHUB_PATS
+                  key: GITHUB_APP_ID
+                  name: cicd-auth
+            - name: GITHUB_APP_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: GITHUB_APP_PRIVATE_KEY
                   name: cicd-auth
             - name: CLIENT_SECRET
               valueFrom:

@@ -9,7 +9,7 @@ use serde_json::Value;
 use serenity::async_trait;
 
 use crate::{
-    crab_ext::{IRepo, OctocrabExt, Octocrabs},
+    crab_ext::{IRepo, Octocrabs},
     db::{
         deploy_config::DeployConfig as DbDeployConfig, deploy_config_version::DeployConfigVersion,
         git_repo::GitRepo,

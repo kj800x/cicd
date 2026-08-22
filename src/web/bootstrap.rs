@@ -1,4 +1,4 @@
-use crate::crab_ext::Octocrabs;
+use crate::crab_ext::{IRepo, InstallationClient, Octocrabs, RepoRef};
 use crate::db::{
     git_branch::GitBranchEgg, git_commit::GitCommitEgg, git_commit_build::GitCommitBuild,
     git_repo::GitRepo,
@@ -81,28 +81,6 @@ async fn log_rate_limit(crab: &Octocrab, label: &str) -> Option<usize> {
             None
         }
     }
-}
-
-async fn list_all_repos(crab: &Octocrab) -> anyhow::Result<Vec<octocrab::models::Repository>> {
-    let mut all: Vec<octocrab::models::Repository> = Vec::new();
-    let mut page: u8 = 1;
-    loop {
-        let resp = crab
-            .current()
-            .list_repos_for_authenticated_user()
-            .affiliation("owner")
-            .per_page(PER_PAGE)
-            .page(page)
-            .send()
-            .await?;
-        let count = resp.items.len() as u8;
-        all.extend(resp.items);
-        if count < PER_PAGE {
-            break;
-        }
-        page += 1;
-    }
-    Ok(all)
 }
 
 async fn list_all_branches(
@@ -385,43 +363,40 @@ async fn run_owner_bootstrap_impl(
         }
     };
 
-    for (idx, crab) in octocrabs.iter().enumerate() {
-        let token_label = format!("token-{}", idx + 1);
-        let start_remaining = log_rate_limit(crab, &format!("start-{}", token_label)).await;
-        match list_all_repos(crab).await {
+    // Pick up installations added since startup (or missed by a failed
+    // startup listing) before sweeping.
+    if let Err(e) = octocrabs.refresh_installations().await {
+        log::warn!("Bootstrap: refresh installations failed: {}", e);
+        log_append(format!("Warning: refresh installations failed: {}", e));
+    }
+    let installations = octocrabs.installations();
+    if installations.is_empty() {
+        log_append("No GitHub App installations found; nothing to scan");
+        return;
+    }
+    log_append(format!("Found {} installation(s)", installations.len()));
+
+    for installation in installations {
+        let crab = &installation;
+        let install_label = &installation.account;
+        let start_remaining = log_rate_limit(crab, &format!("start-{}", install_label)).await;
+        match installation.list_repos().await {
             Ok(repos) => {
-                log_append(format!("Discovered {} repositories", repos.len()));
+                log_append(format!(
+                    "Discovered {} repositories for {}",
+                    repos.len(),
+                    install_label
+                ));
                 for r in repos {
-                    let default_branch = r
-                        .default_branch
-                        .clone()
-                        .unwrap_or_else(|| "main".to_string());
-                    let (owner_name, name) = if let Some(full) = r.full_name.clone() {
-                        let mut parts = full.splitn(2, '/');
-                        (
-                            parts.next().unwrap_or_default().to_string(),
-                            parts.next().unwrap_or_default().to_string(),
-                        )
-                    } else {
-                        (
-                            r.owner
-                                .as_ref()
-                                .map(|o| o.login.clone())
-                                .unwrap_or_default(),
-                            r.name.clone(),
-                        )
+                    let repo = match GitRepo::try_from(r) {
+                        Ok(repo) => repo,
+                        Err(e) => {
+                            log::warn!("Bootstrap: skipping repository: {}", e);
+                            log_append(format!("Skipping repository: {}", e));
+                            continue;
+                        }
                     };
-                    let repo = GitRepo {
-                        id: r.id.0,
-                        owner_name,
-                        name,
-                        default_branch: default_branch.clone(),
-                        private: r.private.unwrap_or(false),
-                        language: r
-                            .language
-                            .as_ref()
-                            .and_then(|v| v.as_str().map(|s| s.to_string())),
-                    };
+                    let default_branch = repo.default_branch.clone();
                     if let Err(e) = repo.upsert(&conn) {
                         log::warn!(
                             "Bootstrap: upsert repo {}/{} failed: {}",
@@ -673,23 +648,89 @@ async fn run_owner_bootstrap_impl(
                         ));
                     }
                 }
-                let end_remaining = log_rate_limit(crab, &format!("end-{}", token_label)).await;
+                let end_remaining = log_rate_limit(crab, &format!("end-{}", install_label)).await;
 
                 // Calculate usage if we have both start and end measurements
                 if let (Some(start), Some(end)) = (start_remaining, end_remaining) {
                     let used = start.saturating_sub(end);
                     log_append(format!(
                         "Bootstrap used approximately {} API requests for {}",
-                        used, token_label
+                        used, install_label
                     ));
                 }
 
-                log_append("Bootstrap completed");
+                log_append(format!("Bootstrap completed for {}", install_label));
             }
             Err(e) => {
-                log::warn!("Bootstrap: list repos failed: {:?}", e);
-                log_append(format!("Error: list repos failed: {:?}", e));
+                log::warn!(
+                    "Bootstrap: list repos for {} failed: {:?}",
+                    install_label,
+                    e
+                );
+                log_append(format!(
+                    "Error: list repos for {} failed: {:?}",
+                    install_label, e
+                ));
             }
+        }
+    }
+}
+
+/// Resolve the installation covering `owner/repo`, logging to the bootstrap
+/// log when there is none.
+async fn installation_for(
+    octocrabs: &Octocrabs,
+    owner: &str,
+    repo: &str,
+) -> Option<InstallationClient> {
+    let installation = octocrabs.crab_for(&RepoRef { owner, repo }).await;
+    if installation.is_none() {
+        log::warn!(
+            "Bootstrap: no GitHub App installation can access {}/{}",
+            owner,
+            repo
+        );
+        log_append(format!(
+            "Error: no GitHub App installation can access {}/{}",
+            owner, repo
+        ));
+    }
+    installation
+}
+
+/// Fetch `owner/repo` from GitHub, logging to the bootstrap log on failure.
+async fn fetch_repo(crab: &Octocrab, owner: &str, repo_name: &str) -> Option<GitRepo> {
+    let repo_data = match crab.repos(owner, repo_name).get().await {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!(
+                "Bootstrap: fetch repo {}/{} failed: {:?}",
+                owner,
+                repo_name,
+                e
+            );
+            log_append(format!(
+                "Error: fetch repo {}/{} failed: {:?}",
+                owner, repo_name, e
+            ));
+            return None;
+        }
+    };
+
+    match GitRepo::try_from(repo_data) {
+        Ok(repo) => Some(repo),
+        Err(e) => {
+            log::warn!(
+                "Bootstrap: convert repo {}/{} failed: {}",
+                owner,
+                repo_name,
+                e
+            );
+            log_append(format!(
+                "Error: convert repo {}/{} failed: {}",
+                owner, repo_name, e
+            ));
+            None
         }
     }
 }
@@ -712,312 +753,282 @@ async fn run_repo_bootstrap_impl(
 
     log_append(format!("Scanning repo {}/{}", owner, repo_name));
 
-    for (idx, crab) in octocrabs.iter().enumerate() {
-        let token_label = format!("token-{}", idx + 1);
-        let start_remaining = log_rate_limit(crab, &format!("start-{}", token_label)).await;
+    let Some(installation) = installation_for(&octocrabs, &owner, &repo_name).await else {
+        return;
+    };
+    let crab = &installation;
+    let install_label = &installation.account;
+    let start_remaining = log_rate_limit(crab, &format!("start-{}", install_label)).await;
 
-        // Fetch the specific repository
-        let repo_data = match crab.repos(&owner, &repo_name).get().await {
-            Ok(r) => r,
-            Err(e) => {
-                log::warn!(
-                    "Bootstrap: fetch repo {}/{} failed: {:?}",
-                    owner,
-                    repo_name,
-                    e
-                );
-                log_append(format!(
-                    "Error: fetch repo {}/{} failed: {:?}",
-                    owner, repo_name, e
-                ));
-                continue;
-            }
-        };
+    let Some(repo) = fetch_repo(crab, &owner, &repo_name).await else {
+        return;
+    };
 
-        let default_branch = repo_data
-            .default_branch
-            .clone()
-            .unwrap_or_else(|| "main".to_string());
+    if let Err(e) = repo.upsert(&conn) {
+        log::warn!(
+            "Bootstrap: upsert repo {}/{} failed: {}",
+            owner,
+            repo_name,
+            e
+        );
+        log_append(format!(
+            "repo {}/{}: upsert failed: {}",
+            owner, repo_name, e
+        ));
+        return;
+    }
 
-        let repo = GitRepo {
-            id: repo_data.id.0,
-            owner_name: owner.clone(),
-            name: repo_name.clone(),
-            default_branch: default_branch.clone(),
-            private: repo_data.private.unwrap_or(false),
-            language: repo_data
-                .language
-                .as_ref()
-                .and_then(|v| v.as_str().map(|s| s.to_string())),
-        };
+    log_append(format!(
+        "repo {}/{}: fetching all branches",
+        owner, repo_name
+    ));
 
-        if let Err(e) = repo.upsert(&conn) {
+    // Fetch all branches for this repo
+    let branches = match list_all_branches(crab, &owner, &repo_name).await {
+        Ok(b) => b,
+        Err(e) => {
             log::warn!(
-                "Bootstrap: upsert repo {}/{} failed: {}",
+                "Bootstrap: list branches for {}/{} failed: {:?}",
                 owner,
                 repo_name,
                 e
             );
             log_append(format!(
-                "repo {}/{}: upsert failed: {}",
+                "repo {}/{}: list branches failed: {:?}",
                 owner, repo_name, e
             ));
             return;
         }
+    };
 
-        log_append(format!(
-            "repo {}/{}: fetching all branches",
-            owner, repo_name
-        ));
+    log_append(format!(
+        "repo {}/{}: processing {} branches",
+        owner,
+        repo_name,
+        branches.len()
+    ));
 
-        // Fetch all branches for this repo
-        let branches = match list_all_branches(crab, &owner, &repo_name).await {
-            Ok(b) => b,
+    for branch_data in branches {
+        let branch_name = branch_data.name.clone();
+
+        log_rate_limit(
+            crab,
+            &format!("before-commits-{}/{}@{}", owner, repo_name, branch_name),
+        )
+        .await;
+
+        let commits = match list_commits_for_branch(
+            crab,
+            &owner,
+            &repo_name,
+            &branch_name,
+            50, // Deep scan: 50 commits per branch
+        )
+        .await
+        {
+            Ok(c) => c,
             Err(e) => {
                 log::warn!(
-                    "Bootstrap: list branches for {}/{} failed: {:?}",
+                    "Bootstrap: list commits for {}/{}@{} failed: {:?}",
                     owner,
                     repo_name,
+                    branch_name,
                     e
                 );
                 log_append(format!(
-                    "repo {}/{}: list branches failed: {:?}",
-                    owner, repo_name, e
+                    "repo {}/{}: list commits for {} failed: {:?}",
+                    owner, repo_name, branch_name, e
                 ));
-                return;
+                continue;
             }
         };
 
         log_append(format!(
-            "repo {}/{}: processing {} branches",
+            "repo {}/{}: {} commits on {}",
             owner,
             repo_name,
-            branches.len()
+            commits.len(),
+            branch_name
         ));
 
-        for branch_data in branches {
-            let branch_name = branch_data.name.clone();
-
-            log_rate_limit(
-                crab,
-                &format!("before-commits-{}/{}@{}", owner, repo_name, branch_name),
-            )
-            .await;
-
-            let commits = match list_commits_for_branch(
-                crab,
-                &owner,
-                &repo_name,
-                &branch_name,
-                50, // Deep scan: 50 commits per branch
-            )
-            .await
-            {
-                Ok(c) => c,
+        if let Some(first) = commits.first() {
+            let branch_egg = GitBranchEgg {
+                name: branch_name.clone(),
+                head_commit_sha: first.sha.clone(),
+                repo_id: repo.id,
+                active: true,
+            };
+            let branch = match branch_egg.upsert(&conn) {
+                Ok(br) => br,
                 Err(e) => {
                     log::warn!(
-                        "Bootstrap: list commits for {}/{}@{} failed: {:?}",
+                        "Bootstrap: upsert branch {} for {}/{} failed: {}",
+                        branch_name,
                         owner,
                         repo_name,
-                        branch_name,
                         e
                     );
                     log_append(format!(
-                        "repo {}/{}: list commits for {} failed: {:?}",
+                        "repo {}/{}: upsert branch {} failed: {}",
                         owner, repo_name, branch_name, e
                     ));
                     continue;
                 }
             };
 
-            log_append(format!(
-                "repo {}/{}: {} commits on {}",
-                owner,
-                repo_name,
-                commits.len(),
-                branch_name
-            ));
+            for c in commits {
+                let author_name = c
+                    .commit
+                    .author
+                    .as_ref()
+                    .map(|a| a.name.clone())
+                    .unwrap_or_else(|| "unknown".to_string());
+                let committer_name = c
+                    .commit
+                    .committer
+                    .as_ref()
+                    .map(|a| a.name.clone())
+                    .unwrap_or_else(|| "unknown".to_string());
+                let ts_millis = c
+                    .commit
+                    .author
+                    .as_ref()
+                    .and_then(|a| a.date.as_ref())
+                    .or_else(|| c.commit.committer.as_ref().and_then(|a| a.date.as_ref()))
+                    .map(|d| d.timestamp_millis())
+                    .unwrap_or_else(|| Utc::now().timestamp_millis());
 
-            if let Some(first) = commits.first() {
-                let branch_egg = GitBranchEgg {
-                    name: branch_name.clone(),
-                    head_commit_sha: first.sha.clone(),
+                let egg = GitCommitEgg {
+                    sha: c.sha.clone(),
                     repo_id: repo.id,
-                    active: true,
+                    message: c.commit.message.clone(),
+                    author: author_name,
+                    committer: committer_name,
+                    timestamp: ts_millis,
                 };
-                let branch = match branch_egg.upsert(&conn) {
-                    Ok(br) => br,
+                let commit = match crate::db::git_commit::GitCommit::upsert(&egg, &conn) {
+                    Ok(cc) => cc,
                     Err(e) => {
                         log::warn!(
-                            "Bootstrap: upsert branch {} for {}/{} failed: {}",
-                            branch_name,
+                            "Bootstrap: upsert commit {} for {}/{} failed: {}",
+                            c.sha,
                             owner,
                             repo_name,
                             e
                         );
                         log_append(format!(
-                            "repo {}/{}: upsert branch {} failed: {}",
-                            owner, repo_name, branch_name, e
+                            "repo {}/{}: upsert commit {} failed: {}",
+                            owner, repo_name, c.sha, e
                         ));
                         continue;
                     }
                 };
 
-                for c in commits {
-                    let author_name = c
-                        .commit
-                        .author
-                        .as_ref()
-                        .map(|a| a.name.clone())
-                        .unwrap_or_else(|| "unknown".to_string());
-                    let committer_name = c
-                        .commit
-                        .committer
-                        .as_ref()
-                        .map(|a| a.name.clone())
-                        .unwrap_or_else(|| "unknown".to_string());
-                    let ts_millis = c
-                        .commit
-                        .author
-                        .as_ref()
-                        .and_then(|a| a.date.as_ref())
-                        .or_else(|| c.commit.committer.as_ref().and_then(|a| a.date.as_ref()))
-                        .map(|d| d.timestamp_millis())
-                        .unwrap_or_else(|| Utc::now().timestamp_millis());
+                let parent_shas: Vec<String> =
+                    c.parents.clone().into_iter().flat_map(|p| p.sha).collect();
+                if let Err(e) = commit.add_parent_shas(parent_shas, &conn) {
+                    log::debug!("Bootstrap: add parents for {} failed: {}", commit.sha, e);
+                }
+                if let Err(e) = commit.add_branch(branch.id, &conn) {
+                    log::debug!(
+                        "Bootstrap: add branch relation for {} failed: {}",
+                        commit.sha,
+                        e
+                    );
+                }
 
-                    let egg = GitCommitEgg {
-                        sha: c.sha.clone(),
-                        repo_id: repo.id,
-                        message: c.commit.message.clone(),
-                        author: author_name,
-                        committer: committer_name,
-                        timestamp: ts_millis,
-                    };
-                    let commit = match crate::db::git_commit::GitCommit::upsert(&egg, &conn) {
-                        Ok(cc) => cc,
-                        Err(e) => {
-                            log::warn!(
-                                "Bootstrap: upsert commit {} for {}/{} failed: {}",
-                                c.sha,
-                                owner,
-                                repo_name,
-                                e
-                            );
-                            log_append(format!(
-                                "repo {}/{}: upsert commit {} failed: {}",
-                                owner, repo_name, c.sha, e
-                            ));
-                            continue;
-                        }
-                    };
-
-                    let parent_shas: Vec<String> =
-                        c.parents.clone().into_iter().flat_map(|p| p.sha).collect();
-                    if let Err(e) = commit.add_parent_shas(parent_shas, &conn) {
-                        log::debug!("Bootstrap: add parents for {} failed: {}", commit.sha, e);
-                    }
-                    if let Err(e) = commit.add_branch(branch.id, &conn) {
-                        log::debug!(
-                            "Bootstrap: add branch relation for {} failed: {}",
-                            commit.sha,
-                            e
-                        );
-                    }
-
-                    // Fetch check runs and reconcile stored builds with GitHub.
-                    match get_check_runs_for_sha(crab, &owner, &repo_name, &commit.sha).await {
-                        Ok(checks) => {
-                            let builds: Vec<GitCommitBuild> = checks
-                                .into_iter()
-                                .map(|c| GitCommitBuild {
-                                    repo_id: repo.id,
-                                    commit_id: commit.id,
-                                    check_name: c.check_name,
-                                    status: c.status,
-                                    url: c.url,
-                                    start_time: c.start_time,
-                                    settle_time: c.settle_time,
-                                    app_id: c.app_id,
-                                })
-                                .collect();
-                            if let Err(e) = GitCommitBuild::reconcile_for_commit(
-                                repo.id, commit.id, &builds, &conn,
-                            ) {
-                                log::debug!(
-                                    "Bootstrap: reconcile builds for {} failed: {}",
-                                    commit.sha,
-                                    e
-                                );
-                            }
-                        }
-                        Err(e) => {
+                // Fetch check runs and reconcile stored builds with GitHub.
+                match get_check_runs_for_sha(crab, &owner, &repo_name, &commit.sha).await {
+                    Ok(checks) => {
+                        let builds: Vec<GitCommitBuild> = checks
+                            .into_iter()
+                            .map(|c| GitCommitBuild {
+                                repo_id: repo.id,
+                                commit_id: commit.id,
+                                check_name: c.check_name,
+                                status: c.status,
+                                url: c.url,
+                                start_time: c.start_time,
+                                settle_time: c.settle_time,
+                                app_id: c.app_id,
+                            })
+                            .collect();
+                        if let Err(e) =
+                            GitCommitBuild::reconcile_for_commit(repo.id, commit.id, &builds, &conn)
+                        {
                             log::debug!(
-                                "Bootstrap: fetch check runs for {} failed: {:?}",
+                                "Bootstrap: reconcile builds for {} failed: {}",
                                 commit.sha,
                                 e
                             );
                         }
                     }
-                }
-
-                // Sync deploy configs only for the HEAD of the default branch
-                if branch_name == repo.default_branch {
-                    let head_commit = &branch_egg.head_commit_sha;
-                    match sync_deploy_configs_for_commit(
-                        &octocrabs,
-                        &client,
-                        &pool,
-                        &owner,
-                        &repo_name,
-                        repo.id as u64,
-                        head_commit,
-                    )
-                    .await
-                    {
-                        Ok(_) => {
-                            log_append(format!(
-                                "repo {}/{}: synced deploy configs for HEAD of default branch ({})",
-                                owner,
-                                repo_name,
-                                &head_commit[..7]
-                            ));
-                        }
-                        Err(e) => {
-                            log::debug!(
-                                "Bootstrap: sync deploy configs for {}/{} @ {} failed: {:?}",
-                                owner,
-                                repo_name,
-                                head_commit,
-                                e
-                            );
-                        }
+                    Err(e) => {
+                        log::debug!(
+                            "Bootstrap: fetch check runs for {} failed: {:?}",
+                            commit.sha,
+                            e
+                        );
                     }
                 }
-            } else {
-                log_append(format!(
-                    "repo {}/{}: no commits on {}",
-                    owner, repo_name, branch_name
-                ));
             }
-        }
 
-        let end_remaining = log_rate_limit(crab, &format!("end-{}", token_label)).await;
-
-        // Calculate usage if we have both start and end measurements
-        if let (Some(start), Some(end)) = (start_remaining, end_remaining) {
-            let used = start.saturating_sub(end);
+            // Sync deploy configs only for the HEAD of the default branch
+            if branch_name == repo.default_branch {
+                let head_commit = &branch_egg.head_commit_sha;
+                match sync_deploy_configs_for_commit(
+                    &octocrabs,
+                    &client,
+                    &pool,
+                    &owner,
+                    &repo_name,
+                    repo.id as u64,
+                    head_commit,
+                )
+                .await
+                {
+                    Ok(_) => {
+                        log_append(format!(
+                            "repo {}/{}: synced deploy configs for HEAD of default branch ({})",
+                            owner,
+                            repo_name,
+                            &head_commit[..7]
+                        ));
+                    }
+                    Err(e) => {
+                        log::debug!(
+                            "Bootstrap: sync deploy configs for {}/{} @ {} failed: {:?}",
+                            owner,
+                            repo_name,
+                            head_commit,
+                            e
+                        );
+                    }
+                }
+            }
+        } else {
             log_append(format!(
-                "Deep repo scan used approximately {} API requests for {}",
-                used, token_label
+                "repo {}/{}: no commits on {}",
+                owner, repo_name, branch_name
             ));
         }
-
-        log_append(format!(
-            "Deep repo scan completed for {}/{}",
-            owner, repo_name
-        ));
-        break; // Only use the first token that works
     }
+
+    let end_remaining = log_rate_limit(crab, &format!("end-{}", install_label)).await;
+
+    // Calculate usage if we have both start and end measurements
+    if let (Some(start), Some(end)) = (start_remaining, end_remaining) {
+        let used = start.saturating_sub(end);
+        log_append(format!(
+            "Deep repo scan used approximately {} API requests for {}",
+            used, install_label
+        ));
+    }
+
+    log_append(format!(
+        "Deep repo scan completed for {}/{}",
+        owner, repo_name
+    ));
 }
 
 async fn run_repo_resync_impl(
@@ -1038,287 +1049,258 @@ async fn run_repo_resync_impl(
 
     log_append(format!("Resyncing repo {}/{}", owner, repo_name));
 
-    for (idx, crab) in octocrabs.iter().enumerate() {
-        let token_label = format!("token-{}", idx + 1);
-        let start_remaining = log_rate_limit(crab, &format!("start-{}", token_label)).await;
+    let Some(installation) = installation_for(&octocrabs, &owner, &repo_name).await else {
+        return;
+    };
+    let crab = &installation;
+    let install_label = &installation.account;
+    let start_remaining = log_rate_limit(crab, &format!("start-{}", install_label)).await;
 
-        // Fetch the specific repository
-        let repo_data = match crab.repos(&owner, &repo_name).get().await {
-            Ok(r) => r,
-            Err(e) => {
-                log::warn!(
-                    "Bootstrap: fetch repo {}/{} failed: {:?}",
-                    owner,
-                    repo_name,
-                    e
-                );
-                log_append(format!(
-                    "Error: fetch repo {}/{} failed: {:?}",
-                    owner, repo_name, e
-                ));
-                continue;
-            }
-        };
+    let Some(repo) = fetch_repo(crab, &owner, &repo_name).await else {
+        return;
+    };
+    let default_branch = repo.default_branch.clone();
 
-        let default_branch = repo_data
-            .default_branch
-            .clone()
-            .unwrap_or_else(|| "main".to_string());
+    if let Err(e) = repo.upsert(&conn) {
+        log::warn!(
+            "Bootstrap: upsert repo {}/{} failed: {}",
+            owner,
+            repo_name,
+            e
+        );
+        log_append(format!(
+            "repo {}/{}: upsert failed: {}",
+            owner, repo_name, e
+        ));
+        return;
+    }
 
-        let repo = GitRepo {
-            id: repo_data.id.0,
-            owner_name: owner.clone(),
-            name: repo_name.clone(),
-            default_branch: default_branch.clone(),
-            private: repo_data.private.unwrap_or(false),
-            language: repo_data
-                .language
-                .as_ref()
-                .and_then(|v| v.as_str().map(|s| s.to_string())),
-        };
+    log_append(format!(
+        "repo {}/{}: fetching latest commit on {}",
+        owner, repo_name, default_branch
+    ));
 
-        if let Err(e) = repo.upsert(&conn) {
+    // Fetch only the latest commit on the default branch
+    let commits = match list_commits_for_branch(
+        crab,
+        &owner,
+        &repo_name,
+        &default_branch,
+        1, // Only fetch 1 commit
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
             log::warn!(
-                "Bootstrap: upsert repo {}/{} failed: {}",
+                "Bootstrap: list commits for {}/{}@{} failed: {:?}",
                 owner,
                 repo_name,
+                default_branch,
                 e
             );
             log_append(format!(
-                "repo {}/{}: upsert failed: {}",
-                owner, repo_name, e
+                "repo {}/{}: list commits for {} failed: {:?}",
+                owner, repo_name, default_branch, e
             ));
             return;
         }
+    };
 
+    if let Some(head_commit_data) = commits.first() {
         log_append(format!(
-            "repo {}/{}: fetching latest commit on {}",
-            owner, repo_name, default_branch
+            "repo {}/{}: processing commit {}",
+            owner,
+            repo_name,
+            &head_commit_data.sha[..7]
         ));
 
-        // Fetch only the latest commit on the default branch
-        let commits = match list_commits_for_branch(
-            crab,
-            &owner,
-            &repo_name,
-            &default_branch,
-            1, // Only fetch 1 commit
-        )
-        .await
-        {
-            Ok(c) => c,
+        let branch_egg = GitBranchEgg {
+            name: default_branch.clone(),
+            head_commit_sha: head_commit_data.sha.clone(),
+            repo_id: repo.id,
+            active: true,
+        };
+        let branch = match branch_egg.upsert(&conn) {
+            Ok(br) => br,
             Err(e) => {
                 log::warn!(
-                    "Bootstrap: list commits for {}/{}@{} failed: {:?}",
+                    "Bootstrap: upsert branch {} for {}/{} failed: {}",
+                    default_branch,
                     owner,
                     repo_name,
-                    default_branch,
                     e
                 );
                 log_append(format!(
-                    "repo {}/{}: list commits for {} failed: {:?}",
+                    "repo {}/{}: upsert branch {} failed: {}",
                     owner, repo_name, default_branch, e
                 ));
                 return;
             }
         };
 
-        if let Some(head_commit_data) = commits.first() {
-            log_append(format!(
-                "repo {}/{}: processing commit {}",
-                owner,
-                repo_name,
-                &head_commit_data.sha[..7]
-            ));
+        let author_name = head_commit_data
+            .commit
+            .author
+            .as_ref()
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        let committer_name = head_commit_data
+            .commit
+            .committer
+            .as_ref()
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        let ts_millis = head_commit_data
+            .commit
+            .author
+            .as_ref()
+            .and_then(|a| a.date.as_ref())
+            .or_else(|| {
+                head_commit_data
+                    .commit
+                    .committer
+                    .as_ref()
+                    .and_then(|a| a.date.as_ref())
+            })
+            .map(|d| d.timestamp_millis())
+            .unwrap_or_else(|| Utc::now().timestamp_millis());
 
-            let branch_egg = GitBranchEgg {
-                name: default_branch.clone(),
-                head_commit_sha: head_commit_data.sha.clone(),
-                repo_id: repo.id,
-                active: true,
-            };
-            let branch = match branch_egg.upsert(&conn) {
-                Ok(br) => br,
-                Err(e) => {
-                    log::warn!(
-                        "Bootstrap: upsert branch {} for {}/{} failed: {}",
-                        default_branch,
-                        owner,
-                        repo_name,
-                        e
-                    );
-                    log_append(format!(
-                        "repo {}/{}: upsert branch {} failed: {}",
-                        owner, repo_name, default_branch, e
-                    ));
-                    return;
-                }
-            };
-
-            let author_name = head_commit_data
-                .commit
-                .author
-                .as_ref()
-                .map(|a| a.name.clone())
-                .unwrap_or_else(|| "unknown".to_string());
-            let committer_name = head_commit_data
-                .commit
-                .committer
-                .as_ref()
-                .map(|a| a.name.clone())
-                .unwrap_or_else(|| "unknown".to_string());
-            let ts_millis = head_commit_data
-                .commit
-                .author
-                .as_ref()
-                .and_then(|a| a.date.as_ref())
-                .or_else(|| {
-                    head_commit_data
-                        .commit
-                        .committer
-                        .as_ref()
-                        .and_then(|a| a.date.as_ref())
-                })
-                .map(|d| d.timestamp_millis())
-                .unwrap_or_else(|| Utc::now().timestamp_millis());
-
-            let egg = GitCommitEgg {
-                sha: head_commit_data.sha.clone(),
-                repo_id: repo.id,
-                message: head_commit_data.commit.message.clone(),
-                author: author_name,
-                committer: committer_name,
-                timestamp: ts_millis,
-            };
-            let commit = match crate::db::git_commit::GitCommit::upsert(&egg, &conn) {
-                Ok(cc) => cc,
-                Err(e) => {
-                    log::warn!(
-                        "Bootstrap: upsert commit {} for {}/{} failed: {}",
-                        head_commit_data.sha,
-                        owner,
-                        repo_name,
-                        e
-                    );
-                    log_append(format!(
-                        "repo {}/{}: upsert commit {} failed: {}",
-                        owner, repo_name, head_commit_data.sha, e
-                    ));
-                    return;
-                }
-            };
-
-            let parent_shas: Vec<String> = head_commit_data
-                .parents
-                .clone()
-                .into_iter()
-                .flat_map(|p| p.sha)
-                .collect();
-            if let Err(e) = commit.add_parent_shas(parent_shas, &conn) {
-                log::debug!("Bootstrap: add parents for {} failed: {}", commit.sha, e);
+        let egg = GitCommitEgg {
+            sha: head_commit_data.sha.clone(),
+            repo_id: repo.id,
+            message: head_commit_data.commit.message.clone(),
+            author: author_name,
+            committer: committer_name,
+            timestamp: ts_millis,
+        };
+        let commit = match crate::db::git_commit::GitCommit::upsert(&egg, &conn) {
+            Ok(cc) => cc,
+            Err(e) => {
+                log::warn!(
+                    "Bootstrap: upsert commit {} for {}/{} failed: {}",
+                    head_commit_data.sha,
+                    owner,
+                    repo_name,
+                    e
+                );
+                log_append(format!(
+                    "repo {}/{}: upsert commit {} failed: {}",
+                    owner, repo_name, head_commit_data.sha, e
+                ));
+                return;
             }
-            if let Err(e) = commit.add_branch(branch.id, &conn) {
+        };
+
+        let parent_shas: Vec<String> = head_commit_data
+            .parents
+            .clone()
+            .into_iter()
+            .flat_map(|p| p.sha)
+            .collect();
+        if let Err(e) = commit.add_parent_shas(parent_shas, &conn) {
+            log::debug!("Bootstrap: add parents for {} failed: {}", commit.sha, e);
+        }
+        if let Err(e) = commit.add_branch(branch.id, &conn) {
+            log::debug!(
+                "Bootstrap: add branch relation for {} failed: {}",
+                commit.sha,
+                e
+            );
+        }
+
+        // Fetch check runs and reconcile stored builds with GitHub.
+        match get_check_runs_for_sha(crab, &owner, &repo_name, &commit.sha).await {
+            Ok(checks) => {
+                let builds: Vec<GitCommitBuild> = checks
+                    .into_iter()
+                    .map(|c| GitCommitBuild {
+                        repo_id: repo.id,
+                        commit_id: commit.id,
+                        check_name: c.check_name,
+                        status: c.status,
+                        url: c.url,
+                        start_time: c.start_time,
+                        settle_time: c.settle_time,
+                        app_id: c.app_id,
+                    })
+                    .collect();
+                if let Err(e) =
+                    GitCommitBuild::reconcile_for_commit(repo.id, commit.id, &builds, &conn)
+                {
+                    log::debug!(
+                        "Bootstrap: reconcile builds for {} failed: {}",
+                        commit.sha,
+                        e
+                    );
+                    log_append(format!(
+                        "repo {}/{}: reconcile builds for {} failed: {}",
+                        owner, repo_name, commit.sha, e
+                    ));
+                }
+            }
+            Err(e) => {
                 log::debug!(
-                    "Bootstrap: add branch relation for {} failed: {}",
+                    "Bootstrap: fetch check runs for {} failed: {:?}",
                     commit.sha,
                     e
                 );
             }
-
-            // Fetch check runs and reconcile stored builds with GitHub.
-            match get_check_runs_for_sha(crab, &owner, &repo_name, &commit.sha).await {
-                Ok(checks) => {
-                    let builds: Vec<GitCommitBuild> = checks
-                        .into_iter()
-                        .map(|c| GitCommitBuild {
-                            repo_id: repo.id,
-                            commit_id: commit.id,
-                            check_name: c.check_name,
-                            status: c.status,
-                            url: c.url,
-                            start_time: c.start_time,
-                            settle_time: c.settle_time,
-                            app_id: c.app_id,
-                        })
-                        .collect();
-                    if let Err(e) =
-                        GitCommitBuild::reconcile_for_commit(repo.id, commit.id, &builds, &conn)
-                    {
-                        log::debug!(
-                            "Bootstrap: reconcile builds for {} failed: {}",
-                            commit.sha,
-                            e
-                        );
-                        log_append(format!(
-                            "repo {}/{}: reconcile builds for {} failed: {}",
-                            owner, repo_name, commit.sha, e
-                        ));
-                    }
-                }
-                Err(e) => {
-                    log::debug!(
-                        "Bootstrap: fetch check runs for {} failed: {:?}",
-                        commit.sha,
-                        e
-                    );
-                }
-            }
-
-            // Sync deploy configs for HEAD of default branch
-            match sync_deploy_configs_for_commit(
-                &octocrabs,
-                &client,
-                &pool,
-                &owner,
-                &repo_name,
-                repo.id as u64,
-                &commit.sha,
-            )
-            .await
-            {
-                Ok(_) => {
-                    log_append(format!(
-                        "repo {}/{}: synced deploy configs for HEAD of default branch ({})",
-                        owner,
-                        repo_name,
-                        &commit.sha[..7]
-                    ));
-                }
-                Err(e) => {
-                    log::debug!(
-                        "Bootstrap: sync deploy configs for {}/{} @ {} failed: {:?}",
-                        owner,
-                        repo_name,
-                        commit.sha,
-                        e
-                    );
-                    log_append(format!(
-                        "repo {}/{}: sync deploy configs failed: {:?}",
-                        owner, repo_name, e
-                    ));
-                }
-            }
-        } else {
-            log_append(format!(
-                "repo {}/{}: no commits on {}",
-                owner, repo_name, default_branch
-            ));
         }
 
-        let end_remaining = log_rate_limit(crab, &format!("end-{}", token_label)).await;
-
-        // Calculate usage if we have both start and end measurements
-        if let (Some(start), Some(end)) = (start_remaining, end_remaining) {
-            let used = start.saturating_sub(end);
-            log_append(format!(
-                "Repo resync used approximately {} API requests for {}",
-                used, token_label
-            ));
+        // Sync deploy configs for HEAD of default branch
+        match sync_deploy_configs_for_commit(
+            &octocrabs,
+            &client,
+            &pool,
+            &owner,
+            &repo_name,
+            repo.id as u64,
+            &commit.sha,
+        )
+        .await
+        {
+            Ok(_) => {
+                log_append(format!(
+                    "repo {}/{}: synced deploy configs for HEAD of default branch ({})",
+                    owner,
+                    repo_name,
+                    &commit.sha[..7]
+                ));
+            }
+            Err(e) => {
+                log::debug!(
+                    "Bootstrap: sync deploy configs for {}/{} @ {} failed: {:?}",
+                    owner,
+                    repo_name,
+                    commit.sha,
+                    e
+                );
+                log_append(format!(
+                    "repo {}/{}: sync deploy configs failed: {:?}",
+                    owner, repo_name, e
+                ));
+            }
         }
-
-        log_append(format!("Resync completed for {}/{}", owner, repo_name));
-        break; // Only use the first token that works
+    } else {
+        log_append(format!(
+            "repo {}/{}: no commits on {}",
+            owner, repo_name, default_branch
+        ));
     }
+
+    let end_remaining = log_rate_limit(crab, &format!("end-{}", install_label)).await;
+
+    // Calculate usage if we have both start and end measurements
+    if let (Some(start), Some(end)) = (start_remaining, end_remaining) {
+        let used = start.saturating_sub(end);
+        log_append(format!(
+            "Repo resync used approximately {} API requests for {}",
+            used, install_label
+        ));
+    }
+
+    log_append(format!("Resync completed for {}/{}", owner, repo_name));
 }
 
 async fn run_bootstrap(pool: Pool<SqliteConnectionManager>, octocrabs: Octocrabs, client: Client) {
@@ -1399,6 +1381,24 @@ pub struct RepoBootstrapRequest {
     repo: String,
 }
 
+impl IRepo for RepoBootstrapRequest {
+    fn owner(&self) -> &str {
+        &self.owner
+    }
+    fn repo(&self) -> &str {
+        &self.repo
+    }
+}
+
+/// Whether some installation can actually read the repo, not just whether
+/// one covers its owner.
+async fn repo_accessible(octocrabs: &Octocrabs, repo: &impl IRepo) -> bool {
+    match octocrabs.crab_for(repo).await {
+        Some(crab) => crab.repos(repo.owner(), repo.repo()).get().await.is_ok(),
+        None => false,
+    }
+}
+
 #[post("/bootstrap/repo")]
 pub async fn bootstrap_repo(
     pool: web::Data<Pool<SqliteConnectionManager>>,
@@ -1412,16 +1412,7 @@ pub async fn bootstrap_repo(
             .body("A bootstrap task is already running. Please wait for it to complete.");
     }
 
-    // Validate that the repo exists
-    let mut repo_found = false;
-    for crab in octocrabs.iter() {
-        if (crab.repos(&req.owner, &req.repo).get().await).is_ok() {
-            repo_found = true;
-            break;
-        }
-    }
-
-    if !repo_found {
+    if !repo_accessible(&octocrabs, &*req).await {
         release_lock();
         return HttpResponse::build(StatusCode::NOT_FOUND)
             .content_type("text/html; charset=utf-8")
@@ -1463,16 +1454,7 @@ pub async fn bootstrap_repo_resync(
             .body("A bootstrap task is already running. Please wait for it to complete.");
     }
 
-    // Validate that the repo exists
-    let mut repo_found = false;
-    for crab in octocrabs.iter() {
-        if (crab.repos(&req.owner, &req.repo).get().await).is_ok() {
-            repo_found = true;
-            break;
-        }
-    }
-
-    if !repo_found {
+    if !repo_accessible(&octocrabs, &*req).await {
         release_lock();
         return HttpResponse::build(StatusCode::NOT_FOUND)
             .content_type("text/html; charset=utf-8")
@@ -1523,9 +1505,9 @@ pub async fn bootstrap_log() -> impl Responder {
 pub async fn rate_limits(octocrabs: web::Data<Octocrabs>) -> impl Responder {
     let mut results = Vec::new();
 
-    for (idx, crab) in octocrabs.iter().enumerate() {
-        let token_num = idx + 1;
-        match crab.ratelimit().get().await {
+    for installation in octocrabs.installations() {
+        let account = installation.account.clone();
+        match installation.ratelimit().get().await {
             Ok(rate_info) => {
                 // Convert Unix timestamp to New York time
                 use chrono::{TimeZone, Utc};
@@ -1540,7 +1522,7 @@ pub async fn rate_limits(octocrabs: web::Data<Octocrabs>) -> impl Responder {
                     .unwrap_or_else(|| "Unknown".to_string());
 
                 results.push((
-                    token_num,
+                    account,
                     Some(rate_info.resources.core.remaining),
                     Some(rate_info.resources.core.limit),
                     Some(reset_dt),
@@ -1548,19 +1530,30 @@ pub async fn rate_limits(octocrabs: web::Data<Octocrabs>) -> impl Responder {
             }
             Err(e) => {
                 log::debug!(
-                    "Failed to fetch rate limit for token {}: {:?}",
-                    token_num,
+                    "Failed to fetch rate limit for installation {}: {:?}",
+                    account,
                     e
                 );
-                results.push((token_num, None, None, None));
+                results.push((account, None, None, None));
             }
         }
     }
 
     let markup = maud::html! {
-        @for (token_num, remaining, limit, reset) in results {
+        @if results.is_empty() {
             div class="rate-limit-row" {
-                div class="rate-limit-token" { "Token " (token_num) }
+                div class="rate-limit-error" {
+                    @if octocrabs.is_enabled() {
+                        "No GitHub App installations found"
+                    } @else {
+                        "GitHub App not configured"
+                    }
+                }
+            }
+        }
+        @for (account, remaining, limit, reset) in results {
+            div class="rate-limit-row" {
+                div class="rate-limit-token" { (account) }
                 @if let (Some(rem), Some(lim), Some(rst)) = (remaining, limit, reset) {
                     div class="rate-limit-usage" {
                         span class="rate-limit-numbers" { (rem) " / " (lim) }

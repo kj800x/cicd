@@ -460,6 +460,7 @@ Tests go in `tests/` directory (not yet implemented).
 4. Set environment variables:
    - `WEBSOCKET_URL` - GitHub webhook proxy
    - `CLIENT_SECRET` - Webhook authentication
+   - `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY` - GitHub App credentials (see README)
    - `DATABASE_PATH` - SQLite database path (optional, defaults to "db.db")
    - `TEMPLATE_NAMESPACE` - Template namespace for resource copying (optional)
 

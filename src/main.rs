@@ -144,15 +144,14 @@ async fn poll_github_rate_limits(octocrabs: Octocrabs) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
     loop {
         interval.tick().await;
-        for (idx, crab) in octocrabs.iter().enumerate() {
-            let label = (idx + 1).to_string();
-            if let Ok(rate_info) = crab.ratelimit().get().await {
+        for installation in octocrabs.installations() {
+            if let Ok(rate_info) = installation.ratelimit().get().await {
                 let m = metrics::get();
                 m.github_rate_limit_remaining
-                    .with_label_values(&[&label])
+                    .with_label_values(&[&installation.account])
                     .set(rate_info.resources.core.remaining as i64);
                 m.github_rate_limit_limit
-                    .with_label_values(&[&label])
+                    .with_label_values(&[&installation.account])
                     .set(rate_info.resources.core.limit as i64);
             }
         }
@@ -176,8 +175,6 @@ async fn start_kubernetes_controller(
 #[actix_web::main]
 #[allow(clippy::expect_used)]
 async fn main() -> std::io::Result<()> {
-    let octocrabs: Octocrabs = initialize_octocrabs();
-
     // Configure logger with custom filter to prioritize Discord logs
     env_logger::builder()
         .filter_level(log::LevelFilter::Info) // Set default level to Info for most modules
@@ -189,6 +186,10 @@ async fn main() -> std::io::Result<()> {
         .filter_module("cicd::web", log::LevelFilter::Info)
         .parse_default_env()
         .init();
+
+    let octocrabs: Octocrabs = initialize_octocrabs()
+        .await
+        .expect("Failed to initialize GitHub App client");
 
     let registry = prometheus::Registry::new();
     let exporter = opentelemetry_prometheus::exporter()
