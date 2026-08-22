@@ -107,6 +107,27 @@ impl DeployConfig {
             .unwrap_or(false)
     }
 
+    /// Whether this config depends on `repo`, either as the config repo
+    /// (where its `.deploy/` manifests live) or as the artifact repo (where
+    /// its image is built). GitHub owner and repo names are
+    /// case-insensitive, so the comparison is too.
+    pub fn references_repo(&self, repo: &Repository) -> bool {
+        let same = |owner: &str, name: &str| {
+            owner.eq_ignore_ascii_case(&repo.owner) && name.eq_ignore_ascii_case(&repo.repo)
+        };
+
+        let config = &self.spec.spec.config;
+        if same(&config.owner, &config.repo) {
+            return true;
+        }
+
+        self.spec
+            .spec
+            .artifact
+            .as_ref()
+            .is_some_and(|artifact| same(&artifact.owner, &artifact.repo))
+    }
+
     pub fn supports_bounce(&self) -> bool {
         self.resource_specs().iter().any(|spec| {
             spec.get("kind")
@@ -332,5 +353,61 @@ impl DeployConfig {
         if !owner_ref_exists {
             owner_refs.push(self.child_owner_reference());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repo(owner: &str, repo: &str) -> Repository {
+        Repository {
+            owner: owner.to_string(),
+            repo: repo.to_string(),
+        }
+    }
+
+    fn config(config_repo: Repository, artifact_repo: Option<Repository>) -> DeployConfig {
+        DeployConfig::new(
+            "test",
+            DeployConfigSpec {
+                spec: DeployConfigSpecFields {
+                    team: "test".to_string(),
+                    kind: "service".to_string(),
+                    artifact: artifact_repo.map(|r| RepositoryBranch {
+                        owner: r.owner,
+                        repo: r.repo,
+                        branch: "master".to_string(),
+                    }),
+                    config: config_repo,
+                    specs: vec![],
+                },
+            },
+        )
+    }
+
+    #[test]
+    fn references_config_repo() {
+        let dc = config(repo("kj800x", "app"), None);
+        assert!(dc.references_repo(&repo("kj800x", "app")));
+        assert!(!dc.references_repo(&repo("kj800x", "other")));
+        assert!(!dc.references_repo(&repo("someone-else", "app")));
+    }
+
+    #[test]
+    fn references_artifact_repo() {
+        let dc = config(
+            repo("sqrt10pi", "wr-rs"),
+            Some(repo("kj800x", "site-server")),
+        );
+        assert!(dc.references_repo(&repo("sqrt10pi", "wr-rs")));
+        assert!(dc.references_repo(&repo("kj800x", "site-server")));
+        assert!(!dc.references_repo(&repo("kj800x", "wr-rs")));
+    }
+
+    #[test]
+    fn references_repo_is_case_insensitive() {
+        let dc = config(repo("kj800x", "Hello-World"), None);
+        assert!(dc.references_repo(&repo("KJ800X", "hello-world")));
     }
 }

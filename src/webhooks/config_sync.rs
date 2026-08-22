@@ -18,10 +18,16 @@ use crate::{
     kubernetes::{
         deploy_config::{DeployConfig, DeployConfigSpec, DeployConfigSpecFields},
         repo::RepositoryBranch,
-        webhook_handlers::update_deploy_configs_by_defining_repo,
+        webhook_handlers::{
+            orphan_deploy_configs_for_repo, update_deploy_configs_by_defining_repo,
+        },
         Repository,
     },
-    webhooks::{models::PushEvent, util::extract_branch_name, WebhookHandler},
+    webhooks::{
+        models::{InstallationRepositoriesEvent, PushEvent, RepositoryEvent},
+        util::extract_branch_name,
+        WebhookHandler,
+    },
 };
 
 pub struct ConfigSyncHandler {
@@ -37,6 +43,56 @@ impl ConfigSyncHandler {
             client,
             octocrabs,
         }
+    }
+
+    /// A repository we can no longer read from or build: deleted, archived,
+    /// or removed from the App installation. Any deploy config it defines
+    /// (config repo) or builds for (artifact repo) is orphaned.
+    ///
+    /// `repo_id` is only used to retire the database rows for configs this
+    /// repo *defines*; configs that merely build from it are still defined by
+    /// a live repo and keep their rows.
+    async fn handle_repo_gone(
+        &self,
+        owner: &str,
+        name: &str,
+        repo_id: u64,
+        reason: &str,
+    ) -> Result<(), anyhow::Error> {
+        {
+            let conn = self.pool.get()?;
+            for db_config in DbDeployConfig::get_by_config_repo_id(repo_id, &conn)? {
+                if db_config.active {
+                    DbDeployConfig::mark_inactive(&db_config.name, &conn)?;
+                }
+            }
+        }
+
+        let repository = Repository {
+            owner: owner.to_string(),
+            repo: name.to_string(),
+        };
+        let affected = orphan_deploy_configs_for_repo(&self.client, &repository, reason).await?;
+
+        if affected.is_empty() {
+            log::debug!(
+                "Repository {}/{} {}, no deploy configs reference it",
+                owner,
+                name,
+                reason
+            );
+        } else {
+            log::info!(
+                "Repository {}/{} {}, orphaned {} deploy config(s): {}",
+                owner,
+                name,
+                reason,
+                affected.len(),
+                affected.join(", ")
+            );
+        }
+
+        Ok(())
     }
 }
 
@@ -156,6 +212,59 @@ impl WebhookHandler for ConfigSyncHandler {
         }
 
         Ok(())
+    }
+
+    async fn handle_repository(&self, event: RepositoryEvent) -> Result<(), anyhow::Error> {
+        // `unarchived` is deliberately not handled here: clearing the orphan
+        // flag happens on the next push to the config repo's default branch,
+        // which re-syncs the config and resets `status.orphaned`.
+        match event.action.as_str() {
+            "deleted" | "archived" => {
+                self.handle_repo_gone(
+                    &event.repository.owner.login,
+                    &event.repository.name,
+                    event.repository.id,
+                    &event.action,
+                )
+                .await
+            }
+            _ => Ok(()),
+        }
+    }
+
+    async fn handle_installation_repositories(
+        &self,
+        event: InstallationRepositoriesEvent,
+    ) -> Result<(), anyhow::Error> {
+        if event.action != "removed" {
+            return Ok(());
+        }
+
+        // Best-effort per repo so one failure doesn't hide the others.
+        let mut first_error = None;
+        for removed in &event.repositories_removed {
+            let Some((owner, name)) = removed.full_name.split_once('/') else {
+                log::warn!("Malformed repository full_name: {}", removed.full_name);
+                continue;
+            };
+
+            if let Err(e) = self
+                .handle_repo_gone(owner, name, removed.id, "removed from the installation")
+                .await
+            {
+                log::error!(
+                    "Failed to orphan deploy configs for {}: {:#}",
+                    removed.full_name,
+                    e
+                );
+                first_error.get_or_insert(e);
+            }
+        }
+
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 }
 

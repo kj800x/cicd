@@ -220,8 +220,9 @@ impl WebhookHandler for DatabaseHandler {
                     payload.action
                 );
             }
-            // Deleted and archived repos keep their rows: there is no repo
-            // removal path today, and their history stays useful.
+            // Deleted and archived repos keep their rows: their history stays
+            // useful. Orphaning the deploy configs that reference them is
+            // ConfigSyncHandler's job.
             _ => log::debug!(
                 "Ignoring repository {} for {}/{}",
                 payload.action,
@@ -239,7 +240,8 @@ impl WebhookHandler for DatabaseHandler {
     ) -> Result<(), anyhow::Error> {
         log::debug!("Received installation_repositories event:\n{:#?}", payload);
 
-        // Removal keeps rows for the same reason repository.deleted does.
+        // Removal keeps rows for the same reason repository.deleted does;
+        // ConfigSyncHandler orphans the affected deploy configs.
         if payload.action != "added" {
             return Ok(());
         }
