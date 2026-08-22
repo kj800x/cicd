@@ -11,6 +11,7 @@ pub mod log;
 pub mod manager;
 pub mod metrics;
 pub mod models;
+pub mod recent;
 pub mod util;
 
 #[async_trait]

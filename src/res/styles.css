@@ -835,6 +835,75 @@ header {
     word-wrap: break-word;
     font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace;
   }
+
+  .webhook-events {
+    margin-top: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .webhook-event {
+    background: #f6f8fa;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+  }
+
+  .webhook-event-summary {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    padding: 8px 12px;
+    cursor: pointer;
+    font-size: 13px;
+    list-style-position: inside;
+  }
+
+  .webhook-event-summary::marker {
+    color: var(--secondary-text);
+  }
+
+  .webhook-event-time {
+    font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace;
+    font-size: 12px;
+    color: var(--secondary-text);
+    white-space: nowrap;
+  }
+
+  .webhook-event-type {
+    font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--primary-blue);
+    white-space: nowrap;
+  }
+
+  .webhook-event-desc {
+    color: var(--text-color);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .webhook-payload {
+    border-top: 1px solid var(--border-color);
+    background: #fff;
+    padding: 8px 12px;
+    max-height: 480px;
+    overflow: auto;
+    font-size: 12px;
+    color: var(--secondary-text);
+  }
+
+  .webhook-payload-json {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    color: var(--text-color);
+    font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace;
+  }
 }
 
 .index-page {
