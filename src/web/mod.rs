@@ -12,6 +12,7 @@ mod resource_status;
 mod settings;
 pub mod team_prefs;
 mod watchdog;
+mod webhook_debug;
 
 pub use all_recent_builds::*;
 pub use bootstrap::*;
@@ -23,3 +24,4 @@ pub use resource_logs::*;
 pub use resource_status::*;
 pub use settings::*;
 pub use watchdog::*;
+pub use webhook_debug::*;

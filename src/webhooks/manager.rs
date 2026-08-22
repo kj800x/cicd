@@ -167,6 +167,7 @@ impl WebhookManager {
 
     async fn process_event(&self, event: WebhookEvent) -> Result<(), anyhow::Error> {
         log::debug!("Received event: {}", event.event_type);
+        crate::webhooks::recent::record(&event);
 
         match event.event_type.as_str() {
             "push" => match serde_json::from_value::<PushEvent>(event.payload.clone()) {

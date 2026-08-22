@@ -129,6 +129,8 @@ async fn start_http(
             .service(resource_logs_download)
             .service(web::watchdog_page)
             .service(web::watchdog_fragment)
+            .service(web::webhook_recent_list)
+            .service(web::webhook_recent_payload)
             .service(serve_static_file!("htmx.min.js"))
             .service(serve_static_file!("idiomorph.min.js"))
             .service(serve_static_file!("idiomorph-ext.min.js"))

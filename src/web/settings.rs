@@ -108,6 +108,17 @@ fn render_sidebar(section: &str) -> Markup {
             {
                 "Bootstrap"
             }
+            a
+                class=(if section == "webhook-debug" { "settings-nav-link active" } else { "settings-nav-link" })
+                href="/settings?section=webhook-debug"
+                hx-get="/settings-fragment?section=webhook-debug"
+                hx-target="#settings-content"
+                hx-swap="morph:innerHTML"
+                hx-push-url="/settings?section=webhook-debug"
+                onclick="document.querySelectorAll('.settings-nav-link').forEach(l => l.classList.remove('active')); this.classList.add('active');"
+            {
+                "Webhook debug"
+            }
         }
     }
 }
@@ -178,6 +189,7 @@ pub async fn settings_fragment(
         "repo-visibility" => repo_visibility_fragment(req, pool).await,
         "rate-limits" => rate_limits_fragment().await,
         "bootstrap" => bootstrap_fragment().await,
+        "webhook-debug" => crate::web::webhook_debug::webhook_debug_fragment(),
         _ => team_visibility_fragment(req).await,
     }
 }
