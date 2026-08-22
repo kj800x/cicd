@@ -46,12 +46,9 @@ impl ConfigSyncHandler {
     }
 
     /// A repository we can no longer read from or build: deleted, archived,
-    /// or removed from the App installation. Any deploy config it defines
-    /// (config repo) or builds for (artifact repo) is orphaned.
-    ///
-    /// `repo_id` is only used to retire the database rows for configs this
-    /// repo *defines*; configs that merely build from it are still defined by
-    /// a live repo and keep their rows.
+    /// or removed from the App installation. Any deploy config that uses it
+    /// as either its config repo or its artifact repo is orphaned, and the
+    /// matching database rows are retired.
     async fn handle_repo_gone(
         &self,
         owner: &str,
@@ -61,7 +58,7 @@ impl ConfigSyncHandler {
     ) -> Result<(), anyhow::Error> {
         {
             let conn = self.pool.get()?;
-            for db_config in DbDeployConfig::get_by_config_repo_id(repo_id, &conn)? {
+            for db_config in DbDeployConfig::get_by_any_repo_id(repo_id, &conn)? {
                 if db_config.active {
                     DbDeployConfig::mark_inactive(&db_config.name, &conn)?;
                 }
