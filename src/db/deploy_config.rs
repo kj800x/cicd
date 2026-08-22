@@ -39,6 +39,23 @@ impl DeployConfig {
         Ok(deploy_configs)
     }
 
+    /// Configs that reference `repo_id` as either their config repo or their
+    /// artifact repo.
+    pub fn get_by_any_repo_id(
+        repo_id: u64,
+        conn: &PooledConnection<SqliteConnectionManager>,
+    ) -> AppResult<Vec<Self>> {
+        let mut deploy_configs = Vec::new();
+        let mut stmt = conn.prepare("SELECT name, team, kind, config_repo_id, artifact_repo_id, active FROM deploy_config WHERE config_repo_id = ?1 OR artifact_repo_id = ?1")?;
+        let mut rows = stmt.query(params![repo_id])?;
+
+        while let Some(row) = rows.next()? {
+            deploy_configs.push(DeployConfig::from_row(row)?);
+        }
+
+        Ok(deploy_configs)
+    }
+
     pub fn upsert(
         deploy_config: &DeployConfig,
         conn: &PooledConnection<SqliteConnectionManager>,

@@ -137,6 +137,64 @@ async fn delete_deploy_config(
     Ok(())
 }
 
+/// Handle a repository that can no longer be used: deleted, archived, or
+/// removed from the GitHub App installation.
+///
+/// Every DeployConfig that references `repo` as either its config repo or
+/// its artifact repo is affected: without the config repo there is nothing
+/// to sync from, and without the artifact repo there is nothing to build or
+/// deploy. Deployed configs are marked orphaned (so only undeploy is
+/// offered); undeployed ones are deleted outright, matching what happens
+/// when a push removes a `.deploy/` file.
+///
+/// Each config is handled independently so one failure doesn't hide the
+/// rest. Returns the names of the configs that were updated.
+pub async fn orphan_deploy_configs_for_repo(
+    client: &Client,
+    repo: &Repository,
+    reason: &str,
+) -> Result<Vec<String>, Error> {
+    let api: Api<DeployConfig> = Api::all(client.clone());
+    let deploy_configs = match api.list(&Default::default()).await {
+        Ok(list) => list.items,
+        Err(e) => {
+            log::error!("Failed to list DeployConfigs:\n{}", format_error_chain(&e));
+            return Err(Error::Kube(e));
+        }
+    };
+
+    let mut affected = Vec::new();
+    let mut first_error = None;
+
+    for dc in deploy_configs.iter().filter(|dc| dc.references_repo(repo)) {
+        let name = dc.name_any();
+        log::info!(
+            "DeployConfig {} references {}/{}, which was {}",
+            name,
+            repo.owner,
+            repo.repo,
+            reason
+        );
+
+        match delete_deploy_config(client, dc).await {
+            Ok(()) => affected.push(name),
+            Err(e) => {
+                log::error!(
+                    "Failed to orphan DeployConfig {}:\n{}",
+                    name,
+                    format_error_chain(&e)
+                );
+                first_error.get_or_insert(e);
+            }
+        }
+    }
+
+    match first_error {
+        Some(e) => Err(e),
+        None => Ok(affected),
+    }
+}
+
 pub async fn update_deploy_configs_by_defining_repo(
     client: &Client,
     final_deploy_configs: &[DeployConfig],
