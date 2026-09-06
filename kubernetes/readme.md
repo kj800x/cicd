@@ -48,3 +48,23 @@ export TEMPLATE_NAMESPACE=infrastructure
     - `cicd.coolkev.com/copied-at: <RFC3339 timestamp>` - Timestamp when resource was copied
 
 These markers allow you to identify and query resources that were copied from the template namespace using standard Kubernetes label selectors (e.g., `kubectl get all -l cicd.coolkev.com/copied-from-template=true`).
+
+## Schema migrations
+
+The CRD is single-version (`v1`) with no conversion webhook, so schema changes
+are done as expand-and-contract: add new fields beside the old, ship a
+controller that reads both, backfill, ship a controller that reads only the
+new, then remove the old fields. `migration/` holds the tooling:
+
+- `backup-deploy-configs.sh` / `restore-deploy-configs.sh`: snapshot and
+  recreate every DeployConfig including its status subresource. Run a backup
+  before every schema step.
+- `migration-status.sh`: legacy and `parameters` fields side by side, exits
+  non-zero if any config is inconsistent. This is the gate before deploying a
+  controller that reads only the new fields.
+- `migrate-parameters.sh`: emergency forward fill for a config the controller's
+  own backfill did not reach.
+
+If anything looks wrong, stop the controller first; workloads keep running:
+
+    kubectl -n cicd scale deploy cicd --replicas=0

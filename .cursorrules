@@ -71,7 +71,7 @@ Rust-based CI/CD dashboard with Actix Web backend, Maud HTML templating, HTMX fr
 
 ### Kubernetes Integration (`src/kubernetes/`)
 - Use `kube` crate for API interactions
-- Custom Resource Definitions in `kubernetes/crds/`
+- Custom Resource Definition in `kubernetes/deploy-config-crd.yaml`
 - Controller pattern: reconcile loops in `controller.rs`
 - Webhook handlers for config sync in `webhook_handlers.rs`
 - Deploy actions in `deploy_handlers.rs`
