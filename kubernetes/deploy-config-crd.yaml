@@ -38,6 +38,27 @@ spec:
                       type: string
                     branch:
                       type: string
+                parameters:
+                  type: object
+                  description: "Named parameter sources. The legacy artifact repo is the SHA parameter."
+                  additionalProperties:
+                    type: object
+                    required:
+                      - type
+                    properties:
+                      type:
+                        type: string
+                        enum:
+                          - commit
+                      owner:
+                        type: string
+                      repo:
+                        type: string
+                      branch:
+                        type: string
+                    x-kubernetes-validations:
+                      - rule: "self.type != 'commit' || (has(self.owner) && has(self.repo) && has(self.branch))"
+                        message: "commit sources require owner, repo and branch"
                 team:
                   type: string
                 kind:
@@ -68,6 +89,22 @@ spec:
                       type: string
                     branch:
                       type: string
+                parameters:
+                  type: object
+                  description: "Deployed value per named parameter."
+                  additionalProperties:
+                    type: object
+                    required:
+                      - type
+                    properties:
+                      type:
+                        type: string
+                        enum:
+                          - commit
+                      value:
+                        type: string
+                      branch:
+                        type: string
                 config:
                   type: object
                   properties:

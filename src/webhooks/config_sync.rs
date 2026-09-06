@@ -17,6 +17,7 @@ use crate::{
     error::{AppError, AppResult},
     kubernetes::{
         deploy_config::{DeployConfig, DeployConfigSpec, DeployConfigSpecFields},
+        parameters::ParameterSource,
         repo::RepositoryBranch,
         webhook_handlers::{
             orphan_deploy_configs_for_repo, update_deploy_configs_by_defining_repo,
@@ -508,18 +509,19 @@ pub async fn fetch_deploy_configs_by_sha(
             config_name,
             child_files.len()
         );
+        let artifact = config.artifact_repo.map(|artifact_repo| RepositoryBranch {
+            owner: artifact_repo.owner,
+            repo: artifact_repo.repo,
+            branch: artifact_repo.branch,
+        });
         let dc = DeployConfig {
             spec: DeployConfigSpec {
                 spec: DeployConfigSpecFields {
-                    // FIXME: Is GitHubArtifactRepo and RepositoryBranch the exact same struct?
-                    artifact: config.artifact_repo.map(|artifact_repo| RepositoryBranch {
-                        owner: artifact_repo.owner.clone(),
-                        repo: artifact_repo.repo.clone(),
-                        branch: artifact_repo.branch.clone(),
-                    }),
-                    // Written by the next release; the dual-read controller
-                    // still populates only the legacy field here.
-                    parameters: Default::default(),
+                    // The on-disk `artifactRepo` is written in both shapes
+                    // while configs are migrated: the legacy `artifact` field
+                    // and the `SHA` parameter source.
+                    artifact: artifact.clone(),
+                    parameters: ParameterSource::sha_map(artifact),
                     config: Repository {
                         owner: owner.clone(),
                         repo: repo.clone(),

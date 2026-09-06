@@ -1,4 +1,4 @@
-use crate::kubernetes::repo::ShaMaybeBranch;
+use crate::kubernetes::{parameters::SHA_PARAMETER, repo::ShaMaybeBranch};
 
 /// Builder for patch updates to DeployConfigStatus.
 /// Since the values are optional, we need to use Option<Option<String>> to represent them in this builder.
@@ -27,12 +27,29 @@ impl From<DeployConfigStatusBuilder> for serde_json::Value {
         }
 
         if let Some(artifact) = val.artifact {
-            if let Some(artifact) = artifact {
-                status["artifact"] = serde_json::json!({});
-                status["artifact"]["sha"] = artifact.sha.into();
-                status["artifact"]["branch"] = artifact.branch.into();
-            } else {
-                status["artifact"] = serde_json::Value::Null;
+            // Written in both shapes while configs are migrated: the legacy
+            // `artifact` object and the `parameters[SHA]` entry. Both are
+            // built by hand so that an absent branch becomes an explicit
+            // null; a nested merge patch would otherwise keep the previous
+            // deploy's branch. A `null` value deletes the key.
+            match artifact {
+                Some(artifact) => {
+                    status["artifact"] = serde_json::json!({
+                        "sha": artifact.sha,
+                        "branch": artifact.branch,
+                    });
+                    status["parameters"] = serde_json::json!({
+                        SHA_PARAMETER: {
+                            "type": "commit",
+                            "value": artifact.sha,
+                            "branch": artifact.branch,
+                        }
+                    });
+                }
+                None => {
+                    status["artifact"] = serde_json::Value::Null;
+                    status["parameters"] = serde_json::json!({ SHA_PARAMETER: null });
+                }
             }
         }
 
@@ -73,5 +90,57 @@ impl DeployConfigStatusBuilder {
     pub fn with_orphaned(mut self, orphaned: Option<bool>) -> Self {
         self.orphaned = Some(orphaned);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    #[test]
+    fn artifact_is_written_in_both_shapes() {
+        let patch: Value = DeployConfigStatusBuilder::new()
+            .with_artifact(Some(ShaMaybeBranch {
+                sha: "abc".into(),
+                branch: Some("master".into()),
+            }))
+            .into();
+        assert_eq!(
+            patch,
+            json!({"status": {
+                "artifact": {"sha": "abc", "branch": "master"},
+                "parameters": {"SHA": {"type": "commit", "value": "abc", "branch": "master"}},
+            }})
+        );
+    }
+
+    #[test]
+    fn absent_branch_is_an_explicit_null() {
+        let patch: Value = DeployConfigStatusBuilder::new()
+            .with_artifact(Some(ShaMaybeBranch {
+                sha: "abc".into(),
+                branch: None,
+            }))
+            .into();
+        assert_eq!(patch["status"]["artifact"]["branch"], Value::Null);
+        assert_eq!(patch["status"]["parameters"]["SHA"]["branch"], Value::Null);
+    }
+
+    #[test]
+    fn undeploy_deletes_both_shapes() {
+        let patch: Value = DeployConfigStatusBuilder::new().with_artifact(None).into();
+        assert_eq!(
+            patch,
+            json!({"status": {"artifact": null, "parameters": {"SHA": null}}})
+        );
+    }
+
+    #[test]
+    fn untouched_fields_are_not_in_the_patch() {
+        let patch: Value = DeployConfigStatusBuilder::new()
+            .with_orphaned(Some(true))
+            .into();
+        assert_eq!(patch, json!({"status": {"orphaned": true}}));
     }
 }
