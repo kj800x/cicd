@@ -517,6 +517,9 @@ pub async fn fetch_deploy_configs_by_sha(
                         repo: artifact_repo.repo.clone(),
                         branch: artifact_repo.branch.clone(),
                     }),
+                    // Written by the next release; the dual-read controller
+                    // still populates only the legacy field here.
+                    parameters: Default::default(),
                     config: Repository {
                         owner: owner.clone(),
                         repo: repo.clone(),

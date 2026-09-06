@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::kubernetes::{
+    parameters::{ParameterSource, ParameterSources, ParameterValues, SHA_PARAMETER},
     repo::{DeploymentState, RepositoryBranch, ShaMaybeBranch},
     Repository,
 };
@@ -18,9 +19,15 @@ pub const DEPLOY_CONFIG_KIND: &str = if cfg!(feature = "test-crd") {
 /// DeployConfig status information
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct DeployConfigStatus {
-    /// Information about the current state of the artifact.
+    /// Legacy: the deployed artifact. Superseded by `parameters[SHA]`; read
+    /// only when that entry is absent. Removed once every config is migrated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact: Option<ShaMaybeBranch>,
+
+    /// The value currently deployed for each named parameter.
+    /// The legacy artifact lives under [`SHA_PARAMETER`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parameters: ParameterValues,
 
     /// Information about the current state of the config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -46,8 +53,16 @@ pub struct DeployConfigSpecFields {
     /// Right now valid values are "service", "worker", "job", "meta", etc.
     pub kind: String,
 
-    /// Repository information
+    /// Legacy: the artifact repository. Superseded by `parameters[SHA]`; read
+    /// only when that entry is absent. Removed once every config is migrated.
+    /// Serialized even when `None` so config sync's merge patch clears it,
+    /// as it always has.
     pub artifact: Option<RepositoryBranch>,
+
+    /// Named parameters. The legacy artifact repo lives under
+    /// [`SHA_PARAMETER`], whose value is substituted for `$SHA` in specs.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parameters: ParameterSources,
 
     /// Repository information
     pub config: Repository,
@@ -121,11 +136,40 @@ impl DeployConfig {
             return true;
         }
 
-        self.spec
+        let legacy = self
+            .spec
             .spec
             .artifact
             .as_ref()
-            .is_some_and(|artifact| same(&artifact.owner, &artifact.repo))
+            .is_some_and(|artifact| same(&artifact.owner, &artifact.repo));
+
+        legacy
+            || self
+                .spec
+                .spec
+                .parameters
+                .values()
+                .filter_map(ParameterSource::as_repository_branch)
+                .any(|source| same(&source.owner, &source.repo))
+    }
+
+    /// The source of the [`SHA_PARAMETER`] parameter, falling back to the
+    /// legacy `spec.artifact` while configs are being migrated.
+    fn sha_source(&self) -> Option<RepositoryBranch> {
+        match self.spec.spec.parameters.get(SHA_PARAMETER) {
+            Some(source) => source.as_repository_branch(),
+            None => self.spec.spec.artifact.clone(),
+        }
+    }
+
+    /// The deployed value of the [`SHA_PARAMETER`] parameter, falling back to
+    /// the legacy `status.artifact` while configs are being migrated.
+    fn sha_value(&self) -> Option<ShaMaybeBranch> {
+        let status = self.status.as_ref()?;
+        match status.parameters.get(SHA_PARAMETER) {
+            Some(value) => value.as_sha_maybe_branch(),
+            None => status.artifact.clone(),
+        }
     }
 
     pub fn supports_bounce(&self) -> bool {
@@ -148,9 +192,9 @@ impl DeployConfig {
 
     pub fn deployment_state(&self) -> DeploymentState {
         if let Some(config) = self.status.as_ref().and_then(|s| s.config.as_ref()) {
-            if let Some(artifact) = self.status.as_ref().and_then(|s| s.artifact.as_ref()) {
+            if let Some(artifact) = self.sha_value() {
                 DeploymentState::DeployedWithArtifact {
-                    artifact: artifact.clone(),
+                    artifact,
                     config: config.clone(),
                 }
             } else {
@@ -250,9 +294,9 @@ impl DeployConfig {
         &self.spec.spec.kind
     }
 
-    /// Get a RepositoryBranch struct for the artifact
+    /// Get a RepositoryBranch struct for the artifact (the [`SHA_PARAMETER`] parameter)
     pub fn artifact_repository(&self) -> Option<RepositoryBranch> {
-        self.spec.spec.artifact.clone()
+        self.sha_source()
     }
 
     /// Get a Repository struct for the config
@@ -379,6 +423,7 @@ mod tests {
                         repo: r.repo,
                         branch: "master".to_string(),
                     }),
+                    parameters: ParameterSources::default(),
                     config: config_repo,
                     specs: vec![],
                 },
@@ -409,5 +454,126 @@ mod tests {
     fn references_repo_is_case_insensitive() {
         let dc = config(repo("kj800x", "Hello-World"), None);
         assert!(dc.references_repo(&repo("KJ800X", "hello-world")));
+    }
+
+    #[test]
+    fn references_repo_sees_parameter_sources() {
+        let mut dc = config(repo("kj800x", "app"), None);
+        dc.spec.spec.parameters.insert(
+            SHA_PARAMETER.to_string(),
+            ParameterSource::from(repo("kj800x", "image").with_branch("master")),
+        );
+        assert!(dc.references_repo(&repo("kj800x", "image")));
+        assert!(!dc.references_repo(&repo("kj800x", "unrelated")));
+    }
+
+    fn dc_json(
+        spec_extra: serde_json::Value,
+        status_extra: serde_json::Value,
+    ) -> serde_json::Value {
+        let mut json = serde_json::json!({
+            "apiVersion": "cicd.coolkev.com/v1",
+            "kind": DEPLOY_CONFIG_KIND,
+            "metadata": {"name": "cicd", "namespace": "cicd"},
+            "spec": {
+                "config": {"owner": "kj800x", "repo": "cicd"},
+                "kind": "service",
+                "team": "cluster-infra",
+                "specs": []
+            },
+            "status": {
+                "config": {"sha": "cfg", "branch": "master"},
+                "orphaned": false
+            }
+        });
+        if let (Some(spec), Some(extra)) = (json["spec"].as_object_mut(), spec_extra.as_object()) {
+            spec.extend(extra.clone());
+        }
+        if let (Some(status), Some(extra)) =
+            (json["status"].as_object_mut(), status_extra.as_object())
+        {
+            status.extend(extra.clone());
+        }
+        json
+    }
+
+    fn legacy_artifact() -> serde_json::Value {
+        serde_json::json!({"artifact": {"owner": "kj800x", "repo": "cicd", "branch": "master"}})
+    }
+
+    fn legacy_status(sha: &str) -> serde_json::Value {
+        serde_json::json!({"artifact": {"sha": sha, "branch": "master"}})
+    }
+
+    fn param_source() -> serde_json::Value {
+        serde_json::json!({"parameters": {"SHA": {"type": "commit", "owner": "kj800x", "repo": "cicd", "branch": "master"}}})
+    }
+
+    fn param_value(sha: &str) -> serde_json::Value {
+        serde_json::json!({"parameters": {"SHA": {"type": "commit", "value": sha, "branch": "master"}}})
+    }
+
+    fn deployed_sha(dc: &DeployConfig) -> Option<String> {
+        match dc.deployment_state() {
+            DeploymentState::DeployedWithArtifact { artifact, .. } => Some(artifact.sha),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn legacy_shape_still_reads() -> Result<(), serde_json::Error> {
+        let dc: DeployConfig =
+            serde_json::from_value(dc_json(legacy_artifact(), legacy_status("old")))?;
+        assert_eq!(
+            dc.artifact_repository().map(|r| r.repo),
+            Some("cicd".into())
+        );
+        assert_eq!(deployed_sha(&dc), Some("old".into()));
+        Ok(())
+    }
+
+    #[test]
+    fn parameters_shape_reads() -> Result<(), serde_json::Error> {
+        let dc: DeployConfig = serde_json::from_value(dc_json(param_source(), param_value("new")))?;
+        assert_eq!(
+            dc.artifact_repository().map(|r| r.branch),
+            Some("master".into())
+        );
+        assert_eq!(deployed_sha(&dc), Some("new".into()));
+        assert!(!dc.is_non_latest_deploy());
+        Ok(())
+    }
+
+    #[test]
+    fn parameters_win_over_legacy_when_both_present() -> Result<(), serde_json::Error> {
+        let mut spec = legacy_artifact();
+        spec["parameters"] = param_source()["parameters"].clone();
+        let mut status = legacy_status("old");
+        status["parameters"] = param_value("new")["parameters"].clone();
+        let dc: DeployConfig = serde_json::from_value(dc_json(spec, status))?;
+        assert_eq!(deployed_sha(&dc), Some("new".into()));
+        Ok(())
+    }
+
+    #[test]
+    fn no_sha_anywhere_is_config_only() -> Result<(), serde_json::Error> {
+        let dc: DeployConfig =
+            serde_json::from_value(dc_json(serde_json::json!({}), serde_json::json!({})))?;
+        assert!(dc.artifact_repository().is_none());
+        assert!(matches!(
+            dc.deployment_state(),
+            DeploymentState::DeployedOnlyConfig { .. }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn empty_maps_are_not_serialized() -> Result<(), serde_json::Error> {
+        let dc: DeployConfig =
+            serde_json::from_value(dc_json(legacy_artifact(), legacy_status("old")))?;
+        let out = serde_json::to_value(&dc)?;
+        assert!(out["spec"].get("parameters").is_none());
+        assert!(out["status"].get("parameters").is_none());
+        Ok(())
     }
 }
