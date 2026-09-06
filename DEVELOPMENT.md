@@ -43,7 +43,7 @@ src/
 ├── lib.rs                  # Library root
 └── main.rs                 # Binary entry point
 
-kubernetes/crds/            # Kubernetes CRD manifests
+kubernetes/                 # CRD, bootstrap manifests, migration/ scripts
 ```
 
 ## Key Patterns
@@ -334,7 +334,7 @@ html! {
 
 **Custom Resource Definition:**
 - Defined in `src/kubernetes/deploy_config.rs` using `kube` derive macros
-- YAML manifest in `kubernetes/crds/deploy-config-crd.yaml`
+- YAML manifest in `kubernetes/deploy-config-crd.yaml` (applied by hand; the Rust side has schema validation disabled)
 - Controller watches for changes and reconciles
 
 **Controller pattern:**
@@ -455,7 +455,7 @@ Tests go in `tests/` directory (not yet implemented).
 ## Deployment
 
 1. Build binary: `cargo build --release`
-2. Apply CRD: `kubectl apply -f kubernetes/crds/`
+2. Apply CRD: `kubectl apply -f kubernetes/deploy-config-crd.yaml`
 3. Deploy application with access to kubeconfig
 4. Set environment variables:
    - `WEBSOCKET_URL` - GitHub webhook proxy
