@@ -27,30 +27,19 @@ impl From<DeployConfigStatusBuilder> for serde_json::Value {
         }
 
         if let Some(artifact) = val.artifact {
-            // Written in both shapes while configs are migrated: the legacy
-            // `artifact` object and the `parameters[SHA]` entry. Both are
-            // built by hand so that an absent branch becomes an explicit
+            // Built by hand so that an absent branch becomes an explicit
             // null; a nested merge patch would otherwise keep the previous
-            // deploy's branch. A `null` value deletes the key.
-            match artifact {
-                Some(artifact) => {
-                    status["artifact"] = serde_json::json!({
-                        "sha": artifact.sha,
+            // deploy's branch. A `null` entry deletes the key.
+            status["parameters"] = match artifact {
+                Some(artifact) => serde_json::json!({
+                    SHA_PARAMETER: {
+                        "type": "commit",
+                        "value": artifact.sha,
                         "branch": artifact.branch,
-                    });
-                    status["parameters"] = serde_json::json!({
-                        SHA_PARAMETER: {
-                            "type": "commit",
-                            "value": artifact.sha,
-                            "branch": artifact.branch,
-                        }
-                    });
-                }
-                None => {
-                    status["artifact"] = serde_json::Value::Null;
-                    status["parameters"] = serde_json::json!({ SHA_PARAMETER: null });
-                }
-            }
+                    }
+                }),
+                None => serde_json::json!({ SHA_PARAMETER: null }),
+            };
         }
 
         if let Some(autodeploy) = val.autodeploy {
@@ -99,7 +88,7 @@ mod tests {
     use serde_json::{json, Value};
 
     #[test]
-    fn artifact_is_written_in_both_shapes() {
+    fn artifact_is_written_as_the_sha_parameter() {
         let patch: Value = DeployConfigStatusBuilder::new()
             .with_artifact(Some(ShaMaybeBranch {
                 sha: "abc".into(),
@@ -109,7 +98,6 @@ mod tests {
         assert_eq!(
             patch,
             json!({"status": {
-                "artifact": {"sha": "abc", "branch": "master"},
                 "parameters": {"SHA": {"type": "commit", "value": "abc", "branch": "master"}},
             }})
         );
@@ -123,17 +111,13 @@ mod tests {
                 branch: None,
             }))
             .into();
-        assert_eq!(patch["status"]["artifact"]["branch"], Value::Null);
         assert_eq!(patch["status"]["parameters"]["SHA"]["branch"], Value::Null);
     }
 
     #[test]
-    fn undeploy_deletes_both_shapes() {
+    fn undeploy_deletes_the_sha_parameter() {
         let patch: Value = DeployConfigStatusBuilder::new().with_artifact(None).into();
-        assert_eq!(
-            patch,
-            json!({"status": {"artifact": null, "parameters": {"SHA": null}}})
-        );
+        assert_eq!(patch, json!({"status": {"parameters": {"SHA": null}}}));
     }
 
     #[test]

@@ -517,10 +517,10 @@ pub async fn fetch_deploy_configs_by_sha(
         let dc = DeployConfig {
             spec: DeployConfigSpec {
                 spec: DeployConfigSpecFields {
-                    // The on-disk `artifactRepo` is written in both shapes
-                    // while configs are migrated: the legacy `artifact` field
-                    // and the `SHA` parameter source.
-                    artifact: artifact.clone(),
+                    // The on-disk `artifactRepo` becomes the `SHA` parameter.
+                    // The legacy field is sent as null so it is cleared from
+                    // objects that still carry it.
+                    artifact: None,
                     parameters: ParameterSource::sha_map(artifact),
                     config: Repository {
                         owner: owner.clone(),

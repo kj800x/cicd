@@ -86,8 +86,8 @@ pub async fn backfill_parameters(client: &Client, dc: &DeployConfig) -> AppResul
 
     if needs.status {
         if let Some(artifact) = dc.status.as_ref().and_then(|s| s.artifact.clone()) {
-            // The builder writes both shapes, so this rewrites the legacy
-            // field with its own value and adds the parameters entry.
+            // The builder now writes only the parameters entry; the legacy
+            // field is left in place until the CRD drops it.
             update_deploy_config_status(
                 client,
                 &ns,

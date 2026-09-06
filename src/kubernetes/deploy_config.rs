@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 
 use crate::kubernetes::{
-    parameters::{ParameterSource, ParameterSources, ParameterValues, SHA_PARAMETER},
+    parameters::{
+        ParameterSource, ParameterSources, ParameterValue, ParameterValues, SHA_PARAMETER,
+    },
     repo::{DeploymentState, RepositoryBranch, ShaMaybeBranch},
     Repository,
 };
@@ -19,8 +21,8 @@ pub const DEPLOY_CONFIG_KIND: &str = if cfg!(feature = "test-crd") {
 /// DeployConfig status information
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct DeployConfigStatus {
-    /// Legacy: the deployed artifact. Superseded by `parameters[SHA]`; read
-    /// only when that entry is absent. Removed once every config is migrated.
+    /// Legacy: the deployed artifact. No longer read or written except by
+    /// the migration backfill; removed once the CRD drops it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact: Option<ShaMaybeBranch>,
 
@@ -53,10 +55,9 @@ pub struct DeployConfigSpecFields {
     /// Right now valid values are "service", "worker", "job", "meta", etc.
     pub kind: String,
 
-    /// Legacy: the artifact repository. Superseded by `parameters[SHA]`; read
-    /// only when that entry is absent. Removed once every config is migrated.
-    /// Serialized even when `None` so config sync's merge patch clears it,
-    /// as it always has.
+    /// Legacy: the artifact repository. No longer read or written except by
+    /// the migration backfill; removed once the CRD drops it. Serialized as
+    /// `null` so config sync's merge patch clears it from migrated objects.
     pub artifact: Option<RepositoryBranch>,
 
     /// Named parameters. The legacy artifact repo lives under
@@ -136,40 +137,30 @@ impl DeployConfig {
             return true;
         }
 
-        let legacy = self
+        self.spec
             .spec
-            .spec
-            .artifact
-            .as_ref()
-            .is_some_and(|artifact| same(&artifact.owner, &artifact.repo));
-
-        legacy
-            || self
-                .spec
-                .spec
-                .parameters
-                .values()
-                .filter_map(ParameterSource::as_repository_branch)
-                .any(|source| same(&source.owner, &source.repo))
+            .parameters
+            .values()
+            .filter_map(ParameterSource::as_repository_branch)
+            .any(|source| same(&source.owner, &source.repo))
     }
 
-    /// The source of the [`SHA_PARAMETER`] parameter, falling back to the
-    /// legacy `spec.artifact` while configs are being migrated.
+    /// The source of the [`SHA_PARAMETER`] parameter.
     fn sha_source(&self) -> Option<RepositoryBranch> {
-        match self.spec.spec.parameters.get(SHA_PARAMETER) {
-            Some(source) => source.as_repository_branch(),
-            None => self.spec.spec.artifact.clone(),
-        }
+        self.spec
+            .spec
+            .parameters
+            .get(SHA_PARAMETER)
+            .and_then(ParameterSource::as_repository_branch)
     }
 
-    /// The deployed value of the [`SHA_PARAMETER`] parameter, falling back to
-    /// the legacy `status.artifact` while configs are being migrated.
+    /// The deployed value of the [`SHA_PARAMETER`] parameter.
     fn sha_value(&self) -> Option<ShaMaybeBranch> {
-        let status = self.status.as_ref()?;
-        match status.parameters.get(SHA_PARAMETER) {
-            Some(value) => value.as_sha_maybe_branch(),
-            None => status.artifact.clone(),
-        }
+        self.status
+            .as_ref()?
+            .parameters
+            .get(SHA_PARAMETER)
+            .and_then(ParameterValue::as_sha_maybe_branch)
     }
 
     pub fn supports_bounce(&self) -> bool {
@@ -418,12 +409,10 @@ mod tests {
                 spec: DeployConfigSpecFields {
                     team: "test".to_string(),
                     kind: "service".to_string(),
-                    artifact: artifact_repo.map(|r| RepositoryBranch {
-                        owner: r.owner,
-                        repo: r.repo,
-                        branch: "master".to_string(),
-                    }),
-                    parameters: ParameterSources::default(),
+                    artifact: None,
+                    parameters: ParameterSource::sha_map(
+                        artifact_repo.map(|r| r.with_branch("master")),
+                    ),
                     config: config_repo,
                     specs: vec![],
                 },
@@ -521,14 +510,17 @@ mod tests {
     }
 
     #[test]
-    fn legacy_shape_still_reads() -> Result<(), serde_json::Error> {
+    fn legacy_shape_is_no_longer_read() -> Result<(), serde_json::Error> {
+        // A legacy-only object is refused by the reconcile guard before any
+        // reader sees it; readers themselves ignore the legacy fields.
         let dc: DeployConfig =
             serde_json::from_value(dc_json(legacy_artifact(), legacy_status("old")))?;
-        assert_eq!(
-            dc.artifact_repository().map(|r| r.repo),
-            Some("cicd".into())
+        assert!(dc.artifact_repository().is_none());
+        assert_eq!(deployed_sha(&dc), None);
+        assert!(
+            dc.spec.spec.artifact.is_some(),
+            "legacy field still deserializes"
         );
-        assert_eq!(deployed_sha(&dc), Some("old".into()));
         Ok(())
     }
 
