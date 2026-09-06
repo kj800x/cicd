@@ -3,6 +3,7 @@ pub mod controller;
 pub mod deploy_config;
 pub mod deploy_config_status_builder;
 pub mod deploy_handlers;
+pub mod parameters;
 pub mod repo;
 pub mod spec_editing;
 pub mod webhook_handlers;
