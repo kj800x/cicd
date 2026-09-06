@@ -201,7 +201,7 @@ pub async fn deploy_fragment(/*...*/) -> impl Responder {
 - **Serialization**: `serde`, `serde_json`, `serde_yaml`
 
 ### Feature Flags
-- `test-crd`: Enables TestDeployConfig instead of DeployConfig (for testing)
+- `test-crd`: Dev controller mode. TestDeployConfig instead of DeployConfig, namespaces prefixed `test-crd-`, Ingress skipped, no GitHub deployment reports; webhooks connect as in production. See `src/kubernetes/test_mode.rs`.
 
 ## Known Limitations
 

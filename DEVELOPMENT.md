@@ -459,6 +459,32 @@ Tests go in `tests/` directory (not yet implemented).
 - [ ] Error messages display clearly
 - [ ] Database migrations apply cleanly
 
+## Running a dev controller against the cluster (`test-crd`)
+
+The `test-crd` feature builds a controller that manages `TestDeployConfig`
+resources instead of `DeployConfig`, so it can run on a dev machine against the
+real cluster while production keeps running. In test mode the binary also
+prefixes every namespace with `test-crd-`, skips `Ingress` manifests, and does
+not report deployments to GitHub. It connects to the webhook proxy exactly as
+production does; the proxy fans events out to every reader, and reacting to
+webhooks is most of what the controller does, so the dev instance sees the
+same pushes production sees.
+
+```bash
+kubectl apply -f kubernetes/test-crd/test-deploy-config-crd.yaml   # once
+DATABASE_PATH=./dev.db ENABLE_K8S_CONTROLLER=true \
+  WEBSOCKET_URL=... CLIENT_SECRET=... \
+  cargo run --features test-crd
+```
+
+Every push to a config repo's default branch then creates or updates a
+TestDeployConfig, and its workloads land in `test-crd-<namespace>`. Use the
+bootstrap page for repos you want synced before their next push. Do not deploy a
+service whose production copy shares a cluster-wide name (an Ingress host, a
+NodePort) unless you know the collision is harmless. Tear down with
+`kubectl delete tdc -A --all`; owner references remove the workloads, then delete
+the `test-crd-*` namespaces.
+
 ## Deployment
 
 1. Build binary: `cargo build --release`

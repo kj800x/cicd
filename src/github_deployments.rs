@@ -33,6 +33,10 @@ pub async fn report_deploy_action(
     config: &DeployConfig,
     action: &DeployAction,
 ) {
+    if crate::kubernetes::test_mode::ENABLED {
+        log::debug!("Test mode: not reporting deploy action to GitHub");
+        return;
+    }
     match action {
         DeployAction::Deploy {
             name,
