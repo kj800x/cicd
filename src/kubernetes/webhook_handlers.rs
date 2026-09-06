@@ -10,6 +10,7 @@ use kube::{
     api::{Api, Patch, PatchParams, ResourceExt},
     client::Client,
 };
+use serde_json::Value;
 
 // Goals: sync spec.config, spec.artifact, spec.team, spec.kind, status.orphaned (always false here)
 // NON-GOALS: spec.specs (since that is updated ONLY by deploy events)
@@ -44,6 +45,7 @@ async fn update_deploy_config(
     // We always use the existing config's specs, since specs are only updated by deploy events.
     let mut merge_patch = final_config.clone();
     merge_patch.spec.spec.specs = existing_config.spec.spec.specs.clone();
+    let merge_patch = spec_merge_patch(existing_config, &merge_patch)?;
 
     let api: Api<DeployConfig> = Api::namespaced(client.clone(), &ns);
     api.patch(&name, &PatchParams::default(), &Patch::Merge(&merge_patch))
@@ -63,6 +65,35 @@ async fn update_deploy_config(
     log::info!("Updated DeployConfig {}/{}", ns, name);
 
     Ok(())
+}
+
+/// Serialize the desired config as a merge patch, adding an explicit `null`
+/// for every parameter the existing config has but the desired one does not.
+/// A merge patch cannot remove a map key any other way, and `parameters` is
+/// omitted from the serialized spec when empty, so without this a parameter
+/// removed from the config repo would linger on the resource.
+fn spec_merge_patch(existing: &DeployConfig, desired: &DeployConfig) -> Result<Value, Error> {
+    let mut patch = serde_json::to_value(desired)
+        .map_err(|e| Error::App(AppError::Internal(format!("serialize DeployConfig: {e}"))))?;
+
+    let removed: Vec<&String> = existing
+        .spec
+        .spec
+        .parameters
+        .keys()
+        .filter(|key| !desired.spec.spec.parameters.contains_key(*key))
+        .collect();
+    if !removed.is_empty() {
+        let params = &mut patch["spec"]["parameters"];
+        if !params.is_object() {
+            *params = serde_json::json!({});
+        }
+        for key in removed {
+            params[key] = Value::Null;
+        }
+    }
+
+    Ok(patch)
 }
 
 async fn create_deploy_config(client: &Client, final_config: &DeployConfig) -> Result<(), Error> {
@@ -262,4 +293,79 @@ pub async fn update_deploy_configs_by_defining_repo(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kubernetes::{
+        deploy_config::{DeployConfigSpec, DeployConfigSpecFields},
+        parameters::{ParameterSource, SHA_PARAMETER},
+        repo::RepositoryBranch,
+        Repository,
+    };
+
+    fn dc(params: &[&str]) -> DeployConfig {
+        let mut parameters = Default::default();
+        for key in params {
+            let rb = RepositoryBranch {
+                owner: "o".into(),
+                repo: (*key).to_lowercase(),
+                branch: "master".into(),
+            };
+            let mut one = ParameterSource::sha_map(Some(rb));
+            let source = one.remove(SHA_PARAMETER);
+            if let Some(source) = source {
+                let map: &mut std::collections::BTreeMap<String, ParameterSource> = &mut parameters;
+                map.insert((*key).to_string(), source);
+            }
+        }
+        DeployConfig::new(
+            "test",
+            DeployConfigSpec {
+                spec: DeployConfigSpecFields {
+                    team: "t".into(),
+                    kind: "service".into(),
+                    artifact: None,
+                    parameters,
+                    config: Repository {
+                        owner: "o".into(),
+                        repo: "cfg".into(),
+                    },
+                    specs: vec![],
+                },
+            },
+        )
+    }
+
+    #[test]
+    fn removed_parameters_become_explicit_nulls() -> Result<(), Error> {
+        let existing = dc(&["SHA", "OTHER"]);
+        let desired = dc(&["SHA"]);
+        let patch = spec_merge_patch(&existing, &desired)?;
+        assert!(patch["spec"]["parameters"]["SHA"].is_object());
+        assert_eq!(patch["spec"]["parameters"]["OTHER"], Value::Null);
+        Ok(())
+    }
+
+    #[test]
+    fn dropping_every_parameter_still_nulls_them() -> Result<(), Error> {
+        let existing = dc(&["SHA"]);
+        let desired = dc(&[]);
+        let patch = spec_merge_patch(&existing, &desired)?;
+        assert_eq!(patch["spec"]["parameters"]["SHA"], Value::Null);
+        // Legacy artifact is serialized as null too, clearing it as before.
+        assert_eq!(patch["spec"]["artifact"], Value::Null);
+        Ok(())
+    }
+
+    #[test]
+    fn unchanged_parameters_add_nothing() -> Result<(), Error> {
+        let existing = dc(&["SHA"]);
+        let desired = dc(&["SHA"]);
+        let patch = spec_merge_patch(&existing, &desired)?;
+        assert!(patch["spec"]["parameters"].get("OTHER").is_none());
+        assert!(patch["spec"]["parameters"]["SHA"].is_object());
+        Ok(())
+    }
 }
