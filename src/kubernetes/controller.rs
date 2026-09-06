@@ -1,6 +1,7 @@
 use super::DeployConfig;
 use crate::error::format_error_chain;
 use crate::kubernetes::api::ListMode;
+use crate::kubernetes::migration;
 use crate::kubernetes::repo::DeploymentState;
 use crate::kubernetes::spec_editing::{WithInjectedEnv, WithVersion};
 use crate::kubernetes::{
@@ -29,6 +30,15 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> AppRes
     let name = dc.name_any();
 
     log::debug!("Reconciling DeployConfig {}/{}", ns, name);
+
+    // Migration: converge legacy artifact fields into parameters, and refuse
+    // to act on a config that is still legacy-only. Removed once every config
+    // is migrated and the legacy fields are gone from the CRD.
+    if migration::backfill_parameters(client, &dc).await? {
+        // The local copy is stale; read the migrated object on the next pass.
+        return Ok(Action::requeue(Duration::from_secs(1)));
+    }
+    migration::assert_parameters_present(&dc)?;
 
     // Ensure namespace exists (safety check - DeployConfig should already exist in target namespace)
     let template_namespace = std::env::var("TEMPLATE_NAMESPACE").ok();
