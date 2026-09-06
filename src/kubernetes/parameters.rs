@@ -14,10 +14,6 @@
 //! That is preferable to silently treating the config as undeployed, which
 //! would make the reconciler prune its running workloads.
 //!
-//! This module is not wired into `DeployConfig` yet; that lands in a
-//! follow-up so the types can be reviewed on their own.
-#![allow(dead_code)] // until DeployConfig uses these in the next PR
-
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -73,6 +69,7 @@ impl ParameterSource {
 
     /// Build the map for the legacy single-artifact shape: either empty or a
     /// single commit source under [`SHA_PARAMETER`].
+    #[allow(dead_code)] // config sync starts writing parameters in the next PR
     pub fn sha_map(artifact: Option<RepositoryBranch>) -> ParameterSources {
         artifact
             .map(|rb| BTreeMap::from([(SHA_PARAMETER.to_string(), ParameterSource::from(rb))]))
