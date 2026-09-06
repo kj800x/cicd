@@ -76,7 +76,22 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> AppRes
         .filter(|o| !dc.child_is_up_to_date(o))
         .collect();
     log::debug!("Stale objects: {stale_objects:#?}");
+    let prune_disabled = prune_disabled();
     for object in stale_objects {
+        if prune_disabled {
+            log::warn!(
+                "Prune disabled: would delete stale resource {}/{} ({}) owned by DeployConfig {}",
+                ns,
+                object.name_any(),
+                object
+                    .types
+                    .as_ref()
+                    .map(|t| t.kind.as_str())
+                    .unwrap_or("?"),
+                name
+            );
+            continue;
+        }
         log::debug!("Deleting stale resource {}/{}", ns, object.name_any());
         delete_dynamic_object(client.clone(), &object).await?;
     }
@@ -84,6 +99,19 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> AppRes
 
     // Requeue reconciliation
     Ok(Action::requeue(Duration::from_secs(5)))
+}
+
+/// Whether the stale-resource prune step is switched off.
+///
+/// Set `CICD_DISABLE_PRUNE=true` on the controller to make reconcile log what
+/// it would have deleted instead of deleting it. Intended as a safety valve
+/// during schema migrations, where a misread DeployConfig could otherwise
+/// cause running workloads to be pruned. Everything else about reconcile
+/// (applying manifests, annotations, owner references) is unchanged.
+fn prune_disabled() -> bool {
+    std::env::var("CICD_DISABLE_PRUNE")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
 }
 
 /// Error handler for the controller
