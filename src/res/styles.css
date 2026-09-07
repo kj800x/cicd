@@ -1816,3 +1816,11 @@ header {
 .patch-add button {
   grid-column: 1 / -1;
 }
+.patch-hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.patch-hint code {
+  font-size: 11px;
+}

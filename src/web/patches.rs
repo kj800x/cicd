@@ -80,6 +80,13 @@ pub fn render_patches_panel(config: &DeployConfig, return_url: &str) -> Markup {
                     input type="text" name="by" placeholder="who" aria-label="Who";
                     button type="submit" class="primary-action-button" { "Add patch and apply" }
                 }
+                p.muted.patch-hint {
+                    "Paths are JSON pointers into the manifest. To append to a list (an env var, "
+                    "a volume) end the path with " code { "/-" } ", for example "
+                    code { "/spec/template/spec/containers/0/env/-" } " with value "
+                    code { "{\"name\":\"FLAG\",\"value\":\"on\"}" } ". "
+                    "Every change is checked against Kubernetes before it is saved."
+                }
             }
         }
     }
