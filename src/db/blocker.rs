@@ -28,7 +28,6 @@ pub struct Blocker {
 
 const COLUMNS: &str = "id, config_name, reason, created_by, created_at, cleared_by, cleared_at";
 
-#[allow(dead_code)] // the UI and MCP surfaces that manage blockers land in the next PRs
 impl Blocker {
     fn from_row(row: &Row) -> rusqlite::Result<Self> {
         Ok(Blocker {
@@ -42,6 +41,7 @@ impl Blocker {
         })
     }
 
+    #[allow(dead_code)] // used by the MCP tools in the next PR
     pub fn is_active(&self) -> bool {
         self.cleared_at.is_none()
     }
@@ -117,6 +117,7 @@ impl Blocker {
     }
 
     /// Full history for one config, newest first.
+    #[allow(dead_code)] // used by the MCP tools in the next PR
     pub fn history_for(
         conn: &PooledConnection<SqliteConnectionManager>,
         config_name: &str,
