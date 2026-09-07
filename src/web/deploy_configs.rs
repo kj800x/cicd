@@ -1231,11 +1231,19 @@ pub async fn deploy_config(
             opentelemetry::KeyValue::new("result", outcome),
         ],
     );
-    if let Err(e) = result {
-        log::error!("Failed to execute deploy action on {}: {}", name, e);
-        return HttpResponse::InternalServerError()
-            .content_type("text/html; charset=utf-8")
-            .body(format!("Failed to execute deploy action: {}", e));
+    match result {
+        Ok(_) => {}
+        Err(AppError::Blocked(message)) => {
+            return HttpResponse::Conflict()
+                .content_type("text/html; charset=utf-8")
+                .body(message);
+        }
+        Err(e) => {
+            log::error!("Failed to execute deploy action on {}: {}", name, e);
+            return HttpResponse::InternalServerError()
+                .content_type("text/html; charset=utf-8")
+                .body(format!("Failed to execute deploy action: {}", e));
+        }
     }
 
     // Redirect back to the DeployConfig page with the selected config
