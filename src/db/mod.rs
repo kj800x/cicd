@@ -1,5 +1,6 @@
 use std::ops::Deref;
 
+pub mod blocker;
 pub mod deploy_config;
 pub mod deploy_config_version;
 pub mod deploy_event;
@@ -11,6 +12,8 @@ pub mod git_commit_build;
 pub mod git_commit_parent;
 pub mod git_repo;
 pub mod migrations;
+#[cfg(test)]
+pub mod test_support;
 
 pub struct ExistenceResult {
     id: u64,
