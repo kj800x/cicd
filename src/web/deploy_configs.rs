@@ -1266,7 +1266,8 @@ pub async fn deploy_config(
         form.get("sha").unwrap_or(&"".to_string())
     );
 
-    let result = crate::deploys::run_action(&action, &config, &client, &octocrabs, &conn).await;
+    let result =
+        crate::deploys::run_action(&action, &config, &client, &octocrabs, &conn, "web").await;
     let (action_type, outcome) = match &result {
         Ok(deploy_action) => (deploy_action.action_type(), "success"),
         Err(_) => (action.action_type(), "error"),
