@@ -119,7 +119,7 @@ impl NewRevision {
 const COLUMNS: &str =
     "id, config_name, created_at, actor, action, reason, config_sha, config_branch, config_version_hash";
 
-// Read paths are used by the history page and rollback in the next slice.
+// Read paths are used by the history page and rollback in the next PRs.
 #[allow(dead_code)]
 impl Revision {
     fn from_row(row: &Row) -> rusqlite::Result<Self> {
@@ -236,6 +236,47 @@ impl Revision {
         }
     }
 
+    /// Revisions for every config on a team, newest first.
+    pub fn list_for_team(
+        conn: &PooledConnection<SqliteConnectionManager>,
+        team: &str,
+        limit: usize,
+    ) -> AppResult<Vec<Self>> {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {COLUMNS} FROM revision \
+             WHERE config_name IN (SELECT name FROM deploy_config WHERE team = ?1) \
+             ORDER BY created_at DESC, id DESC LIMIT ?2"
+        ))?;
+        let mut revs = stmt
+            .query_map(params![team, limit as i64], Self::from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for rev in &mut revs {
+            rev.parameters = Self::load_parameters(conn, rev.id)?;
+        }
+        Ok(revs)
+    }
+
+    /// The parameter value deployed under `name`, if any.
+    pub fn parameter(&self, name: &str) -> Option<&RevisionParameter> {
+        self.parameters.iter().find(|p| p.name == name)
+    }
+
+    /// Pair each revision with the one that preceded it for the same config,
+    /// so a row can show what changed. `revisions` must be newest first; the
+    /// oldest revision of each config in the list gets `None`, which only
+    /// means the list did not reach further back.
+    pub fn with_previous(revisions: Vec<Self>) -> Vec<(Self, Option<Self>)> {
+        let mut out = Vec::with_capacity(revisions.len());
+        for (i, rev) in revisions.iter().enumerate() {
+            let prev = revisions[i + 1..]
+                .iter()
+                .find(|r| r.config_name == rev.config_name)
+                .cloned();
+            out.push((rev.clone(), prev));
+        }
+        out
+    }
+
     /// Revisions for a config, newest first.
     pub fn list_for(
         conn: &PooledConnection<SqliteConnectionManager>,
@@ -330,6 +371,60 @@ mod tests {
         );
         assert_eq!(all[1].parameters, first.parameters);
         assert!(Revision::latest_for(&conn, "other")?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn team_listing_and_previous_pairing() -> AppResult<()> {
+        let pool = migrated_memory_pool();
+        let conn = pool.get()?;
+        conn.execute(
+            "INSERT INTO git_repo (id, owner_name, name, default_branch, private) VALUES (1, 'o', 'r', 'master', 0)",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO deploy_config (name, team, kind, config_repo_id, active) VALUES ('a', 'blue', 'service', 1, 1), ('b', 'blue', 'service', 1, 1), ('c', 'red', 'service', 1, 1)",
+            [],
+        )?;
+        let rev = |name: &str, sha: &str| NewRevision {
+            config_name: name.into(),
+            actor: "web".into(),
+            action: "deploy".into(),
+            reason: None,
+            config_sha: Some(sha.into()),
+            config_branch: Some("master".into()),
+            config_version_hash: None,
+            parameters: vec![RevisionParameter {
+                name: SHA_PARAMETER.into(),
+                kind: "commit".into(),
+                value: sha.into(),
+                branch: Some("master".into()),
+            }],
+        };
+        let a1 = Revision::record(&conn, rev("a", "a1"))?;
+        let b1 = Revision::record(&conn, rev("b", "b1"))?;
+        let a2 = Revision::record(&conn, rev("a", "a2"))?;
+        let _c1 = Revision::record(&conn, rev("c", "c1"))?;
+
+        let blue = Revision::list_for_team(&conn, "blue", 10)?;
+        assert_eq!(
+            blue.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![a2.id, b1.id, a1.id]
+        );
+        assert_eq!(
+            blue[0].parameter(SHA_PARAMETER).map(|p| p.value.as_str()),
+            Some("a2")
+        );
+        assert!(blue[0].parameter("NOPE").is_none());
+
+        let paired = Revision::with_previous(blue);
+        assert_eq!(
+            paired[0].1.as_ref().map(|r| r.id),
+            Some(a1.id),
+            "a2's previous is a1, skipping b1"
+        );
+        assert_eq!(paired[1].1, None, "b1 is the oldest b in the list");
+        assert_eq!(paired[2].1, None);
         Ok(())
     }
 
