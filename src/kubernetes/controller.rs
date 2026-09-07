@@ -45,8 +45,28 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> AppRes
     // CICD_* env vars describing this deploy, injected into every container.
     let deploy_env_vars = dc.deploy_env_vars();
 
+    // Undeployed means "run nothing": apply no manifests and let the prune
+    // step below remove anything still owned. Manifest templates can be
+    // present without a deployed version for a moment during a deploy (they
+    // are written before the status), and applying them then would render
+    // `$SHA` literally and roll out an image that does not exist.
+    let state = dc.deployment_state();
+    let resources: &[serde_json::Value] = if state == DeploymentState::Undeployed {
+        if !dc.resource_specs().is_empty() {
+            log::debug!(
+                "DeployConfig {}/{} is undeployed; not applying its {} manifest templates",
+                ns,
+                name,
+                dc.resource_specs().len()
+            );
+        }
+        &[]
+    } else {
+        dc.resource_specs()
+    };
+
     // Create or update resources as needed
-    for resource in dc.resource_specs() {
+    for resource in resources {
         let mut obj: DynamicObject = serde_json::from_value(resource.clone()).map_err(|e| {
             AppError::Internal(format!(
                 "JSON didn't look like a Kubernetes object (apiVersion/kind/metadata): {}",
@@ -66,7 +86,7 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> AppRes
             obj.metadata.namespace = Some(ns.clone());
         }
 
-        if let DeploymentState::DeployedWithArtifact { artifact, .. } = dc.deployment_state() {
+        if let DeploymentState::DeployedWithArtifact { artifact, .. } = &state {
             obj = obj.with_version(&artifact.sha);
         }
 
