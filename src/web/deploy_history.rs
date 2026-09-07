@@ -7,6 +7,7 @@
 use crate::db::deploy_config::DeployConfig as DbDeployConfig;
 use crate::db::git_repo::GitRepo;
 use crate::db::revision::Revision;
+use crate::db::revision_diff;
 use crate::kubernetes::parameters::SHA_PARAMETER;
 use crate::prelude::*;
 use crate::web::team_prefs::TeamsCookie;
@@ -148,6 +149,27 @@ fn render_config_cell(rev: &Revision, prev: Option<&Revision>, repos: &ConfigRep
     }
 }
 
+/// What this revision changed relative to the previous one of the same
+/// config: parameter values and channels, patches, the config commit, and
+/// deploy/undeploy transitions. Empty when nothing moved (a redeploy of
+/// the same inputs).
+fn render_changes_cell(rev: &Revision, prev: Option<&Revision>) -> Markup {
+    let changes = revision_diff::diff(rev, prev);
+    html! {
+        td class="changes-cell" {
+            @if changes.is_empty() {
+                span.muted { "no change" }
+            } @else {
+                ul.changes {
+                    @for change in &changes {
+                        li { (change.describe()) }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn render_revision_row(rev: &Revision, prev: Option<&Revision>, repos: &ConfigRepos) -> Markup {
     html! {
         tr {
@@ -161,6 +183,7 @@ fn render_revision_row(rev: &Revision, prev: Option<&Revision>, repos: &ConfigRe
             }
             (render_artifact_cell(rev, prev, repos))
             (render_config_cell(rev, prev, repos))
+            (render_changes_cell(rev, prev))
             td class="time-cell" { (format_et_time(rev.created_at)) }
             td class="actions-cell" { (render_row_actions(rev)) }
         }
@@ -212,6 +235,7 @@ fn render_table(
                     th { "Action" }
                     th { "Artifact" }
                     th { "Config" }
+                    th { "Changes" }
                     th { "Time" }
                     th { "" }
                 }
