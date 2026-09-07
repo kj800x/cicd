@@ -315,6 +315,7 @@ mod tests {
                         repo: "site".into(),
                         branch: "master".into(),
                     })),
+                    selections: Default::default(),
                     config: Repository {
                         owner: "o".into(),
                         repo: "site".into(),

@@ -327,6 +327,7 @@ mod tests {
                     team: "t".into(),
                     kind: "service".into(),
                     parameters,
+                    selections: Default::default(),
                     config: Repository {
                         owner: "o".into(),
                         repo: "cfg".into(),
