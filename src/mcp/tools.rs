@@ -8,6 +8,7 @@ use crate::crab_ext::Octocrabs;
 use crate::db::blocker::Blocker;
 use crate::db::git_branch::GitBranch;
 use crate::db::git_repo::GitRepo;
+use crate::db::revision::Revision;
 use crate::kubernetes::api::{
     get_all_deploy_configs, get_deploy_config, list_namespace_objects, ListMode,
 };
@@ -130,6 +131,30 @@ pub fn tool_definitions() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "list_revisions".to_string(),
+            description: "List a config's revisions, newest first. A revision is the record of one deploy or undeploy: the config commit and the value deployed for each parameter. Use a deploy revision's id with rollback.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of the deploy config" },
+                    "limit": { "type": "integer", "description": "How many to return (default 20)" }
+                },
+                "required": ["name"]
+            }),
+        },
+        Tool {
+            name: "rollback".to_string(),
+            description: "Redeploy exactly what a revision deployed, then add a blocker so the config stays held until someone clears it. Not refused by existing blockers. Only deploy revisions can be rolled back to.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of the deploy config" },
+                    "revision": { "type": "integer", "description": "Revision id from list_revisions" }
+                },
+                "required": ["name", "revision"]
+            }),
+        },
+        Tool {
             name: "clear_blocker".to_string(),
             description: "Clear one blocker by id, allowing deploys again once no active blockers remain on the config.".to_string(),
             input_schema: json!({
@@ -143,6 +168,25 @@ pub fn tool_definitions() -> Vec<Tool> {
             }),
         },
     ]
+}
+
+fn revision_json(r: &Revision) -> Value {
+    json!({
+        "id": r.id,
+        "config": r.config_name,
+        "created_at": r.created_at,
+        "actor": r.actor,
+        "action": r.action,
+        "reason": r.reason,
+        "config_sha": r.config_sha,
+        "config_branch": r.config_branch,
+        "parameters": r.parameters.iter().map(|p| json!({
+            "name": p.name,
+            "type": p.kind,
+            "value": p.value,
+            "branch": p.branch,
+        })).collect::<Vec<_>>(),
+    })
 }
 
 fn blocker_json(b: &Blocker) -> Value {
@@ -173,6 +217,8 @@ pub async fn dispatch(
         "undeploy" => handle_action("undeploy", arguments, client, pool, octocrabs).await,
         "bounce" => handle_action("bounce", arguments, client, pool, octocrabs).await,
         "execute_job" => handle_action("execute_job", arguments, client, pool, octocrabs).await,
+        "list_revisions" => handle_list_revisions(arguments, pool),
+        "rollback" => handle_rollback(arguments, client, pool, octocrabs).await,
         "list_blockers" => handle_list_blockers(arguments, pool),
         "add_blocker" => handle_add_blocker(arguments, pool),
         "clear_blocker" => handle_clear_blocker(arguments, pool),
@@ -258,8 +304,11 @@ async fn handle_get_deploy_config(
         Some(n) => n,
         None => return ToolCallResult::error("Missing required parameter: name".to_string()),
     };
-    let blockers = match pool.get() {
-        Ok(conn) => Blocker::active_for(&conn, name).unwrap_or_default(),
+    let (blockers, latest_revision) = match pool.get() {
+        Ok(conn) => (
+            Blocker::active_for(&conn, name).unwrap_or_default(),
+            Revision::latest_for(&conn, name).ok().flatten(),
+        ),
         Err(e) => return ToolCallResult::error(format!("Database error: {}", e)),
     };
 
@@ -313,6 +362,7 @@ async fn handle_get_deploy_config(
         "orphaned": config.is_orphaned(),
         "blocked": !blockers.is_empty(),
         "blockers": blockers.iter().map(blocker_json).collect::<Vec<_>>(),
+        "latest_revision": latest_revision.as_ref().map(revision_json),
         "supports_bounce": config.supports_bounce(),
         "supports_execute_job": config.supports_execute_job(),
         "artifact_repo": artifact_repo.as_ref().map(|r| format!("{}/{}", r.owner, r.repo)),
@@ -488,6 +538,64 @@ async fn handle_action(
     execute_deploy_action(&action, name, &config, client, pool, octocrabs).await
 }
 
+fn handle_list_revisions(arguments: Value, pool: &Pool<SqliteConnectionManager>) -> ToolCallResult {
+    let name = match arguments.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n,
+        None => return ToolCallResult::error("Missing required parameter: name".to_string()),
+    };
+    let limit = arguments
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|l| l.clamp(1, 200) as usize)
+        .unwrap_or(20);
+    let conn = match pool.get() {
+        Ok(c) => c,
+        Err(e) => return ToolCallResult::error(format!("Database error: {}", e)),
+    };
+    match Revision::list_for(&conn, name, limit) {
+        Ok(revs) => ToolCallResult::text(
+            serde_json::to_string_pretty(&revs.iter().map(revision_json).collect::<Vec<_>>())
+                .unwrap_or_default(),
+        ),
+        Err(e) => ToolCallResult::error(format!("Failed to list revisions: {}", e)),
+    }
+}
+
+async fn handle_rollback(
+    arguments: Value,
+    client: &Client,
+    pool: &Pool<SqliteConnectionManager>,
+    octocrabs: &Octocrabs,
+) -> ToolCallResult {
+    let name = match arguments.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n,
+        None => return ToolCallResult::error("Missing required parameter: name".to_string()),
+    };
+    let revision = match arguments.get("revision").and_then(|v| v.as_i64()) {
+        Some(r) => r,
+        None => return ToolCallResult::error("Missing required parameter: revision".to_string()),
+    };
+    let config = match get_deploy_config(client, name).await {
+        Ok(Some(c)) => c,
+        Ok(None) => return ToolCallResult::error(format!("Deploy config '{}' not found", name)),
+        Err(e) => return ToolCallResult::error(format!("Failed to get deploy config: {}", e)),
+    };
+    if config.is_orphaned() {
+        return ToolCallResult::error(
+            "Cannot roll back an orphaned config; its config repository is gone.".to_string(),
+        );
+    }
+    execute_deploy_action(
+        &Action::Rollback { revision },
+        name,
+        &config,
+        client,
+        pool,
+        octocrabs,
+    )
+    .await
+}
+
 fn handle_list_blockers(arguments: Value, pool: &Pool<SqliteConnectionManager>) -> ToolCallResult {
     let conn = match pool.get() {
         Ok(c) => c,
@@ -587,6 +695,9 @@ async fn execute_deploy_action(
                 "Deploy refused: {} Use list_blockers to see them.",
                 message
             ));
+        }
+        Err(crate::error::AppError::InvalidInput(message)) => {
+            return ToolCallResult::error(message);
         }
         Err(e) => return ToolCallResult::error(format!("Failed to execute action: {}", e)),
     }
