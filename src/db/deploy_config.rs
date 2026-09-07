@@ -24,6 +24,19 @@ impl DeployConfig {
         })
     }
 
+    #[allow(dead_code)] // the history page uses this in the next PR
+    pub fn get_by_name(
+        name: &str,
+        conn: &PooledConnection<SqliteConnectionManager>,
+    ) -> AppResult<Option<Self>> {
+        let mut stmt = conn.prepare("SELECT name, team, kind, config_repo_id, artifact_repo_id, active FROM deploy_config WHERE name = ?1")?;
+        let mut rows = stmt.query(params![name])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(DeployConfig::from_row(row)?)),
+            None => Ok(None),
+        }
+    }
+
     pub fn get_by_config_repo_id(
         config_repo_id: u64,
         conn: &PooledConnection<SqliteConnectionManager>,
