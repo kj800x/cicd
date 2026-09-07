@@ -24,6 +24,7 @@ use crate::{
         api::patch_deploy_config_selection,
         deploy_handlers::DeployAction,
         parameters::{ParameterValue, ParameterValues, SHA_PARAMETER},
+        patches::ManifestPatch,
         repo::DeploymentState,
         selections::{Durability, Selection},
         DeployConfig,
@@ -93,6 +94,69 @@ pub fn selection_change(
         | Action::ExecuteJob
         | Action::ToggleAutodeploy => None,
     }
+}
+
+/// A change to a config's patch list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PatchChange {
+    Add(ManifestPatch),
+    Remove(usize),
+}
+
+/// Add or remove a manifest patch. The new patch list is validated by
+/// rendering the config with it before anything is written, so a patch
+/// that does not fit is refused here rather than failing reconcile later.
+/// Refused while a blocker is active, like a deploy: patches change what
+/// runs. Records a revision with action `patch`.
+pub async fn change_patches(
+    config: &DeployConfig,
+    client: &Client,
+    conn: &PooledConnection<SqliteConnectionManager>,
+    actor: &str,
+    change: PatchChange,
+    _octocrabs: &Octocrabs,
+) -> AppResult<()> {
+    let name = kube::ResourceExt::name_any(config);
+    check_blockers(conn, &Action::DeployLatest, &name)?;
+
+    let mut patches = config.spec.spec.patches.clone();
+    let reason = match change {
+        PatchChange::Add(patch) => {
+            let reason = format!("added patch: {}", patch.describe());
+            patches.push(patch);
+            reason
+        }
+        PatchChange::Remove(index) => {
+            if index >= patches.len() {
+                return Err(AppError::InvalidInput(format!(
+                    "{name} has no patch at position {index}"
+                )));
+            }
+            let removed = patches.remove(index);
+            format!("removed patch: {}", removed.describe())
+        }
+    };
+
+    // Validate against what is deployed now. An undeployed config has no
+    // values, so only check the patches themselves fit the templates.
+    let mut effective = config.clone();
+    effective.spec.spec.patches = patches.clone();
+    if config.status.as_ref().is_some_and(|s| s.config.is_some()) {
+        effective.render_manifests()?;
+    } else {
+        let templates = effective.resource_templates();
+        let manifests = templates.iter().map(|t| t.manifest.clone()).collect();
+        crate::kubernetes::patches::apply_patches(&templates, manifests, &patches)?;
+    }
+
+    let ns = kube::ResourceExt::namespace(config).unwrap_or_else(|| "default".to_string());
+    crate::kubernetes::api::set_deploy_config_patches(client, &ns, &name, &patches).await?;
+
+    match Revision::record(conn, NewRevision::patch_change(&effective, actor, &reason)) {
+        Ok(rev) => log::info!("Recorded revision {} for {} ({})", rev.id, name, reason),
+        Err(e) => log::error!("Failed to record patch revision for {}: {}", name, e),
+    }
+    Ok(())
 }
 
 /// The static parameter values a rollback replays, from the revision's

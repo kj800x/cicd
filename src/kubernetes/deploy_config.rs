@@ -4,6 +4,7 @@ use crate::kubernetes::{
     parameters::{
         ParameterSource, ParameterSources, ParameterValue, ParameterValues, SHA_PARAMETER,
     },
+    patches::{apply_patches, ManifestPatch},
     repo::{DeploymentState, RepositoryBranch, ShaMaybeBranch},
     selections::{Durability, Mode, Selection, Selections},
     Repository,
@@ -61,6 +62,11 @@ pub struct DeployConfigSpecFields {
     /// only; config sync never touches it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub selections: Selections,
+
+    /// Ad hoc JSON Patch operations applied to the rendered manifests, in
+    /// order. Written by the deploy handler only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub patches: Vec<ManifestPatch>,
 
     /// Repository information
     pub config: Repository,
@@ -278,6 +284,12 @@ impl DeployConfig {
             names.push(SHA_PARAMETER);
         }
         names.into_iter().any(|n| self.selection(n).is_temporary())
+            || self
+                .spec
+                .spec
+                .patches
+                .iter()
+                .any(ManifestPatch::is_temporary)
     }
 
     /// The `CICD_*` environment variables to inject into every container of the
@@ -429,9 +441,10 @@ impl DeployConfig {
         use crate::kubernetes::spec_editing::{referenced_parameters, WithParameters};
         let values = self.parameter_values();
         let declared = &self.spec.spec.parameters;
-        let mut rendered = Vec::with_capacity(self.spec.spec.specs.len());
-        for template in self.resource_specs() {
-            for name in referenced_parameters(&template) {
+        let templates = self.resource_templates();
+        let mut rendered = Vec::with_capacity(templates.len());
+        for template in &templates {
+            for name in referenced_parameters(&template.manifest) {
                 if declared.contains_key(&name) && !values.contains_key(&name) {
                     return Err(crate::error::AppError::Internal(format!(
                         "DeployConfig {} declares parameter {name} and its manifests use ${name}, \
@@ -440,9 +453,11 @@ impl DeployConfig {
                     )));
                 }
             }
-            rendered.push(template.with_parameters(&values));
+            rendered.push(template.manifest.with_parameters(&values));
         }
-        Ok(rendered)
+        // Patches apply after substitution, and a patch that no longer fits
+        // fails the whole render rather than being skipped.
+        apply_patches(&templates, rendered, &self.spec.spec.patches)
     }
 
     #[allow(clippy::expect_used)]
@@ -558,6 +573,7 @@ mod tests {
                         artifact_repo.map(|r| r.with_branch("master")),
                     ),
                     selections: Selections::default(),
+                    patches: vec![],
                     config: config_repo,
                     specs: vec![],
                 },

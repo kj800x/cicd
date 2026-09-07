@@ -197,6 +197,22 @@ pub async fn patch_deploy_config_selection(
     Ok(())
 }
 
+/// Replace the whole patch list under `spec.patches`. A merge patch replaces
+/// arrays wholesale, which is what we want.
+pub async fn set_deploy_config_patches(
+    client: &Client,
+    namespace: &str,
+    name: &str,
+    patches: &[crate::kubernetes::patches::ManifestPatch],
+) -> AppResult<()> {
+    let api: Api<DeployConfig> = Api::namespaced(client.clone(), namespace);
+    let patch = Patch::Merge(serde_json::json!({ "spec": { "patches": patches } }));
+    api.patch(name, &PatchParams::default(), &patch)
+        .await
+        .map_err(AppError::Kubernetes)?;
+    Ok(())
+}
+
 /// Update the DeployConfig status according to the given status builder
 pub async fn update_deploy_config_status(
     client: &Client,

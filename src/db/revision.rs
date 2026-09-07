@@ -42,6 +42,8 @@ pub struct Revision {
     pub config_sha: Option<String>,
     pub config_branch: Option<String>,
     pub config_version_hash: Option<String>,
+    /// The manifest patches active at the time, as JSON, if any.
+    pub patches: Option<String>,
     pub parameters: Vec<RevisionParameter>,
 }
 
@@ -55,10 +57,54 @@ pub struct NewRevision {
     pub config_sha: Option<String>,
     pub config_branch: Option<String>,
     pub config_version_hash: Option<String>,
+    pub patches: Option<String>,
     pub parameters: Vec<RevisionParameter>,
 }
 
+/// The config's active patches as the JSON stored on a revision.
+fn patches_json(config: &DeployConfig) -> Option<String> {
+    if config.spec.spec.patches.is_empty() {
+        None
+    } else {
+        serde_json::to_string(&config.spec.spec.patches).ok()
+    }
+}
+
 impl NewRevision {
+    /// A revision recording a patch change: what is deployed stays the
+    /// same, the patch set does not.
+    pub fn patch_change(config: &DeployConfig, actor: &str, reason: &str) -> Self {
+        let status = config.status.as_ref();
+        let parameters = status
+            .map(|s| {
+                s.parameters
+                    .iter()
+                    .map(|(name, value)| RevisionParameter {
+                        name: name.clone(),
+                        kind: value.type_name().to_string(),
+                        value: value.rendered(),
+                        branch: value.branch().map(String::from),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        NewRevision {
+            config_name: kube::ResourceExt::name_any(config),
+            actor: actor.to_string(),
+            action: "patch".to_string(),
+            reason: Some(reason.to_string()),
+            config_sha: status
+                .and_then(|s| s.config.as_ref())
+                .map(|c| c.sha.clone()),
+            config_branch: status
+                .and_then(|s| s.config.as_ref())
+                .and_then(|c| c.branch.clone()),
+            config_version_hash: None,
+            patches: patches_json(config),
+            parameters,
+        }
+    }
+
     /// Describe an executed [`DeployAction`]. Returns `None` for actions
     /// that do not change what is deployed (bounce, execute job, toggles).
     pub fn from_deploy_action(
@@ -105,6 +151,7 @@ impl NewRevision {
                     config_sha: Some(cfg.sha.clone()),
                     config_branch: cfg.branch.clone(),
                     config_version_hash,
+                    patches: patches_json(config),
                     parameters,
                 })
             }
@@ -116,6 +163,7 @@ impl NewRevision {
                 config_sha: None,
                 config_branch: None,
                 config_version_hash: None,
+                patches: None,
                 parameters: vec![],
             }),
             DeployAction::Bounce { .. }
@@ -126,7 +174,7 @@ impl NewRevision {
 }
 
 const COLUMNS: &str =
-    "id, config_name, created_at, actor, action, reason, config_sha, config_branch, config_version_hash";
+    "id, config_name, created_at, actor, action, reason, config_sha, config_branch, config_version_hash, patches";
 
 impl Revision {
     fn from_row(row: &Row) -> rusqlite::Result<Self> {
@@ -140,6 +188,7 @@ impl Revision {
             config_sha: row.get(6)?,
             config_branch: row.get(7)?,
             config_version_hash: row.get(8)?,
+            patches: row.get(9)?,
             parameters: vec![],
         })
     }
@@ -170,8 +219,8 @@ impl Revision {
         let created_at = Utc::now().timestamp_millis();
         let tx = conn.unchecked_transaction()?;
         tx.execute(
-            "INSERT INTO revision (config_name, created_at, actor, action, reason, config_sha, config_branch, config_version_hash) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO revision (config_name, created_at, actor, action, reason, config_sha, config_branch, config_version_hash, patches) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 new.config_name,
                 created_at,
@@ -180,7 +229,8 @@ impl Revision {
                 new.reason,
                 new.config_sha,
                 new.config_branch,
-                new.config_version_hash
+                new.config_version_hash,
+                new.patches
             ],
         )?;
         let id = tx.last_insert_rowid();
@@ -201,6 +251,7 @@ impl Revision {
             config_sha: new.config_sha,
             config_branch: new.config_branch,
             config_version_hash: new.config_version_hash,
+            patches: new.patches,
             parameters: new.parameters,
         })
     }
@@ -325,6 +376,7 @@ mod tests {
                         branch: "master".into(),
                     })),
                     selections: Default::default(),
+                    patches: vec![],
                     config: Repository {
                         owner: "o".into(),
                         repo: "site".into(),
@@ -403,6 +455,7 @@ mod tests {
             config_sha: Some(sha.into()),
             config_branch: Some("master".into()),
             config_version_hash: None,
+            patches: None,
             parameters: vec![RevisionParameter {
                 name: SHA_PARAMETER.into(),
                 kind: "commit".into(),

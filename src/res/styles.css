@@ -1775,3 +1775,44 @@ header {
 .parameter-set input[name="value"] {
   grid-column: 1 / -1;
 }
+
+/* Patches panel */
+.patches-panel {
+  margin-top: 24px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-color);
+}
+.patches-panel h3 {
+  margin-top: 0;
+}
+.patch-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 12px;
+}
+.patch-item {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 13px;
+}
+.patch-remove {
+  margin-top: 4px;
+}
+.patch-add {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.patch-add input,
+.patch-add select {
+  padding: 3px 8px;
+  font-size: 13px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+}
+.patch-add input[name="path"],
+.patch-add input[name="value"],
+.patch-add select[name="target"],
+.patch-add button {
+  grid-column: 1 / -1;
+}

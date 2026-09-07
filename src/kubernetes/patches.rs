@@ -1,0 +1,294 @@
+//! Manifest patches: ad hoc JSON Patch operations applied to rendered
+//! manifests, for the knobs a config repo never declared (a debug mount, an
+//! extra env var). Sticky like selections, with the same durability, and
+//! recorded on every revision. A patch that no longer applies fails the
+//! render, and therefore the reconcile, loudly: nothing is applied or
+//! pruned until it is fixed or removed.
+
+use serde::{Deserialize, Serialize};
+
+use crate::error::{AppError, AppResult};
+use crate::kubernetes::deploy_config::Template;
+use crate::kubernetes::selections::Durability;
+
+/// Which rendered manifest a patch applies to. `kind` and `name` identify
+/// it; `file` narrows to the template file when two manifests share both.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PatchTarget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    pub kind: String,
+    pub name: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PatchOp {
+    Add,
+    Replace,
+    Remove,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ManifestPatch {
+    pub target: PatchTarget,
+    pub op: PatchOp,
+    /// JSON pointer into the manifest, e.g. `/spec/replicas`.
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
+    #[serde(default)]
+    pub durability: Durability,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+}
+
+impl ManifestPatch {
+    pub fn is_temporary(&self) -> bool {
+        self.durability == Durability::Temporary
+    }
+
+    /// A one-line description for lists and logs.
+    pub fn describe(&self) -> String {
+        let file = self
+            .target
+            .file
+            .as_deref()
+            .map(|f| format!("{f}:"))
+            .unwrap_or_default();
+        match self.op {
+            PatchOp::Remove => format!(
+                "{} {}{}/{} remove {}",
+                self.durability.as_str(),
+                file,
+                self.target.kind,
+                self.target.name,
+                self.path
+            ),
+            op => format!(
+                "{} {}{}/{} {} {} = {}",
+                self.durability.as_str(),
+                file,
+                self.target.kind,
+                self.target.name,
+                match op {
+                    PatchOp::Add => "add",
+                    _ => "replace",
+                },
+                self.path,
+                self.value
+                    .as_ref()
+                    .map(|v| v.to_string())
+                    .unwrap_or_default()
+            ),
+        }
+    }
+
+    fn matches(&self, file: Option<&str>, manifest: &serde_json::Value) -> bool {
+        let kind = manifest.get("kind").and_then(|k| k.as_str());
+        let name = manifest
+            .get("metadata")
+            .and_then(|m| m.get("name"))
+            .and_then(|n| n.as_str());
+        kind == Some(self.target.kind.as_str())
+            && name == Some(self.target.name.as_str())
+            && self.target.file.as_deref().is_none_or(|f| Some(f) == file)
+    }
+
+    fn operation(&self) -> AppResult<json_patch::PatchOperation> {
+        let mut op = serde_json::json!({ "op": match self.op {
+            PatchOp::Add => "add",
+            PatchOp::Replace => "replace",
+            PatchOp::Remove => "remove",
+        }, "path": self.path });
+        if self.op != PatchOp::Remove {
+            let value = self.value.clone().ok_or_else(|| {
+                AppError::InvalidInput(format!("patch {} needs a value", self.describe()))
+            })?;
+            op["value"] = value;
+        }
+        serde_json::from_value(op).map_err(|e| {
+            AppError::InvalidInput(format!("patch {} is malformed: {e}", self.describe()))
+        })
+    }
+}
+
+/// Apply every patch to the rendered manifests, in order. `rendered` is
+/// paired with the templates it came from so `file` can be matched.
+pub fn apply_patches(
+    templates: &[Template],
+    mut rendered: Vec<serde_json::Value>,
+    patches: &[ManifestPatch],
+) -> AppResult<Vec<serde_json::Value>> {
+    for patch in patches {
+        let matching: Vec<usize> = rendered
+            .iter()
+            .enumerate()
+            .filter(|(i, m)| patch.matches(templates.get(*i).and_then(|t| t.file.as_deref()), m))
+            .map(|(i, _)| i)
+            .collect();
+        let index = match matching.as_slice() {
+            [one] => *one,
+            [] => {
+                return Err(AppError::InvalidInput(format!(
+                    "patch {} matches no manifest",
+                    patch.describe()
+                )))
+            }
+            _ => {
+                return Err(AppError::InvalidInput(format!(
+                    "patch {} matches {} manifests; add a file to the target",
+                    patch.describe(),
+                    matching.len()
+                )))
+            }
+        };
+        let op = patch.operation()?;
+        json_patch::patch(&mut rendered[index], &[op]).map_err(|e| {
+            AppError::InvalidInput(format!("patch {} failed to apply: {e}", patch.describe()))
+        })?;
+    }
+    Ok(rendered)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn deployment(name: &str) -> serde_json::Value {
+        json!({"kind": "Deployment", "metadata": {"name": name},
+               "spec": {"replicas": 1, "template": {"spec": {"containers": [{"name": "app", "env": []}]}}}})
+    }
+
+    fn templates(files: &[(&str, serde_json::Value)]) -> Vec<Template> {
+        files
+            .iter()
+            .map(|(f, m)| Template {
+                file: Some((*f).to_string()),
+                manifest: m.clone(),
+            })
+            .collect()
+    }
+
+    fn patch(
+        kind: &str,
+        name: &str,
+        op: PatchOp,
+        path: &str,
+        value: Option<serde_json::Value>,
+    ) -> ManifestPatch {
+        ManifestPatch {
+            target: PatchTarget {
+                file: None,
+                kind: kind.into(),
+                name: name.into(),
+            },
+            op,
+            path: path.into(),
+            value,
+            durability: Durability::Temporary,
+            note: None,
+            by: None,
+            since: None,
+        }
+    }
+
+    #[test]
+    fn applies_add_replace_remove_to_the_matching_manifest() -> AppResult<()> {
+        let t = templates(&[
+            ("deployment.yaml", deployment("web")),
+            ("other.yaml", deployment("worker")),
+        ]);
+        let rendered = t.iter().map(|x| x.manifest.clone()).collect();
+        let patches = vec![
+            patch(
+                "Deployment",
+                "web",
+                PatchOp::Replace,
+                "/spec/replicas",
+                Some(json!(5)),
+            ),
+            patch(
+                "Deployment",
+                "web",
+                PatchOp::Add,
+                "/spec/template/spec/containers/0/env/-",
+                Some(json!({"name": "RUST_LOG", "value": "debug"})),
+            ),
+            patch(
+                "Deployment",
+                "worker",
+                PatchOp::Remove,
+                "/spec/replicas",
+                None,
+            ),
+        ];
+        let out = apply_patches(&t, rendered, &patches)?;
+        assert_eq!(out[0]["spec"]["replicas"], 5);
+        assert_eq!(
+            out[0]["spec"]["template"]["spec"]["containers"][0]["env"][0]["name"],
+            "RUST_LOG"
+        );
+        assert!(out[1]["spec"].get("replicas").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn failures_are_loud() {
+        let t = templates(&[("a.yaml", deployment("web")), ("b.yaml", deployment("web"))]);
+        let rendered: Vec<_> = t.iter().map(|x| x.manifest.clone()).collect();
+        // Ambiguous without a file.
+        let p = patch(
+            "Deployment",
+            "web",
+            PatchOp::Replace,
+            "/spec/replicas",
+            Some(json!(2)),
+        );
+        assert!(apply_patches(&t, rendered.clone(), std::slice::from_ref(&p)).is_err());
+        // Narrowed by file it works.
+        let mut narrowed = p.clone();
+        narrowed.target.file = Some("b.yaml".into());
+        let out = apply_patches(&t, rendered.clone(), &[narrowed]).unwrap_or_default();
+        assert_eq!(out[1]["spec"]["replicas"], 2);
+        assert_eq!(out[0]["spec"]["replicas"], 1);
+        // No such manifest.
+        let missing = patch(
+            "Deployment",
+            "nope",
+            PatchOp::Replace,
+            "/spec/replicas",
+            Some(json!(2)),
+        );
+        assert!(apply_patches(&t, rendered.clone(), &[missing]).is_err());
+        // Bad path.
+        let bad = patch(
+            "Deployment",
+            "web",
+            PatchOp::Replace,
+            "/spec/nothing/here",
+            Some(json!(2)),
+        );
+        let mut bad_narrowed = bad;
+        bad_narrowed.target.file = Some("a.yaml".into());
+        assert!(apply_patches(&t, rendered.clone(), &[bad_narrowed]).is_err());
+        // Add without a value.
+        let mut no_value = patch("Deployment", "web", PatchOp::Add, "/spec/x", None);
+        no_value.target.file = Some("a.yaml".into());
+        assert!(apply_patches(&t, rendered, &[no_value]).is_err());
+    }
+
+    #[test]
+    fn serde_shape() -> Result<(), serde_json::Error> {
+        let json = json!({"target": {"kind": "Deployment", "name": "web"}, "op": "replace", "path": "/spec/replicas", "value": 3, "durability": "temporary", "note": "load test"});
+        let p: ManifestPatch = serde_json::from_value(json.clone())?;
+        assert!(p.is_temporary());
+        assert_eq!(serde_json::to_value(&p)?, json);
+        Ok(())
+    }
+}
