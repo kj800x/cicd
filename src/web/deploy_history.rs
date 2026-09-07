@@ -155,7 +155,7 @@ fn render_revision_row(rev: &Revision, prev: Option<&Revision>, repos: &ConfigRe
                 a href=(format!("/deploy-history?name={}", rev.config_name)) { (rev.config_name) }
             }
             td class="initiator-cell" {
-                @if rev.action == "undeploy" { "undeploy" } @else { "deploy" }
+                (rev.action)
                 " · " (rev.actor)
                 @if let Some(reason) = &rev.reason { br; span { (reason) } }
             }
@@ -167,8 +167,10 @@ fn render_revision_row(rev: &Revision, prev: Option<&Revision>, repos: &ConfigRe
     }
 }
 
-/// Roll back to a deploy revision. Undeploy revisions offer nothing: going
-/// back to "nothing deployed" is the undeploy button on the deploy page.
+/// Roll back to a deploy revision. Undeploy revisions offer nothing (going
+/// back to "nothing deployed" is the undeploy button on the deploy page),
+/// and patch revisions record a patch-list change rather than a deploy, so
+/// the resolver refuses them; the button is not shown for either.
 fn render_row_actions(rev: &Revision) -> Markup {
     if rev.action != "deploy" {
         return html! {};
