@@ -11,6 +11,7 @@ mod index;
 mod resource_logs;
 mod resource_status;
 pub mod rollback;
+pub mod selections;
 mod settings;
 pub mod team_prefs;
 mod watchdog;

@@ -1700,3 +1700,41 @@ header {
   margin: 6px 0 0;
   padding-left: 18px;
 }
+
+/* Selections: temporary deployments and durability badges. */
+.temporary-strip {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  font-size: 13px;
+  border: 1px solid var(--warning-color, #b8741a);
+  border-radius: 6px;
+  color: var(--text-color);
+}
+.temporary-strip a {
+  font-weight: 600;
+}
+.durability {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .03em;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border-color);
+  vertical-align: middle;
+}
+.durability-temporary {
+  border-color: var(--warning-color, #b8741a);
+  color: var(--warning-color, #b8741a);
+}
+.durability-standing {
+  color: var(--secondary-text);
+}
+.action-input select {
+  width: 100%;
+  padding: 5px 8px;
+  font-size: 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background-color: white;
+}

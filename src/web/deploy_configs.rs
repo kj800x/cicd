@@ -528,6 +528,12 @@ async fn generate_status_header(
 
                 }
             }
+            @if config.artifact_repository().is_some() {
+                div class="status-item" {
+                    "Selection: "
+                    (crate::web::selections::render_selection_summary(config))
+                }
+            }
             div class="status-item" {
                 "Autodeploy: "
                 strong {
@@ -860,6 +866,11 @@ pub async fn render_preview_content(
         Ok(_) => {}
         Err(e) => log::warn!("Failed to load blockers for preview: {}", e),
     }
+    if selected_config.is_temporary_deployment() {
+        alerts.push(crate::web::selections::render_temporary_alert(
+            selected_config,
+        ));
+    }
 
     html! {
         @for alert in alerts {
@@ -1108,6 +1119,7 @@ pub async fn deploy_configs(
         vec![]
     };
 
+    let temporary_strip = crate::web::selections::render_temporary_strip(&deploy_configs);
     let held_strip = match Blocker::all_active(&conn) {
         Ok(blockers) => crate::web::blockers::render_held_strip(&blockers),
         Err(e) => {
@@ -1157,6 +1169,7 @@ pub async fn deploy_configs(
                 (header::render("deploy"))
                 div class="content" {
                 (held_strip)
+                (temporary_strip)
                 @if sorted_deploy_configs.is_empty() {
                     div style="text-align:center; margin-top:40px;" {
                         h2 { "No DeployConfigs Found" }
@@ -1217,6 +1230,12 @@ pub async fn deploy_configs(
                                                     "Execute job"
                                                 }
                                             }
+                                            @if selected_config.selection(SHA_PARAMETER).is_override() && !is_orphaned {
+                                                label class="action-radio" {
+                                                    input type="radio" name="action" value="clear-selection" checked[action.is_clear_selection()] onchange="this.form.submit()";
+                                                    "Back to default branch"
+                                                }
+                                            }
                                             label class="action-radio" {
                                                 input type="radio" name="action" value="undeploy" checked[action.is_undeploy()] onchange="this.form.submit()";
                                                 "Undeploy"
@@ -1232,6 +1251,25 @@ pub async fn deploy_configs(
                                                 label for="sha" { "SHA override" }
                                                 input id="sha" type="text" name="sha" placeholder="Enter commit SHA" pattern="[0-9a-fA-F]{5,40}" value=(query.get("sha").unwrap_or(&"".to_string())) onblur="this.form.submit()";
                                             }
+                                            @if !action.is_deploy() || matches!(action, Action::DeployBranch { .. } | Action::DeployCommit { .. }) {
+                                                @let default_durability = if matches!(action, Action::DeployCommit { .. }) { "standing" } else { "temporary" };
+                                                @let durability = query.get("durability").map(String::as_str).unwrap_or(default_durability);
+                                                div class="action-input" {
+                                                    label for="durability" { "How long" }
+                                                    select id="durability" name="durability" onchange="this.form.submit()" {
+                                                        option value="temporary" selected[durability == "temporary"] { "Temporary: I am babysitting this and will end it" }
+                                                        option value="standing" selected[durability == "standing"] { "Standing: ordinary operation, leave it" }
+                                                    }
+                                                }
+                                                div class="action-input" {
+                                                    label for="note" { "Why" }
+                                                    input id="note" type="text" name="note" placeholder="e.g. testing the resizer fix" value=(query.get("note").unwrap_or(&"".to_string())) onblur="this.form.submit()";
+                                                }
+                                                div class="action-input" {
+                                                    label for="by" { "Your name" }
+                                                    input id="by" type="text" name="by" placeholder="who is making this change" value=(query.get("by").unwrap_or(&"".to_string())) onblur="this.form.submit()";
+                                                }
+                                            }
                                         }
                                     }
                                     form action=(format!("/api/deploy/{}/{}",
@@ -1242,6 +1280,9 @@ pub async fn deploy_configs(
                                         input type="hidden" name="branch" value=(query.get("branch").unwrap_or(&"".to_string()));
                                         input type="hidden" name="sha" value=(query.get("sha").unwrap_or(&"".to_string()));
                                         input type="hidden" name="action" value=(query.get("action").unwrap_or(&"".to_string()));
+                                        input type="hidden" name="durability" value=(query.get("durability").unwrap_or(&"".to_string()));
+                                        input type="hidden" name="note" value=(query.get("note").unwrap_or(&"".to_string()));
+                                        input type="hidden" name="by" value=(query.get("by").unwrap_or(&"".to_string()));
                                         @let is_orphaned = selected_config.is_orphaned();
                                         button.primary-action-button.danger-button[action.is_undeploy()] type="submit" disabled[is_orphaned && !action.is_undeploy()] {
                                             @match action {

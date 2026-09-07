@@ -25,7 +25,6 @@ pub enum Durability {
 }
 
 impl Durability {
-    #[allow(dead_code)] // the deploy page renders this in the next PR
     pub fn as_str(self) -> &'static str {
         match self {
             Durability::Temporary => "temporary",
