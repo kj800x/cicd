@@ -344,6 +344,17 @@ html! {
 - On-disk `.deploy/<name>.yaml` files still use `artifactRepo`; `config_sync` maps it to `parameters.SHA`
 - Types live in `src/kubernetes/parameters.rs`; see `kubernetes/example-deployconfig.yaml`
 
+**Selections and durability:**
+- `spec.selections.<PARAM>` records what a parameter follows: `track: {branch}` (an override), `pin: {value}`, or absent (the default channel). Each override has `durability: temporary | standing`, plus optional `note`, `by`, `since`
+- Written by the deploy handler on branch and commit deploys; config sync never touches it. "Latest" resolves through the selection; "Back to default branch" clears it
+- A config with any temporary override is a *temporary deployment*: badge, strip at the top of `/deploy`, and `CICD_TEMPORARY_DEPLOY=true`
+
+**Environment variables injected into every container:**
+- `CICD_DEPLOY_CONFIG`, `CICD_TEAM`
+- `CICD_TEMPORARY_DEPLOY`: `true` while a temporary override is active. Apps refuse dangerous work (schema migrations) on it; a standing pin does not trip it
+- `CICD_PARAM_<NAME>`, `CICD_PARAM_<NAME>_MODE` (`track`, `override`, `pin`), `CICD_PARAM_<NAME>_CHANNEL` (absent when pinned)
+- `CICD_CONFIG_SHA`, `CICD_CONFIG_BRANCH`
+
 **Controller pattern:**
 ```rust
 async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<Context>) -> Result<Action> {

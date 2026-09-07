@@ -5,7 +5,7 @@ use crate::kubernetes::{
         ParameterSource, ParameterSources, ParameterValue, ParameterValues, SHA_PARAMETER,
     },
     repo::{DeploymentState, RepositoryBranch, ShaMaybeBranch},
-    selections::{Durability, Selection, Selections},
+    selections::{Durability, Mode, Selection, Selections},
     Repository,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
@@ -225,18 +225,6 @@ impl DeployConfig {
         }
     }
 
-    /// Whether the `SHA` parameter is overridden or pinned, whatever the
-    /// durability. Apps use this to fail closed on dangerous actions such
-    /// as schema migrations.
-    pub fn is_non_latest_deploy(&self) -> bool {
-        match self.deployment_state() {
-            DeploymentState::DeployedWithArtifact { .. } => {
-                self.selection(SHA_PARAMETER).is_override()
-            }
-            DeploymentState::DeployedOnlyConfig { .. } | DeploymentState::Undeployed => false,
-        }
-    }
-
     /// A temporary deployment has at least one temporary override active.
     /// It is what the badge, the homepage list and autodeploy's suspension
     /// key on. Standing overrides (a pinned dependency, a replica bump) are
@@ -261,42 +249,56 @@ impl DeployConfig {
 
     /// The `CICD_*` environment variables to inject into every container of the
     /// deployed workloads. Describes the deploy so apps can report their version
-    /// and make deploy-aware decisions (see [`Self::is_non_latest_deploy`]).
+    /// and make deploy-aware decisions.
+    ///
+    /// - `CICD_DEPLOY_CONFIG`, `CICD_TEAM`
+    /// - `CICD_TEMPORARY_DEPLOY`: `true` while any temporary override is
+    ///   active. The signal for refusing dangerous work such as schema
+    ///   migrations; a standing pin does not trip it.
+    /// - `CICD_PARAM_<NAME>`: each parameter's deployed value, plus
+    ///   `CICD_PARAM_<NAME>_MODE` (`track`, `override`, `pin`) and, unless
+    ///   pinned, `CICD_PARAM_<NAME>_CHANNEL` (the branch being followed).
+    /// - `CICD_CONFIG_SHA`, `CICD_CONFIG_BRANCH`
     pub fn deploy_env_vars(&self) -> Vec<(String, String)> {
         let mut vars: Vec<(String, String)> = vec![
             ("CICD_DEPLOY_CONFIG".to_string(), self.name_any()),
             ("CICD_TEAM".to_string(), self.team().to_string()),
             (
-                "CICD_NON_LATEST_DEPLOY".to_string(),
-                self.is_non_latest_deploy().to_string(),
+                "CICD_TEMPORARY_DEPLOY".to_string(),
+                self.is_temporary_deployment().to_string(),
             ),
         ];
 
-        if let Some(default_branch) = self.artifact_repository().map(|r| r.branch) {
-            vars.push(("CICD_DEFAULT_BRANCH".to_string(), default_branch));
+        let Some(status) = self.status.as_ref() else {
+            return vars;
+        };
+
+        for (name, value) in &status.parameters {
+            let Some(deployed) = value.as_sha_maybe_branch() else {
+                continue;
+            };
+            let key = name
+                .to_ascii_uppercase()
+                .replace(|c: char| !c.is_ascii_alphanumeric(), "_");
+            let selection = self.selection(name);
+            let (mode, channel) = match selection.mode() {
+                Mode::Pin(_) => ("pin", None),
+                Mode::Track(branch) => ("override", Some(branch.to_string())),
+                Mode::Default => ("track", deployed.branch.clone()),
+            };
+            vars.push((format!("CICD_PARAM_{key}"), deployed.sha));
+            vars.push((format!("CICD_PARAM_{key}_MODE"), mode.to_string()));
+            if let Some(channel) = channel {
+                vars.push((format!("CICD_PARAM_{key}_CHANNEL"), channel));
+            }
         }
 
-        match self.deployment_state() {
-            DeploymentState::DeployedWithArtifact { artifact, config } => {
-                vars.push(("CICD_ARTIFACT_SHA".to_string(), artifact.sha));
-                vars.push((
-                    "CICD_ARTIFACT_BRANCH".to_string(),
-                    artifact.branch.unwrap_or_default(),
-                ));
-                vars.push(("CICD_CONFIG_SHA".to_string(), config.sha));
-                vars.push((
-                    "CICD_CONFIG_BRANCH".to_string(),
-                    config.branch.unwrap_or_default(),
-                ));
-            }
-            DeploymentState::DeployedOnlyConfig { config } => {
-                vars.push(("CICD_CONFIG_SHA".to_string(), config.sha));
-                vars.push((
-                    "CICD_CONFIG_BRANCH".to_string(),
-                    config.branch.unwrap_or_default(),
-                ));
-            }
-            DeploymentState::Undeployed => {}
+        if let Some(config) = &status.config {
+            vars.push(("CICD_CONFIG_SHA".to_string(), config.sha.clone()));
+            vars.push((
+                "CICD_CONFIG_BRANCH".to_string(),
+                config.branch.clone().unwrap_or_default(),
+            ));
         }
 
         vars
@@ -549,7 +551,7 @@ mod tests {
             Some("master".into())
         );
         assert_eq!(deployed_sha(&dc), Some("new".into()));
-        assert!(!dc.is_non_latest_deploy());
+        assert!(!dc.is_temporary_deployment());
         Ok(())
     }
 
@@ -579,7 +581,6 @@ mod tests {
 
         let tracking = with_status(base.clone(), "abc", Some("master"));
         assert_eq!(tracking.selection(SHA_PARAMETER).mode(), Mode::Default);
-        assert!(!tracking.is_non_latest_deploy());
         assert!(!tracking.is_temporary_deployment());
 
         let branch = with_status(base.clone(), "abc", Some("feature"));
@@ -587,7 +588,6 @@ mod tests {
             branch.selection(SHA_PARAMETER).mode(),
             Mode::Track("feature")
         );
-        assert!(branch.is_non_latest_deploy());
         assert!(
             branch.is_temporary_deployment(),
             "derived branch overrides are temporary"
@@ -595,7 +595,6 @@ mod tests {
 
         let pinned = with_status(base.clone(), "abc", None);
         assert_eq!(pinned.selection(SHA_PARAMETER).mode(), Mode::Pin("abc"));
-        assert!(pinned.is_non_latest_deploy());
         assert!(
             !pinned.is_temporary_deployment(),
             "derived pins are standing"
@@ -605,6 +604,40 @@ mod tests {
             !base.is_temporary_deployment(),
             "undeployed is never temporary"
         );
+    }
+
+    #[test]
+    fn env_vars_describe_each_parameter_and_temporariness() {
+        let base = config(repo("kj800x", "app"), Some(repo("kj800x", "app")));
+        let env = |dc: &DeployConfig| -> std::collections::BTreeMap<String, String> {
+            dc.deploy_env_vars().into_iter().collect()
+        };
+
+        let tracking = env(&with_status(base.clone(), "abc", Some("master")));
+        assert_eq!(tracking["CICD_PARAM_SHA"], "abc");
+        assert_eq!(tracking["CICD_PARAM_SHA_MODE"], "track");
+        assert_eq!(tracking["CICD_PARAM_SHA_CHANNEL"], "master");
+        assert_eq!(tracking["CICD_TEMPORARY_DEPLOY"], "false");
+        assert_eq!(tracking["CICD_CONFIG_SHA"], "cfg");
+        assert!(
+            !tracking.contains_key("CICD_ARTIFACT_SHA"),
+            "old names are gone"
+        );
+        assert!(!tracking.contains_key("CICD_NON_LATEST_DEPLOY"));
+
+        let branch = env(&with_status(base.clone(), "abc", Some("feature")));
+        assert_eq!(branch["CICD_PARAM_SHA_MODE"], "override");
+        assert_eq!(branch["CICD_PARAM_SHA_CHANNEL"], "feature");
+        assert_eq!(branch["CICD_TEMPORARY_DEPLOY"], "true");
+
+        let pinned = env(&with_status(base.clone(), "abc", None));
+        assert_eq!(pinned["CICD_PARAM_SHA_MODE"], "pin");
+        assert!(!pinned.contains_key("CICD_PARAM_SHA_CHANNEL"));
+        assert_eq!(pinned["CICD_TEMPORARY_DEPLOY"], "false");
+
+        let undeployed = env(&base);
+        assert_eq!(undeployed["CICD_TEMPORARY_DEPLOY"], "false");
+        assert!(!undeployed.contains_key("CICD_PARAM_SHA"));
     }
 
     #[test]
