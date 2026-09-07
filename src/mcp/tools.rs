@@ -892,10 +892,23 @@ fn handle_list_revisions(arguments: Value, pool: &Pool<SqliteConnectionManager>)
         Err(e) => return ToolCallResult::error(format!("Database error: {}", e)),
     };
     match Revision::list_for(&conn, name, limit) {
-        Ok(revs) => ToolCallResult::text(
-            serde_json::to_string_pretty(&revs.iter().map(revision_json).collect::<Vec<_>>())
-                .unwrap_or_default(),
-        ),
+        Ok(revs) => {
+            // Each revision carries what it changed relative to the one
+            // before it; the oldest in the list compares against nothing.
+            let listed: Vec<Value> = Revision::with_previous(revs)
+                .iter()
+                .map(|(rev, prev)| {
+                    let mut json = revision_json(rev);
+                    let changes: Vec<String> = crate::db::revision_diff::diff(rev, prev.as_ref())
+                        .iter()
+                        .map(|c| c.describe())
+                        .collect();
+                    json["changes"] = json!(changes);
+                    json
+                })
+                .collect();
+            ToolCallResult::text(serde_json::to_string_pretty(&listed).unwrap_or_default())
+        }
         Err(e) => ToolCallResult::error(format!("Failed to list revisions: {}", e)),
     }
 }

@@ -12,6 +12,7 @@ pub mod git_commit_parent;
 pub mod git_repo;
 pub mod migrations;
 pub mod revision;
+pub mod revision_diff;
 #[cfg(test)]
 pub mod test_support;
 

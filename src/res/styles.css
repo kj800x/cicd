@@ -84,6 +84,24 @@
     white-space: nowrap;
   }
 
+  .history-table .changes-cell {
+    font-size: 12px;
+    max-width: 320px;
+  }
+
+  .history-table .changes {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  .history-table .changes li {
+    font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
   .history-table .actions-cell {
     text-align: right;
     width: 1%;
