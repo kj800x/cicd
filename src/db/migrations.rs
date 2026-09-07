@@ -108,6 +108,23 @@ pub fn migrate(mut conn: PooledConnection<SqliteConnectionManager>) -> AppResult
         M::up(indoc! { r#"
           ALTER TABLE git_commit_build ADD COLUMN app_id INTEGER;
         "#}),
+        // Blockers: a per-config hold with a reason. While a config has an
+        // active blocker (cleared_at IS NULL), manual deploys are refused and
+        // autodeploy, once it exists, is suspended. Rows are never deleted;
+        // clearing records who and when, so the history stays readable.
+        // Rollback and deploy freezes both create blockers.
+        M::up(indoc! { r#"
+          CREATE TABLE blocker (
+              id INTEGER PRIMARY KEY NOT NULL,
+              config_name TEXT NOT NULL,
+              reason TEXT NOT NULL,
+              created_by TEXT NOT NULL,
+              created_at INTEGER NOT NULL,
+              cleared_by TEXT,
+              cleared_at INTEGER
+          );
+          CREATE INDEX IF NOT EXISTS idx_blocker_config_active ON blocker(config_name, cleared_at);
+        "#}),
     ]);
 
     conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))?;
