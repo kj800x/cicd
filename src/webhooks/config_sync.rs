@@ -520,6 +520,9 @@ pub async fn fetch_deploy_configs_by_sha(
                 spec: DeployConfigSpecFields {
                     // The on-disk `artifactRepo` becomes the `SHA` parameter.
                     parameters: ParameterSource::sha_map(artifact),
+                    // Selections are user intent, owned by the deploy handler;
+                    // empty here means "leave whatever is on the object".
+                    selections: Default::default(),
                     config: Repository {
                         owner: owner.clone(),
                         repo: repo.clone(),

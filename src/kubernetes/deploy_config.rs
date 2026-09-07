@@ -5,6 +5,7 @@ use crate::kubernetes::{
         ParameterSource, ParameterSources, ParameterValue, ParameterValues, SHA_PARAMETER,
     },
     repo::{DeploymentState, RepositoryBranch, ShaMaybeBranch},
+    selections::{Durability, Selection, Selections},
     Repository,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
@@ -54,6 +55,12 @@ pub struct DeployConfigSpecFields {
     /// [`SHA_PARAMETER`], whose value is substituted for `$SHA` in specs.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub parameters: ParameterSources,
+
+    /// What each parameter is following: an override channel, a pin, or
+    /// (absent) the source's default channel. Written by the deploy handler
+    /// only; config sync never touches it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub selections: Selections,
 
     /// Repository information
     pub config: Repository,
@@ -188,25 +195,68 @@ impl DeployConfig {
         }
     }
 
-    /// Whether this deploy is "non-latest": a branch other than the artifact's
-    /// tracking (default) branch, or a pinned SHA override (no branch).
+    /// The effective selection for a parameter: the explicit one under
+    /// `spec.selections`, or one derived from what is deployed.
     ///
-    /// Consumers use this to fail closed on dangerous actions (e.g. refusing DB
-    /// schema migrations on a branch/pinned deploy).
+    /// The derivation is the rule the code always used implicitly: a
+    /// deployed value with no branch is a pin, a branch other than the
+    /// source's default is an override, the default branch is the default.
+    /// Derived overrides default to temporary for branches and standing for
+    /// pins, matching what the UI proposes when making them explicit.
+    pub fn selection(&self, parameter: &str) -> Selection {
+        if let Some(explicit) = self.spec.spec.selections.get(parameter) {
+            return explicit.clone();
+        }
+        if parameter != SHA_PARAMETER {
+            return Selection::default();
+        }
+        let default_branch = self.artifact_repository().map(|r| r.branch);
+        match self.sha_value() {
+            Some(ShaMaybeBranch { sha, branch: None }) => {
+                Selection::pin(&sha, Durability::Standing)
+            }
+            Some(ShaMaybeBranch {
+                branch: Some(branch),
+                ..
+            }) if Some(branch.as_str()) != default_branch.as_deref() => {
+                Selection::track(&branch, Durability::Temporary)
+            }
+            _ => Selection::default(),
+        }
+    }
+
+    /// Whether the `SHA` parameter is overridden or pinned, whatever the
+    /// durability. Apps use this to fail closed on dangerous actions such
+    /// as schema migrations.
     pub fn is_non_latest_deploy(&self) -> bool {
         match self.deployment_state() {
-            DeploymentState::DeployedWithArtifact { artifact, .. } => {
-                // None (pinned SHA) never equals Some(default), so a pinned
-                // deploy is always non-latest, as is any non-default branch.
-                let default_branch = self.artifact_repository().map(|r| r.branch);
-                artifact.branch.as_deref() != default_branch.as_deref()
+            DeploymentState::DeployedWithArtifact { .. } => {
+                self.selection(SHA_PARAMETER).is_override()
             }
-            // Config-only deploys don't track a config default branch yet, so
-            // they can't be classified as non-latest. Wire this up when config
-            // branch/SHA control lands.
-            DeploymentState::DeployedOnlyConfig { .. } => false,
-            DeploymentState::Undeployed => false,
+            DeploymentState::DeployedOnlyConfig { .. } | DeploymentState::Undeployed => false,
         }
+    }
+
+    /// A temporary deployment has at least one temporary override active.
+    /// It is what the badge, the homepage list and autodeploy's suspension
+    /// key on. Standing overrides (a pinned dependency, a replica bump) are
+    /// ordinary operation and do not count.
+    #[allow(dead_code)] // the deploy page and env vars use this in the next PRs
+    pub fn is_temporary_deployment(&self) -> bool {
+        if matches!(self.deployment_state(), DeploymentState::Undeployed) {
+            return false;
+        }
+        let mut names: Vec<&str> = self
+            .spec
+            .spec
+            .selections
+            .keys()
+            .map(String::as_str)
+            .collect();
+        if !names.contains(&SHA_PARAMETER) {
+            names.push(SHA_PARAMETER);
+        }
+        names.into_iter().any(|n| self.selection(n).is_temporary())
     }
 
     /// The `CICD_*` environment variables to inject into every container of the
@@ -402,6 +452,7 @@ mod tests {
                     parameters: ParameterSource::sha_map(
                         artifact_repo.map(|r| r.with_branch("master")),
                     ),
+                    selections: Selections::default(),
                     config: config_repo,
                     specs: vec![],
                 },
@@ -500,6 +551,82 @@ mod tests {
         assert_eq!(deployed_sha(&dc), Some("new".into()));
         assert!(!dc.is_non_latest_deploy());
         Ok(())
+    }
+
+    fn with_status(mut dc: DeployConfig, sha: &str, branch: Option<&str>) -> DeployConfig {
+        let mut status = DeployConfigStatus {
+            config: Some(ShaMaybeBranch {
+                sha: "cfg".into(),
+                branch: Some("master".into()),
+            }),
+            ..Default::default()
+        };
+        status.parameters.insert(
+            SHA_PARAMETER.into(),
+            ParameterValue::from(ShaMaybeBranch {
+                sha: sha.into(),
+                branch: branch.map(String::from),
+            }),
+        );
+        dc.status = Some(status);
+        dc
+    }
+
+    #[test]
+    fn selection_is_derived_from_the_deployed_branch() {
+        use crate::kubernetes::selections::Mode;
+        let base = config(repo("kj800x", "app"), Some(repo("kj800x", "app")));
+
+        let tracking = with_status(base.clone(), "abc", Some("master"));
+        assert_eq!(tracking.selection(SHA_PARAMETER).mode(), Mode::Default);
+        assert!(!tracking.is_non_latest_deploy());
+        assert!(!tracking.is_temporary_deployment());
+
+        let branch = with_status(base.clone(), "abc", Some("feature"));
+        assert_eq!(
+            branch.selection(SHA_PARAMETER).mode(),
+            Mode::Track("feature")
+        );
+        assert!(branch.is_non_latest_deploy());
+        assert!(
+            branch.is_temporary_deployment(),
+            "derived branch overrides are temporary"
+        );
+
+        let pinned = with_status(base.clone(), "abc", None);
+        assert_eq!(pinned.selection(SHA_PARAMETER).mode(), Mode::Pin("abc"));
+        assert!(pinned.is_non_latest_deploy());
+        assert!(
+            !pinned.is_temporary_deployment(),
+            "derived pins are standing"
+        );
+
+        assert!(
+            !base.is_temporary_deployment(),
+            "undeployed is never temporary"
+        );
+    }
+
+    #[test]
+    fn explicit_selection_wins_over_derivation() {
+        use crate::kubernetes::selections::Mode;
+        let mut dc = with_status(
+            config(repo("kj800x", "app"), Some(repo("kj800x", "app"))),
+            "abc",
+            None,
+        );
+        dc.spec.spec.selections.insert(
+            SHA_PARAMETER.into(),
+            Selection::pin("abc", Durability::Temporary),
+        );
+        assert_eq!(dc.selection(SHA_PARAMETER).mode(), Mode::Pin("abc"));
+        assert!(
+            dc.is_temporary_deployment(),
+            "explicit durability is respected"
+        );
+        let out = serde_json::to_value(&dc).unwrap_or_default();
+        assert_eq!(out["spec"]["selections"]["SHA"]["pin"]["value"], "abc");
+        assert_eq!(out["spec"]["selections"]["SHA"]["durability"], "temporary");
     }
 
     #[test]

@@ -46,6 +46,40 @@ spec:
                     x-kubernetes-validations:
                       - rule: "self.type != 'commit' || (has(self.owner) && has(self.repo) && has(self.branch))"
                         message: "commit sources require owner, repo and branch"
+                selections:
+                  type: object
+                  description: "Per-parameter intent: track an override branch or pin a value, with a durability. Absent means track the default channel. Written by the deploy handler."
+                  additionalProperties:
+                    type: object
+                    properties:
+                      track:
+                        type: object
+                        required:
+                          - branch
+                        properties:
+                          branch:
+                            type: string
+                      pin:
+                        type: object
+                        required:
+                          - value
+                        properties:
+                          value:
+                            type: string
+                      durability:
+                        type: string
+                        enum:
+                          - temporary
+                          - standing
+                      note:
+                        type: string
+                      by:
+                        type: string
+                      since:
+                        type: string
+                    x-kubernetes-validations:
+                      - rule: "!(has(self.track) && has(self.pin))"
+                        message: "a selection is either track or pin, not both"
                 team:
                   type: string
                 kind:
