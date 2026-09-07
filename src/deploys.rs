@@ -21,7 +21,7 @@ use crate::{
     },
     error::{AppError, AppResult},
     kubernetes::{
-        api::patch_deploy_config_selection,
+        cr_writers,
         deploy_handlers::DeployAction,
         parameters::{ParameterValue, ParameterValues, SHA_PARAMETER},
         patches::ManifestPatch,
@@ -249,7 +249,7 @@ pub async fn change_patches(
         }
     }
 
-    crate::kubernetes::api::set_deploy_config_patches(client, &ns, &name, &patches).await?;
+    cr_writers::set_patches(client, &ns, &name, &patches).await?;
 
     let conn = pool.get()?;
     match Revision::record(&conn, NewRevision::patch_change(&effective, actor, &reason)) {
@@ -451,18 +451,18 @@ pub async fn run_action(
     // Record the intent behind the deploy. Bookkeeping like the rest: the
     // deploy has happened, and a missing selection only means the next
     // "latest" derives it from what is deployed.
+    // The selections manager owns the whole map, so the effective map is
+    // written in one apply rather than one key at a time.
     let ns = kube::ResourceExt::namespace(config).unwrap_or_else(|| "default".to_string());
-    for (parameter, selection) in &changes {
+    if !changes.is_empty() {
         if let Err(e) =
-            patch_deploy_config_selection(client, &ns, &name, parameter, selection.as_ref()).await
+            cr_writers::set_selections(client, &ns, &name, &effective.spec.spec.selections).await
         {
-            log::error!("Failed to record selection for {}: {}", name, e);
+            log::error!("Failed to record selections for {}: {}", name, e);
         }
     }
     if let Some(patches) = &new_patches {
-        if let Err(e) =
-            crate::kubernetes::api::set_deploy_config_patches(client, &ns, &name, patches).await
-        {
+        if let Err(e) = cr_writers::set_patches(client, &ns, &name, patches).await {
             log::error!("Failed to record patch list for {}: {}", name, e);
         }
     }

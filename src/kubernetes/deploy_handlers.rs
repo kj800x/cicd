@@ -7,10 +7,9 @@ use kube::{Api, Client, ResourceExt};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::crab_ext::Octocrabs;
-use crate::kubernetes::api::{
-    delete_deploy_config, get_deploy_config, set_deploy_config_specs, update_deploy_config_status,
-};
-use crate::kubernetes::DeployConfigStatusBuilder;
+use crate::kubernetes::api::{delete_deploy_config, get_deploy_config};
+use crate::kubernetes::cr_writers::{self, DeployedStatus};
+use crate::kubernetes::parameters::{ParameterValue, SHA_PARAMETER};
 use crate::webhooks::config_sync::fetch_deploy_config_by_sha;
 use crate::{
     crab_ext::IRepo,
@@ -105,22 +104,25 @@ impl DeployAction {
                     log::debug!("  spec[{}]: {}", idx, spec);
                 }
 
-                set_deploy_config_specs(
-                    client,
-                    &desired_config.namespace().unwrap_or_default(),
-                    name,
-                    desired_config.spec.spec.specs.clone(),
-                )
-                .await?;
+                let namespace = desired_config.namespace().unwrap_or_default();
+                cr_writers::set_specs(client, &namespace, name, &desired_config.spec.spec.specs)
+                    .await?;
 
-                update_deploy_config_status(
+                let mut parameters = values.clone();
+                if let Some(artifact) = artifact {
+                    parameters.insert(
+                        SHA_PARAMETER.to_string(),
+                        ParameterValue::from(artifact.clone()),
+                    );
+                }
+                cr_writers::set_deployed_status(
                     client,
-                    &desired_config.namespace().unwrap_or_default(),
+                    &namespace,
                     name,
-                    DeployConfigStatusBuilder::default()
-                        .with_artifact(artifact.clone())
-                        .with_parameters(values.clone())
-                        .with_config(Some(config.clone())),
+                    &DeployedStatus {
+                        parameters,
+                        config: Some(config.clone()),
+                    },
                 )
                 .await?;
 
@@ -133,15 +135,12 @@ impl DeployAction {
                     .ok_or(AppError::NotFound("Current config not found".to_owned()))?;
 
                 let namespace = current_config.namespace().unwrap_or_default();
-                set_deploy_config_specs(client, &namespace, name, vec![]).await?;
-
-                update_deploy_config_status(
+                cr_writers::set_specs(client, &namespace, name, &[]).await?;
+                cr_writers::set_deployed_status(
                     client,
                     &namespace,
                     name,
-                    DeployConfigStatusBuilder::default()
-                        .clear_parameters()
-                        .with_config(None),
+                    &DeployedStatus::undeployed(),
                 )
                 .await?;
 
@@ -168,13 +167,7 @@ impl DeployAction {
                     .and_then(|s| s.autodeploy)
                     .unwrap_or(false);
 
-                update_deploy_config_status(
-                    client,
-                    &namespace,
-                    name,
-                    DeployConfigStatusBuilder::default().with_autodeploy(Some(!current_autodeploy)),
-                )
-                .await?;
+                cr_writers::set_autodeploy(client, &namespace, name, !current_autodeploy).await?;
 
                 Ok(())
             }

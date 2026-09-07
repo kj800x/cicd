@@ -1,4 +1,4 @@
-use crate::kubernetes::{DeployConfig, DeployConfigStatusBuilder};
+use crate::kubernetes::DeployConfig;
 use crate::prelude::*;
 use k8s_openapi::api::core::v1::Namespace;
 use kube::api::{DeleteParams, GroupVersionKind, PostParams, TypeMeta};
@@ -187,76 +187,6 @@ pub async fn list_namespace_objects(
     }
 
     Ok(out)
-}
-
-pub async fn set_deploy_config_specs(
-    client: &Client,
-    namespace: &str,
-    name: &str,
-    specs: Vec<serde_json::Value>,
-) -> AppResult<()> {
-    let api: Api<DeployConfig> = Api::namespaced(client.clone(), namespace);
-    let patch = Patch::Merge(serde_json::json!({ "spec": { "specs": specs } }));
-    let params = PatchParams::default();
-    api.patch(name, &params, &patch)
-        .await
-        .map_err(AppError::Kubernetes)?;
-
-    Ok(())
-}
-
-/// Set or remove one parameter's selection under `spec.selections`.
-/// `None` sends a JSON null, which a merge patch treats as delete.
-pub async fn patch_deploy_config_selection(
-    client: &Client,
-    namespace: &str,
-    name: &str,
-    parameter: &str,
-    selection: Option<&crate::kubernetes::selections::Selection>,
-) -> AppResult<()> {
-    let api: Api<DeployConfig> = Api::namespaced(client.clone(), namespace);
-    let value = match selection {
-        Some(s) => serde_json::to_value(s)?,
-        None => serde_json::Value::Null,
-    };
-    let patch = Patch::Merge(serde_json::json!({ "spec": { "selections": { parameter: value } } }));
-    api.patch(name, &PatchParams::default(), &patch)
-        .await
-        .map_err(AppError::Kubernetes)?;
-    Ok(())
-}
-
-/// Replace the whole patch list under `spec.patches`. A merge patch replaces
-/// arrays wholesale, which is what we want.
-pub async fn set_deploy_config_patches(
-    client: &Client,
-    namespace: &str,
-    name: &str,
-    patches: &[crate::kubernetes::patches::ManifestPatch],
-) -> AppResult<()> {
-    let api: Api<DeployConfig> = Api::namespaced(client.clone(), namespace);
-    let patch = Patch::Merge(serde_json::json!({ "spec": { "patches": patches } }));
-    api.patch(name, &PatchParams::default(), &patch)
-        .await
-        .map_err(AppError::Kubernetes)?;
-    Ok(())
-}
-
-/// Update the DeployConfig status according to the given status builder
-pub async fn update_deploy_config_status(
-    client: &Client,
-    namespace: &str,
-    name: &str,
-    update: DeployConfigStatusBuilder,
-) -> AppResult<()> {
-    let api: Api<DeployConfig> = Api::namespaced(client.clone(), namespace);
-
-    let status: serde_json::Value = update.into();
-    let patch = Patch::Merge(&status);
-    let params = PatchParams::default();
-    api.patch_status(name, &params, &patch).await?;
-
-    Ok(())
 }
 
 pub async fn delete_deploy_config(client: &Client, namespace: &str, name: &str) -> AppResult<()> {

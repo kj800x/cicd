@@ -100,6 +100,9 @@ impl Render for AutodeployStatus {
 #[derive(Debug, Clone, PartialEq)]
 pub enum BuildFilter {
     Any,
+    /// Not requested by any current caller; kept so the resolver reads as
+    /// the full set of choices.
+    #[allow(dead_code)]
     Completed,
     Successful,
 }
