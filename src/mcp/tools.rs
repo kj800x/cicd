@@ -12,7 +12,10 @@ use crate::db::revision::Revision;
 use crate::kubernetes::api::{
     get_all_deploy_configs, get_deploy_config, list_namespace_objects, ListMode,
 };
+use crate::kubernetes::parameters::SHA_PARAMETER;
 use crate::kubernetes::repo::DeploymentState;
+use crate::kubernetes::selections::{Durability, Mode};
+use crate::kubernetes::DeployConfig;
 use crate::web::Action;
 use crate::web::ResourceStatuses;
 
@@ -60,14 +63,28 @@ pub fn tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "deploy".to_string(),
-            description: "Deploy a config, optionally targeting a specific branch or SHA"
+            description: "Deploy a config. With no branch or sha, deploys the latest according to the config's selection (the default branch, an override branch, or a pin). A branch records a track override; a sha records a pin. Both are sticky until cleared with clear_selection."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "name": { "type": "string", "description": "Name of the deploy config" },
-                    "branch": { "type": "string", "description": "Branch to deploy from" },
-                    "sha": { "type": "string", "description": "Specific commit SHA to deploy" }
+                    "branch": { "type": "string", "description": "Branch to deploy from (records a track override)" },
+                    "sha": { "type": "string", "description": "Specific commit SHA to deploy (records a pin)" },
+                    "durability": { "type": "string", "enum": ["temporary", "standing"], "description": "How long the override is meant to last. Temporary marks the config as a temporary deployment. Defaults: temporary for a branch, standing for a sha." },
+                    "note": { "type": "string", "description": "Why this override exists" },
+                    "by": { "type": "string", "description": "Who is making it" }
+                },
+                "required": ["name"]
+            }),
+        },
+        Tool {
+            name: "clear_selection".to_string(),
+            description: "Drop a config's branch override or pin and deploy the latest of its default branch. Ends a temporary deployment.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of the deploy config" }
                 },
                 "required": ["name"]
             }),
@@ -170,6 +187,33 @@ pub fn tool_definitions() -> Vec<Tool> {
     ]
 }
 
+/// The `SHA` parameter's selection as agents should see it.
+fn selection_json(config: &DeployConfig) -> Value {
+    if config.artifact_repository().is_none() {
+        return Value::Null;
+    }
+    let s = config.selection(SHA_PARAMETER);
+    let (mode, channel, value) = match s.mode() {
+        Mode::Default => (
+            "track",
+            config.artifact_repository().map(|r| r.branch),
+            None,
+        ),
+        Mode::Track(branch) => ("override", Some(branch.to_string()), None),
+        Mode::Pin(v) => ("pin", None, Some(v.to_string())),
+    };
+    json!({
+        "mode": mode,
+        "channel": channel,
+        "value": value,
+        "durability": if s.is_override() { Some(s.durability.as_str()) } else { None },
+        "note": s.note,
+        "by": s.by,
+        "since": s.since,
+        "explicit": config.spec.spec.selections.contains_key(SHA_PARAMETER),
+    })
+}
+
 fn revision_json(r: &Revision) -> Value {
     json!({
         "id": r.id,
@@ -214,6 +258,9 @@ pub async fn dispatch(
         "get_deploy_config" => handle_get_deploy_config(arguments, client, pool).await,
         "get_build_status" => handle_get_build_status(arguments, pool).await,
         "deploy" => handle_deploy(arguments, client, pool, octocrabs).await,
+        "clear_selection" => {
+            handle_action("clear_selection", arguments, client, pool, octocrabs).await
+        }
         "undeploy" => handle_action("undeploy", arguments, client, pool, octocrabs).await,
         "bounce" => handle_action("bounce", arguments, client, pool, octocrabs).await,
         "execute_job" => handle_action("execute_job", arguments, client, pool, octocrabs).await,
@@ -279,6 +326,8 @@ async fn handle_list_deploy_configs(
                 "orphaned": config.is_orphaned(),
                 "blocked": !blockers.is_empty(),
                 "blockers": blockers.iter().map(blocker_json).collect::<Vec<_>>(),
+                "temporary": config.is_temporary_deployment(),
+                "selection": selection_json(config),
                 "artifact_repo": artifact_repo_name,
                 "config_repo": config_repo_name,
                 "artifact_sha": artifact_sha,
@@ -362,6 +411,8 @@ async fn handle_get_deploy_config(
         "orphaned": config.is_orphaned(),
         "blocked": !blockers.is_empty(),
         "blockers": blockers.iter().map(blocker_json).collect::<Vec<_>>(),
+        "temporary": config.is_temporary_deployment(),
+        "selection": selection_json(&config),
         "latest_revision": latest_revision.as_ref().map(revision_json),
         "supports_bounce": config.supports_bounce(),
         "supports_execute_job": config.supports_execute_job(),
@@ -495,7 +546,22 @@ async fn handle_deploy(
         Action::DeployLatest
     };
 
-    execute_deploy_action(&action, name, &config, client, pool, octocrabs).await
+    let intent = crate::deploys::SelectionIntent {
+        durability: match arguments.get("durability").and_then(|v| v.as_str()) {
+            Some("temporary") => Some(Durability::Temporary),
+            Some("standing") => Some(Durability::Standing),
+            _ => None,
+        },
+        note: arguments
+            .get("note")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        by: arguments
+            .get("by")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+    };
+    execute_deploy_action_with(&action, name, &config, client, pool, octocrabs, &intent).await
 }
 
 async fn handle_action(
@@ -518,6 +584,14 @@ async fn handle_action(
 
     let action = match action_type {
         "undeploy" => Action::Undeploy,
+        "clear_selection" => {
+            if config.is_orphaned() {
+                return ToolCallResult::error(
+                    "Cannot deploy an orphaned config. Only undeploy is allowed.".to_string(),
+                );
+            }
+            Action::ClearSelection
+        }
         "bounce" => {
             if config.is_orphaned() {
                 return ToolCallResult::error("Cannot bounce an orphaned config.".to_string());
@@ -683,13 +757,25 @@ async fn execute_deploy_action(
     pool: &Pool<SqliteConnectionManager>,
     octocrabs: &Octocrabs,
 ) -> ToolCallResult {
+    let intent = crate::deploys::SelectionIntent::default();
+    execute_deploy_action_with(action, name, config, client, pool, octocrabs, &intent).await
+}
+
+async fn execute_deploy_action_with(
+    action: &Action,
+    name: &str,
+    config: &crate::kubernetes::DeployConfig,
+    client: &Client,
+    pool: &Pool<SqliteConnectionManager>,
+    octocrabs: &Octocrabs,
+    intent: &crate::deploys::SelectionIntent,
+) -> ToolCallResult {
     let conn = match pool.get() {
         Ok(c) => c,
         Err(e) => return ToolCallResult::error(format!("Database error: {}", e)),
     };
 
-    let intent = crate::deploys::SelectionIntent::default();
-    match crate::deploys::run_action(action, config, client, octocrabs, &conn, "mcp", &intent).await
+    match crate::deploys::run_action(action, config, client, octocrabs, &conn, "mcp", intent).await
     {
         Ok(_) => {}
         Err(crate::error::AppError::Blocked(message)) => {
