@@ -13,11 +13,43 @@ use r2d2_sqlite::SqliteConnectionManager;
 
 use crate::{
     crab_ext::Octocrabs,
-    db::deploy_event::DeployEvent,
-    error::AppResult,
+    db::{blocker::Blocker, deploy_event::DeployEvent},
+    error::{AppError, AppResult},
     kubernetes::{deploy_handlers::DeployAction, repo::DeploymentState, DeployConfig},
     web::Action,
 };
+
+/// Refuse a deploy while the config has an active blocker.
+///
+/// Only deploys are gated. Undeploy stays available as the emergency exit,
+/// and bounce or job execution do not change what is deployed. Every active
+/// blocker's reason is included, so the person sees what they would have to
+/// clear.
+pub fn check_blockers(
+    conn: &PooledConnection<SqliteConnectionManager>,
+    action: &Action,
+    config_name: &str,
+) -> AppResult<()> {
+    if !action.is_deploy() {
+        return Ok(());
+    }
+    let active = Blocker::active_for(conn, config_name)?;
+    if active.is_empty() {
+        return Ok(());
+    }
+    let reasons: Vec<String> = active
+        .iter()
+        .map(|b| format!("{} (by {})", b.reason, b.created_by))
+        .collect();
+    Err(AppError::Blocked(format!(
+        "{} is held by {} blocker{}: {}. Clear {} before deploying.",
+        config_name,
+        active.len(),
+        if active.len() == 1 { "" } else { "s" },
+        reasons.join("; "),
+        if active.len() == 1 { "it" } else { "them" },
+    )))
+}
 
 /// Turn a requested [`Action`] plus the state it resolves to into the
 /// concrete [`DeployAction`] to execute.
@@ -67,6 +99,7 @@ pub async fn run_action(
     conn: &PooledConnection<SqliteConnectionManager>,
 ) -> AppResult<DeployAction> {
     let name = kube::ResourceExt::name_any(config);
+    check_blockers(conn, action, &name)?;
     let state = DeploymentState::from_action(action, config, conn)?;
     let deploy_action = to_deploy_action(action, &name, state);
 
@@ -93,7 +126,37 @@ pub async fn run_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::test_support::migrated_memory_pool;
     use crate::kubernetes::repo::ShaMaybeBranch;
+
+    #[test]
+    fn blockers_refuse_deploys_only() -> AppResult<()> {
+        let pool = migrated_memory_pool();
+        let conn = pool.get()?;
+        assert!(check_blockers(&conn, &Action::DeployLatest, "site").is_ok());
+
+        let b = Blocker::create(&conn, "site", "incident 42", "kevin")?;
+        match check_blockers(&conn, &Action::DeployLatest, "site") {
+            Err(AppError::Blocked(message)) => assert!(message.contains("incident 42")),
+            other => panic!("expected Blocked, got {other:?}"),
+        }
+        assert!(
+            check_blockers(&conn, &Action::DeployBranch { branch: "b".into() }, "site").is_err()
+        );
+        assert!(check_blockers(&conn, &Action::DeployCommit { sha: "s".into() }, "site").is_err());
+
+        // Not gated: the emergency exit and the non-version actions.
+        assert!(check_blockers(&conn, &Action::Undeploy, "site").is_ok());
+        assert!(check_blockers(&conn, &Action::Bounce, "site").is_ok());
+        assert!(check_blockers(&conn, &Action::ExecuteJob, "site").is_ok());
+        assert!(check_blockers(&conn, &Action::ToggleAutodeploy, "site").is_ok());
+        // Other configs are unaffected.
+        assert!(check_blockers(&conn, &Action::DeployLatest, "other").is_ok());
+
+        Blocker::clear(&conn, b.id, "kevin")?;
+        assert!(check_blockers(&conn, &Action::DeployLatest, "site").is_ok());
+        Ok(())
+    }
 
     fn sha(s: &str) -> ShaMaybeBranch {
         ShaMaybeBranch {

@@ -432,8 +432,15 @@ async fn execute_deploy_action(
         Err(e) => return ToolCallResult::error(format!("Database error: {}", e)),
     };
 
-    if let Err(e) = crate::deploys::run_action(action, config, client, octocrabs, &conn).await {
-        return ToolCallResult::error(format!("Failed to execute action: {}", e));
+    match crate::deploys::run_action(action, config, client, octocrabs, &conn).await {
+        Ok(_) => {}
+        Err(crate::error::AppError::Blocked(message)) => {
+            return ToolCallResult::error(format!(
+                "Deploy refused: {} Use list_blockers to see them.",
+                message
+            ));
+        }
+        Err(e) => return ToolCallResult::error(format!("Failed to execute action: {}", e)),
     }
 
     let action_desc = match action {

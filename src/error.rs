@@ -128,6 +128,10 @@ pub enum AppError {
     /// Invalid input errors
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+
+    /// The action is refused because a blocker is active on the config.
+    #[error("Blocked: {0}")]
+    Blocked(String),
 }
 
 /// Convenience type alias for Results using AppError
@@ -174,6 +178,8 @@ impl ResponseError for AppError {
             AppError::NotFound(_) | AppError::KubernetesNotFound(_) => StatusCode::NOT_FOUND,
 
             AppError::InvalidInput(_) | AppError::Parse(_) => StatusCode::BAD_REQUEST,
+
+            AppError::Blocked(_) => StatusCode::CONFLICT,
 
             AppError::Webhook(_) | AppError::Http(_) => StatusCode::BAD_GATEWAY,
         }

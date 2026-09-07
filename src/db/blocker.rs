@@ -7,8 +7,6 @@
 //!
 //! Rows are never deleted. Clearing records who cleared it and when, so a
 //! config's hold history stays readable.
-#![allow(dead_code)] // wired into the deploy path in the next PR
-
 use chrono::Utc;
 use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
@@ -30,6 +28,7 @@ pub struct Blocker {
 
 const COLUMNS: &str = "id, config_name, reason, created_by, created_at, cleared_by, cleared_at";
 
+#[allow(dead_code)] // the UI and MCP surfaces that manage blockers land in the next PRs
 impl Blocker {
     fn from_row(row: &Row) -> rusqlite::Result<Self> {
         Ok(Blocker {
