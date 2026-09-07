@@ -6,9 +6,11 @@ use crate::db::deploy_config_version::DeployConfigVersion;
 use crate::db::git_branch::GitBranch;
 use crate::db::git_commit::GitCommit;
 use crate::db::git_repo::GitRepo;
+use crate::db::revision::Revision;
 use crate::kubernetes::api::{
     get_all_deploy_configs, get_deploy_config, get_namespace_uid, ListMode,
 };
+use crate::kubernetes::parameters::SHA_PARAMETER;
 use crate::kubernetes::repo::{DeploymentState, ShaMaybeBranch};
 use crate::kubernetes::{list_namespace_objects, DeployConfig};
 use crate::prelude::*;
@@ -195,6 +197,22 @@ impl ResolvedVersion {
                         build_time: commit.timestamp as u64,
                     },
                     None => ResolvedVersion::UnknownSha { sha: sha.clone() },
+                }
+            }
+            Action::Rollback { revision } => {
+                let sha = Revision::get(conn, *revision)
+                    .ok()
+                    .flatten()
+                    .and_then(|rev| rev.parameter(SHA_PARAMETER).map(|p| p.value.clone()));
+                let Some(sha) = sha else {
+                    return ResolvedVersion::ResolutionFailed;
+                };
+                match GitCommit::get_by_sha(&sha, repo.id, conn).ok().flatten() {
+                    Some(commit) => ResolvedVersion::TrackedSha {
+                        sha: commit.sha,
+                        build_time: commit.timestamp as u64,
+                    },
+                    None => ResolvedVersion::UnknownSha { sha },
                 }
             }
             Action::Bounce => ResolvedVersion::ResolutionFailed,
@@ -647,6 +665,44 @@ impl DeploymentState {
                     branch: None,
                 },
             }),
+            (Action::Rollback { revision }, artifact_repository) => {
+                let rev = Revision::get(conn, *revision)?.ok_or_else(|| {
+                    AppError::InvalidInput(format!("Revision {revision} does not exist"))
+                })?;
+                if rev.config_name != config.name_any() {
+                    return Err(AppError::InvalidInput(format!(
+                        "Revision {revision} belongs to {}, not {}",
+                        rev.config_name,
+                        config.name_any()
+                    )));
+                }
+                if rev.action != "deploy" {
+                    return Err(AppError::InvalidInput(format!(
+                        "Revision {revision} is an undeploy; use undeploy instead"
+                    )));
+                }
+                let config_state = ShaMaybeBranch {
+                    sha: rev.config_sha.clone().ok_or_else(|| {
+                        AppError::InvalidInput(format!("Revision {revision} has no config commit"))
+                    })?,
+                    branch: rev.config_branch.clone(),
+                };
+                match (rev.parameter(SHA_PARAMETER), artifact_repository) {
+                    (Some(param), Some(_)) => Ok(DeploymentState::DeployedWithArtifact {
+                        artifact: ShaMaybeBranch {
+                            sha: param.value.clone(),
+                            branch: param.branch.clone(),
+                        },
+                        config: config_state,
+                    }),
+                    (Some(_), None) => Err(AppError::InvalidInput(format!(
+                        "Revision {revision} deployed an artifact but the config no longer has one"
+                    ))),
+                    (None, _) => Ok(DeploymentState::DeployedOnlyConfig {
+                        config: config_state,
+                    }),
+                }
+            }
             (Action::Bounce, _) | (Action::ExecuteJob, _) | (Action::ToggleAutodeploy, _) => {
                 Ok(config.deployment_state())
             }
@@ -718,6 +774,7 @@ pub async fn render_preview_content(
         Action::DeployLatest
         | Action::DeployBranch { .. }
         | Action::DeployCommit { .. }
+        | Action::Rollback { .. }
         | Action::Undeploy => deploy_transition.format(&owner, &repo).await,
         Action::Bounce => {
             html! {
@@ -819,8 +876,17 @@ async fn generate_preview(
 
 pub enum Action {
     DeployLatest,
-    DeployBranch { branch: String },
-    DeployCommit { sha: String },
+    DeployBranch {
+        branch: String,
+    },
+    DeployCommit {
+        sha: String,
+    },
+    /// Replay an earlier revision's deployed values, then hold the config
+    /// with a blocker.
+    Rollback {
+        revision: i64,
+    },
     Bounce,
     ExecuteJob,
     ToggleAutodeploy,
@@ -845,6 +911,10 @@ impl Action {
                     Action::DeployLatest
                 }
             }
+            "rollback" => match query.get("revision").and_then(|r| r.parse::<i64>().ok()) {
+                Some(revision) => Action::Rollback { revision },
+                None => Action::DeployLatest,
+            },
             "toggle-autodeploy" => Action::ToggleAutodeploy,
             "undeploy" => Action::Undeploy,
             "bounce" => Action::Bounce,
@@ -858,6 +928,7 @@ impl Action {
             Action::DeployLatest => "action=deploy".to_string(),
             Action::DeployBranch { branch } => format!("action=deploy&branch={}", branch),
             Action::DeployCommit { sha } => format!("action=deploy&sha={}", sha),
+            Action::Rollback { revision } => format!("action=rollback&revision={}", revision),
             Action::Bounce => "action=bounce".to_string(),
             Action::ExecuteJob => "action=execute-job".to_string(),
             Action::ToggleAutodeploy => "action=toggle-autodeploy".to_string(),
@@ -880,6 +951,7 @@ impl Action {
             Action::DeployLatest | Action::DeployBranch { .. } | Action::DeployCommit { .. } => {
                 "deploy"
             }
+            Action::Rollback { .. } => "rollback",
             Action::Undeploy => "undeploy",
             Action::Bounce => "bounce",
             Action::ExecuteJob => "execute_job",
@@ -1142,6 +1214,9 @@ pub async fn deploy_configs(
                                                 Action::Undeploy => {
                                                     "Undeploy"
                                                 }
+                                                Action::Rollback { .. } => {
+                                                    "Roll back"
+                                                }
                                             }
                                         }
                                     }
@@ -1174,6 +1249,9 @@ pub async fn deploy_configs(
                                             }
                                             Action::Undeploy => {
                                                 "Undeploy of "
+                                            }
+                                            Action::Rollback { revision } => {
+                                                (format!("Rollback to revision {} of ", revision))
                                             }
                                         }
                                         strong {

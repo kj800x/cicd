@@ -196,7 +196,6 @@ impl Revision {
         })
     }
 
-    #[allow(dead_code)] // rollback uses these in the next PR
     pub fn get(
         conn: &PooledConnection<SqliteConnectionManager>,
         id: i64,
@@ -218,7 +217,7 @@ impl Revision {
     }
 
     /// The newest revision for a config, if it has any.
-    #[allow(dead_code)] // rollback uses these in the next PR
+    #[allow(dead_code)] // reported by the MCP tools in the next PR
     pub fn latest_for(
         conn: &PooledConnection<SqliteConnectionManager>,
         config_name: &str,

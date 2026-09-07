@@ -167,10 +167,20 @@ fn render_revision_row(rev: &Revision, prev: Option<&Revision>, repos: &ConfigRe
     }
 }
 
-/// The per-row actions. Rollback lands in the next change; until then the
-/// cell is empty rather than a stub button.
-fn render_row_actions(_rev: &Revision) -> Markup {
-    html! {}
+/// Roll back to a deploy revision. Undeploy revisions offer nothing: going
+/// back to "nothing deployed" is the undeploy button on the deploy page.
+fn render_row_actions(rev: &Revision) -> Markup {
+    if rev.action != "deploy" {
+        return html! {};
+    }
+    html! {
+        form action=(format!("/api/rollback/{}/{}", rev.config_name, rev.id)) method="post" class="rollback-form" {
+            input type="hidden" name="return_url" value=(format!("/deploy-history?name={}", rev.config_name));
+            button type="submit" class="link-button" title="Redeploy exactly these values, then hold the config with a blocker" {
+                "Roll back to this"
+            }
+        }
+    }
 }
 
 fn render_rows(

@@ -26,9 +26,11 @@ use crate::{
 /// Refuse a deploy while the config has an active blocker.
 ///
 /// Only deploys are gated. Undeploy stays available as the emergency exit,
-/// and bounce or job execution do not change what is deployed. Every active
-/// blocker's reason is included, so the person sees what they would have to
-/// clear.
+/// and bounce or job execution do not change what is deployed. Rollback is
+/// not gated either: it is the recovery action during an incident hold, it
+/// only ever moves to a revision that was deployed before, and it adds a
+/// blocker of its own. Every active blocker's reason is included, so the
+/// person sees what they would have to clear.
 pub fn check_blockers(
     conn: &PooledConnection<SqliteConnectionManager>,
     action: &Action,
@@ -62,6 +64,7 @@ pub fn to_deploy_action(action: &Action, name: &str, state: DeploymentState) -> 
         Action::DeployLatest
         | Action::DeployBranch { .. }
         | Action::DeployCommit { .. }
+        | Action::Rollback { .. }
         | Action::Undeploy => match state {
             DeploymentState::DeployedWithArtifact { artifact, config } => DeployAction::Deploy {
                 name: name.to_string(),
@@ -128,10 +131,30 @@ pub async fn run_action(
         Err(e) => log::error!("Failed to build deploy event for {}: {}", name, e),
     }
 
-    if let Some(new) = NewRevision::from_deploy_action(&deploy_action, config, conn, actor) {
+    if let Some(mut new) = NewRevision::from_deploy_action(&deploy_action, config, conn, actor) {
+        if let Action::Rollback { revision } = action {
+            new.reason = Some(format!("rollback to revision {revision}"));
+        }
         match Revision::record(conn, new) {
             Ok(rev) => log::info!("Recorded revision {} for {} ({})", rev.id, name, rev.action),
             Err(e) => log::error!("Failed to record revision for {}: {}", name, e),
+        }
+    }
+
+    // A rollback holds the config until someone decides the incident is over.
+    // Selections are untouched, so clearing the blocker and deploying latest
+    // resumes exactly what was being tracked before.
+    if let Action::Rollback { revision } = action {
+        match Blocker::create(
+            conn,
+            &name,
+            &format!(
+                "Rolled back to revision {revision}; clear when it is safe to move forward again"
+            ),
+            actor,
+        ) {
+            Ok(b) => log::info!("Blocker {} added on {} after rollback", b.id, name),
+            Err(e) => log::error!("Failed to add rollback blocker on {}: {}", name, e),
         }
     }
 
@@ -202,6 +225,26 @@ mod tests {
             to_deploy_action(&Action::Undeploy, "x", DeploymentState::Undeployed),
             DeployAction::Undeploy { .. }
         ));
+    }
+
+    #[test]
+    fn rollback_maps_like_a_deploy_and_is_not_gated() -> AppResult<()> {
+        let with = DeploymentState::DeployedWithArtifact {
+            artifact: sha("a"),
+            config: sha("c"),
+        };
+        assert!(matches!(
+            to_deploy_action(&Action::Rollback { revision: 7 }, "x", with),
+            DeployAction::Deploy {
+                artifact: Some(_),
+                ..
+            }
+        ));
+        let pool = migrated_memory_pool();
+        let conn = pool.get()?;
+        Blocker::create(&conn, "site", "incident", "kevin")?;
+        assert!(check_blockers(&conn, &Action::Rollback { revision: 7 }, "site").is_ok());
+        Ok(())
     }
 
     #[test]

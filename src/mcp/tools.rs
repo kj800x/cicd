@@ -595,6 +595,7 @@ async fn execute_deploy_action(
         Action::DeployLatest => "Deploy (latest)".to_string(),
         Action::DeployBranch { branch } => format!("Deploy (branch: {})", branch),
         Action::DeployCommit { sha } => format!("Deploy (sha: {})", sha),
+        Action::Rollback { revision } => format!("Rollback (revision: {})", revision),
         Action::Undeploy => "Undeploy".to_string(),
         Action::Bounce => "Bounce".to_string(),
         Action::ExecuteJob => "Execute job".to_string(),
