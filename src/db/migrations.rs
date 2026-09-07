@@ -1,8 +1,9 @@
 use crate::prelude::*;
 use indoc::indoc;
 
-pub fn migrate(mut conn: PooledConnection<SqliteConnectionManager>) -> AppResult<()> {
-    let migrations: Migrations = Migrations::new(vec![
+/// Every migration, in order. Append only; never edit an existing entry.
+pub fn migrations() -> Migrations<'static> {
+    Migrations::new(vec![
         M::up(indoc! { r#"
           CREATE TABLE git_repo (
               id INTEGER PRIMARY KEY NOT NULL,
@@ -158,11 +159,136 @@ pub fn migrate(mut conn: PooledConnection<SqliteConnectionManager>) -> AppResult
               FOREIGN KEY(revision_id) REFERENCES revision(id)
           );
         "#}),
-    ]);
+        // Backfill revisions from the deploy events recorded before revisions
+        // existed, so the history page can read revisions alone. Only events
+        // older than the first real revision are copied; anything after that
+        // was dual-written. Legacy events have no actor beyond "USER", so
+        // they get actor "user". An event with an artifact becomes a
+        // revision with one SHA parameter; the config-only and undeploy
+        // shapes carry over as they are. deploy_event itself is untouched.
+        M::up(indoc! { r#"
+          INSERT INTO revision (config_name, created_at, actor, action, config_sha, config_branch, config_version_hash)
+          SELECT de.name, de.timestamp, 'user',
+                 CASE WHEN de.config_sha IS NULL THEN 'undeploy' ELSE 'deploy' END,
+                 de.config_sha, de.config_branch, de.config_version_hash
+          FROM deploy_event de
+          WHERE de.timestamp < COALESCE((SELECT MIN(created_at) FROM revision), 9223372036854775807)
+          ORDER BY de.timestamp;
 
+          INSERT OR IGNORE INTO revision_parameter (revision_id, name, type, value, branch)
+          SELECT r.id, 'SHA', 'commit', de.artifact_sha, de.artifact_branch
+          FROM deploy_event de
+          JOIN revision r ON r.config_name = de.name AND r.created_at = de.timestamp AND r.actor = 'user'
+          WHERE de.artifact_sha IS NOT NULL;
+        "#}),
+    ])
+}
+
+pub fn migrate(mut conn: PooledConnection<SqliteConnectionManager>) -> AppResult<()> {
     conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))?;
-    migrations
+    migrations()
         .to_latest(&mut conn)
         .map_err(|e| AppError::DatabaseMigration(e.to_string()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::revision::Revision;
+    use crate::db::test_support::memory_pool_at_version;
+    use rusqlite::params;
+
+    #[test]
+    fn revisions_are_backfilled_from_deploy_events() -> AppResult<()> {
+        let pool = memory_pool_at_version(4);
+        let conn = pool.get()?;
+        let insert = "INSERT INTO deploy_event (name, timestamp, initiator, config_sha, artifact_sha, artifact_branch, config_branch, config_version_hash) VALUES (?1, ?2, 'USER', ?3, ?4, ?5, ?6, ?7)";
+        // Artifact deploy, config-only deploy, undeploy, oldest first.
+        conn.execute(
+            insert,
+            params![
+                "site",
+                1000,
+                Some("c1"),
+                Some("a1"),
+                Some("master"),
+                Some("master"),
+                Some("h1")
+            ],
+        )?;
+        conn.execute(
+            insert,
+            params![
+                "cfgonly",
+                2000,
+                Some("c2"),
+                None::<String>,
+                None::<String>,
+                Some("master"),
+                None::<String>
+            ],
+        )?;
+        conn.execute(
+            insert,
+            params![
+                "site",
+                3000,
+                None::<String>,
+                None::<String>,
+                None::<String>,
+                None::<String>,
+                None::<String>
+            ],
+        )?;
+        // A real revision that was dual-written after revisions existed; the
+        // matching event must not be copied again.
+        conn.execute(
+            insert,
+            params![
+                "site",
+                5000,
+                Some("c3"),
+                Some("a3"),
+                Some("master"),
+                Some("master"),
+                None::<String>
+            ],
+        )?;
+        conn.execute(
+            "INSERT INTO revision (config_name, created_at, actor, action, config_sha, config_branch) VALUES ('site', 5000, 'mcp', 'deploy', 'c3', 'master')",
+            [],
+        )?;
+        drop(conn);
+
+        migrate(pool.get()?)?;
+        let conn = pool.get()?;
+
+        let site = Revision::list_for(&conn, "site", 10)?;
+        assert_eq!(
+            site.iter()
+                .map(|r| (r.created_at, r.actor.as_str(), r.action.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (5000, "mcp", "deploy"),
+                (3000, "user", "undeploy"),
+                (1000, "user", "deploy")
+            ]
+        );
+        let first = &site[2];
+        assert_eq!(first.config_sha.as_deref(), Some("c1"));
+        assert_eq!(first.config_version_hash.as_deref(), Some("h1"));
+        assert_eq!(first.parameters.len(), 1);
+        assert_eq!(first.parameters[0].value, "a1");
+        assert_eq!(first.parameters[0].branch.as_deref(), Some("master"));
+        assert!(site[1].parameters.is_empty(), "undeploy has no parameters");
+        // The dual-written revision was left alone and got no parameter rows
+        // from the backfill.
+        assert!(site[0].parameters.is_empty());
+
+        let cfgonly = Revision::list_for(&conn, "cfgonly", 10)?;
+        assert_eq!(cfgonly.len(), 1);
+        assert!(cfgonly[0].parameters.is_empty());
+        Ok(())
+    }
 }
