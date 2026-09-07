@@ -147,13 +147,6 @@ async fn apply_change(
     octocrabs: &Octocrabs,
     form: &HashMap<String, String>,
 ) -> HttpResponse {
-    let conn = match pool.get() {
-        Ok(c) => c,
-        Err(e) => {
-            log::error!("Failed to get database connection: {}", e);
-            return HttpResponse::InternalServerError().body("Failed to connect to database");
-        }
-    };
     let Some(client) = client else {
         return HttpResponse::ServiceUnavailable()
             .body("Kubernetes client is not available. Deploy functionality is disabled.");
@@ -173,7 +166,7 @@ async fn apply_change(
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .unwrap_or("web");
-    match crate::deploys::change_patches(&config, &client, &conn, actor, change, octocrabs).await {
+    match crate::deploys::change_patches(&config, &client, pool, actor, change, octocrabs).await {
         Ok(()) => {}
         Err(AppError::InvalidInput(message)) => return HttpResponse::BadRequest().body(message),
         Err(AppError::Blocked(message)) => return HttpResponse::Conflict().body(message),

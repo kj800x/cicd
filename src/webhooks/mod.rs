@@ -5,6 +5,7 @@ use crate::webhooks::models::{
     RepositoryEvent,
 };
 
+pub mod autodeploy;
 pub mod config_sync;
 pub mod database;
 pub mod log;

@@ -25,13 +25,6 @@ pub async fn rollback(
     form: web::Form<HashMap<String, String>>,
 ) -> impl Responder {
     let (name, revision) = path.into_inner();
-    let conn = match pool.get() {
-        Ok(c) => c,
-        Err(e) => {
-            log::error!("Failed to get database connection: {}", e);
-            return HttpResponse::InternalServerError().body("Failed to connect to database");
-        }
-    };
     let Some(client) = client else {
         return HttpResponse::ServiceUnavailable()
             .body("Kubernetes client is not available. Deploy functionality is disabled.");
@@ -57,7 +50,7 @@ pub async fn rollback(
         &config,
         &client,
         &octocrabs,
-        &conn,
+        &pool,
         "web",
         &crate::deploys::SelectionIntent::default(),
     )

@@ -1446,13 +1446,6 @@ pub async fn deploy_config(
     form: web::Form<HashMap<String, String>>,
     octocrabs: web::Data<Octocrabs>,
 ) -> impl Responder {
-    let conn = match pool.get() {
-        Ok(c) => c,
-        Err(e) => {
-            log::error!("Failed to get database connection: {}", e);
-            return HttpResponse::InternalServerError().body("Failed to connect to database");
-        }
-    };
     let action = Action::from_query(&form);
     let (namespace, name) = path.into_inner();
 
@@ -1497,7 +1490,7 @@ pub async fn deploy_config(
 
     let intent = crate::deploys::SelectionIntent::from_form(&form);
     let result =
-        crate::deploys::run_action(&action, &config, &client, &octocrabs, &conn, "web", &intent)
+        crate::deploys::run_action(&action, &config, &client, &octocrabs, &pool, "web", &intent)
             .await;
     let (action_type, outcome) = match &result {
         Ok(deploy_action) => (deploy_action.action_type(), "success"),

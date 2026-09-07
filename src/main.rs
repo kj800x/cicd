@@ -45,6 +45,7 @@ use crate::db::migrations::migrate;
 use crate::kubernetes::controller::start_controller;
 use crate::prelude::*;
 use crate::web::{branch_grid_fragment, build_grid_fragment, deploy_configs, deploy_preview};
+use crate::webhooks::autodeploy::AutodeployHandler;
 use crate::webhooks::config_sync::ConfigSyncHandler;
 use crate::webhooks::database::DatabaseHandler;
 use crate::webhooks::manager::WebhookManager;
@@ -239,6 +240,13 @@ async fn main() -> std::io::Result<()> {
     webhook_manager.add_handler(DatabaseHandler::new(pool.clone(), octocrabs.clone()));
     webhook_manager.add_handler(MetricsHandler::new());
     webhook_manager.add_handler(ConfigSyncHandler::new(
+        pool.clone(),
+        client.clone(),
+        octocrabs.clone(),
+    ));
+    // After the database handler, so a completed check run is recorded
+    // before autodeploy asks what the latest successful build is.
+    webhook_manager.add_handler(AutodeployHandler::new(
         pool.clone(),
         client.clone(),
         octocrabs.clone(),

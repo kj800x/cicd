@@ -21,12 +21,10 @@ use crate::web::ResourceStatuses;
 
 use super::protocol::{Tool, ToolCallResult};
 
-// NOTE: The `autodeploy` flag and the `toggle_autodeploy` action are deliberately
-// not exposed over MCP. Autodeploy is not implemented yet (see
-// https://github.com/kj800x/cicd/issues/20), and surfacing the flag misleads
-// agents into assuming new builds roll out on their own. Re-add both once the
-// feature is actually wired up. Blockers will suspend autodeploy when it exists;
-// today they refuse manual deploys, which the `deploy` tool reports.
+// Autodeploy: when a build succeeds on the branch a config's SHA parameter
+// tracks, the config is deployed to latest automatically, unless it is
+// pinned, a temporary deployment, or held by a blocker. The flag is per
+// config and toggled with toggle_autodeploy.
 pub fn tool_definitions() -> Vec<Tool> {
     vec![
         Tool {
@@ -163,6 +161,17 @@ pub fn tool_definitions() -> Vec<Tool> {
         Tool {
             name: "execute_job".to_string(),
             description: "Manually trigger CronJobs owned by a deploy config".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of the deploy config" }
+                },
+                "required": ["name"]
+            }),
+        },
+        Tool {
+            name: "toggle_autodeploy".to_string(),
+            description: "Turn autodeploy on or off for a config. When on, a successful build on the branch the SHA parameter tracks deploys latest automatically; pins, temporary deployments and blockers all suspend it.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -346,6 +355,9 @@ pub async fn dispatch(
         "add_patch" => handle_patch_change(arguments, true, client, pool, octocrabs).await,
         "remove_patch" => handle_patch_change(arguments, false, client, pool, octocrabs).await,
         "undeploy" => handle_action("undeploy", arguments, client, pool, octocrabs).await,
+        "toggle_autodeploy" => {
+            handle_action("toggle_autodeploy", arguments, client, pool, octocrabs).await
+        }
         "bounce" => handle_action("bounce", arguments, client, pool, octocrabs).await,
         "execute_job" => handle_action("execute_job", arguments, client, pool, octocrabs).await,
         "list_revisions" => handle_list_revisions(arguments, pool),
@@ -411,6 +423,7 @@ async fn handle_list_deploy_configs(
                 "blocked": !blockers.is_empty(),
                 "blockers": blockers.iter().map(blocker_json).collect::<Vec<_>>(),
                 "temporary": config.is_temporary_deployment(),
+                "autodeploy": config.autodeploy(),
                 "selection": selection_json(config),
                 "parameters": parameters_json(config),
                 "artifact_repo": artifact_repo_name,
@@ -497,6 +510,7 @@ async fn handle_get_deploy_config(
         "blocked": !blockers.is_empty(),
         "blockers": blockers.iter().map(blocker_json).collect::<Vec<_>>(),
         "temporary": config.is_temporary_deployment(),
+        "autodeploy": config.autodeploy(),
         "selection": selection_json(&config),
         "parameters": parameters_json(&config),
         "latest_revision": latest_revision.as_ref().map(revision_json),
@@ -725,11 +739,7 @@ async fn handle_patch_change(
             None => return ToolCallResult::error("Missing required parameter: index".to_string()),
         }
     };
-    let conn = match pool.get() {
-        Ok(c) => c,
-        Err(e) => return ToolCallResult::error(format!("Database error: {}", e)),
-    };
-    match crate::deploys::change_patches(&config, client, &conn, &actor, change, octocrabs).await {
+    match crate::deploys::change_patches(&config, client, pool, &actor, change, octocrabs).await {
         Ok(()) => ToolCallResult::text(format!(
             "Patch list updated on {}; reconcile applies it within a few seconds.",
             name
@@ -809,6 +819,7 @@ async fn handle_action(
 
     let action = match action_type {
         "undeploy" => Action::Undeploy,
+        "toggle_autodeploy" => Action::ToggleAutodeploy,
         "clear_selection" => {
             if config.is_orphaned() {
                 return ToolCallResult::error(
@@ -995,13 +1006,7 @@ async fn execute_deploy_action_with(
     octocrabs: &Octocrabs,
     intent: &crate::deploys::SelectionIntent,
 ) -> ToolCallResult {
-    let conn = match pool.get() {
-        Ok(c) => c,
-        Err(e) => return ToolCallResult::error(format!("Database error: {}", e)),
-    };
-
-    match crate::deploys::run_action(action, config, client, octocrabs, &conn, "mcp", intent).await
-    {
+    match crate::deploys::run_action(action, config, client, octocrabs, pool, "mcp", intent).await {
         Ok(_) => {}
         Err(crate::error::AppError::Blocked(message)) => {
             return ToolCallResult::error(format!(
