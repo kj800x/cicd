@@ -349,6 +349,12 @@ html! {
 - Written by the deploy handler on branch and commit deploys; config sync never touches it. "Latest" resolves through the selection; "Back to default branch" clears it
 - A config with any temporary override is a *temporary deployment*: badge, strip at the top of `/deploy`, and `CICD_TEMPORARY_DEPLOY=true`
 
+**Value parameters, patches and autodeploy:**
+- `parameters:` in `.deploy/<name>.yaml` declares parameters: `{type: commit, owner, repo, branch}` or `{type: value, default}`. `artifactRepo` is sugar for a commit parameter named `SHA`. Every parameter is substituted for `$NAME` in manifests; a declared parameter without a deployed value refuses to render
+- Value parameters resolve to their pinned value or default at deploy time; set them from the Parameters panel or the `set_parameter` MCP tool
+- `spec.patches` are JSON Patch operations applied to rendered manifests after substitution, targeted by kind, name and optionally file. A patch that no longer fits fails the render loudly. Manage them from the Patches panel or `add_patch` / `remove_patch`
+- Autodeploy (`src/webhooks/autodeploy.rs`): a successful check run on the branch a config's `SHA` parameter tracks deploys latest, unless the parameter is pinned, the config is a temporary deployment, or a blocker is active
+
 **Environment variables injected into every container:**
 - `CICD_DEPLOY_CONFIG`, `CICD_TEAM`
 - `CICD_TEMPORARY_DEPLOY`: `true` while a temporary override is active. Apps refuse dangerous work (schema migrations) on it; a standing pin does not trip it

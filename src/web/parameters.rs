@@ -89,13 +89,6 @@ pub async fn set_parameter(
     form: web::Form<HashMap<String, String>>,
 ) -> impl Responder {
     let (name, parameter) = path.into_inner();
-    let conn = match pool.get() {
-        Ok(c) => c,
-        Err(e) => {
-            log::error!("Failed to get database connection: {}", e);
-            return HttpResponse::InternalServerError().body("Failed to connect to database");
-        }
-    };
     let Some(client) = client else {
         return HttpResponse::ServiceUnavailable()
             .body("Kubernetes client is not available. Deploy functionality is disabled.");
@@ -132,7 +125,7 @@ pub async fn set_parameter(
     };
     let intent = crate::deploys::SelectionIntent::from_form(&form);
     let result =
-        crate::deploys::run_action(&action, &config, &client, &octocrabs, &conn, "web", &intent)
+        crate::deploys::run_action(&action, &config, &client, &octocrabs, &pool, "web", &intent)
             .await;
     crate::metrics::get().deploy_actions.add(
         1,

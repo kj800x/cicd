@@ -8,7 +8,7 @@
 //! is written once.
 
 use kube::Client;
-use r2d2::PooledConnection;
+use r2d2::{Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
 
 use std::collections::HashMap;
@@ -111,13 +111,13 @@ pub enum PatchChange {
 pub async fn change_patches(
     config: &DeployConfig,
     client: &Client,
-    conn: &PooledConnection<SqliteConnectionManager>,
+    pool: &Pool<SqliteConnectionManager>,
     actor: &str,
     change: PatchChange,
     _octocrabs: &Octocrabs,
 ) -> AppResult<()> {
     let name = kube::ResourceExt::name_any(config);
-    check_blockers(conn, &Action::DeployLatest, &name)?;
+    check_blockers(&pool.get()?, &Action::DeployLatest, &name)?;
 
     let mut patches = config.spec.spec.patches.clone();
     let reason = match change {
@@ -152,7 +152,8 @@ pub async fn change_patches(
     let ns = kube::ResourceExt::namespace(config).unwrap_or_else(|| "default".to_string());
     crate::kubernetes::api::set_deploy_config_patches(client, &ns, &name, &patches).await?;
 
-    match Revision::record(conn, NewRevision::patch_change(&effective, actor, &reason)) {
+    let conn = pool.get()?;
+    match Revision::record(&conn, NewRevision::patch_change(&effective, actor, &reason)) {
         Ok(rev) => log::info!("Recorded revision {} for {} ({})", rev.id, name, reason),
         Err(e) => log::error!("Failed to record patch revision for {}: {}", name, e),
     }
@@ -267,12 +268,15 @@ pub async fn run_action(
     config: &DeployConfig,
     client: &Client,
     octocrabs: &Octocrabs,
-    conn: &PooledConnection<SqliteConnectionManager>,
+    pool: &Pool<SqliteConnectionManager>,
     actor: &str,
     intent: &SelectionIntent,
 ) -> AppResult<DeployAction> {
     let name = kube::ResourceExt::name_any(config);
-    check_blockers(conn, action, &name)?;
+    // Connections are never held across an await: sqlite connections are
+    // not Sync, and the webhook handlers need this future to be Send.
+    let conn = pool.get()?;
+    check_blockers(&conn, action, &name)?;
     if let Action::SetParameter { parameter, .. } = action {
         let is_static = config
             .spec
@@ -308,12 +312,13 @@ pub async fn run_action(
         }
     }
 
-    let state = DeploymentState::from_action(action, &effective, conn)?;
+    let state = DeploymentState::from_action(action, &effective, &conn)?;
     let values = match action {
-        Action::Rollback { revision } => values_from_revision(conn, *revision)?,
+        Action::Rollback { revision } => values_from_revision(&conn, *revision)?,
         _ => effective.resolve_value_parameters(),
     };
     let deploy_action = to_deploy_action(action, &name, state, values);
+    drop(conn);
 
     deploy_action
         .execute(client, octocrabs, config.config_repository())
@@ -334,11 +339,12 @@ pub async fn run_action(
     // Best-effort: mirror the new state into the GitHub Deployments API.
     crate::github_deployments::report_deploy_action(octocrabs, config, &deploy_action).await;
 
-    if let Some(mut new) = NewRevision::from_deploy_action(&deploy_action, config, conn, actor) {
+    let conn = pool.get()?;
+    if let Some(mut new) = NewRevision::from_deploy_action(&deploy_action, config, &conn, actor) {
         if let Action::Rollback { revision } = action {
             new.reason = Some(format!("rollback to revision {revision}"));
         }
-        match Revision::record(conn, new) {
+        match Revision::record(&conn, new) {
             Ok(rev) => log::info!("Recorded revision {} for {} ({})", rev.id, name, rev.action),
             Err(e) => log::error!("Failed to record revision for {}: {}", name, e),
         }
@@ -349,7 +355,7 @@ pub async fn run_action(
     // resumes exactly what was being tracked before.
     if let Action::Rollback { revision } = action {
         match Blocker::create(
-            conn,
+            &conn,
             &name,
             &format!(
                 "Rolled back to revision {revision}; clear when it is safe to move forward again"
