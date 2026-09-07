@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 
 use crate::build_status::BuildStatus;
 use crate::crab_ext::Octocrabs;
+use crate::db::blocker::Blocker;
 use crate::db::git_branch::GitBranch;
 use crate::db::git_repo::GitRepo;
 use crate::kubernetes::api::{
@@ -20,7 +21,8 @@ use super::protocol::{Tool, ToolCallResult};
 // not exposed over MCP. Autodeploy is not implemented yet (see
 // https://github.com/kj800x/cicd/issues/20), and surfacing the flag misleads
 // agents into assuming new builds roll out on their own. Re-add both once the
-// feature is actually wired up.
+// feature is actually wired up. Blockers will suspend autodeploy when it exists;
+// today they refuse manual deploys, which the `deploy` tool reports.
 pub fn tool_definitions() -> Vec<Tool> {
     vec![
         Tool {
@@ -102,7 +104,58 @@ pub fn tool_definitions() -> Vec<Tool> {
                 "required": ["name"]
             }),
         },
+        Tool {
+            name: "list_blockers".to_string(),
+            description: "List blockers. A blocker is a per-config hold with a reason: while one is active, deploys of that config are refused until it is cleared. Undeploy, bounce and execute_job still work.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Only this deploy config (default: every config with an active blocker)" },
+                    "include_cleared": { "type": "boolean", "description": "With name: also return cleared blockers, newest first (default false)" }
+                },
+                "required": []
+            }),
+        },
+        Tool {
+            name: "add_blocker".to_string(),
+            description: "Hold deploys of a config until the blocker is cleared. Use for incidents, freezes, or after a rollback.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of the deploy config" },
+                    "reason": { "type": "string", "description": "Why deploys must wait (required)" },
+                    "by": { "type": "string", "description": "Who is holding it (default: mcp)" }
+                },
+                "required": ["name", "reason"]
+            }),
+        },
+        Tool {
+            name: "clear_blocker".to_string(),
+            description: "Clear one blocker by id, allowing deploys again once no active blockers remain on the config.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of the deploy config the blocker belongs to" },
+                    "id": { "type": "integer", "description": "Blocker id from list_blockers" },
+                    "by": { "type": "string", "description": "Who is clearing it (default: mcp)" }
+                },
+                "required": ["name", "id"]
+            }),
+        },
     ]
+}
+
+fn blocker_json(b: &Blocker) -> Value {
+    json!({
+        "id": b.id,
+        "config": b.config_name,
+        "reason": b.reason,
+        "active": b.is_active(),
+        "created_by": b.created_by,
+        "created_at": b.created_at,
+        "cleared_by": b.cleared_by,
+        "cleared_at": b.cleared_at,
+    })
 }
 
 pub async fn dispatch(
@@ -114,12 +167,15 @@ pub async fn dispatch(
 ) -> ToolCallResult {
     match tool_name {
         "list_deploy_configs" => handle_list_deploy_configs(client, pool).await,
-        "get_deploy_config" => handle_get_deploy_config(arguments, client).await,
+        "get_deploy_config" => handle_get_deploy_config(arguments, client, pool).await,
         "get_build_status" => handle_get_build_status(arguments, pool).await,
         "deploy" => handle_deploy(arguments, client, pool, octocrabs).await,
         "undeploy" => handle_action("undeploy", arguments, client, pool, octocrabs).await,
         "bounce" => handle_action("bounce", arguments, client, pool, octocrabs).await,
         "execute_job" => handle_action("execute_job", arguments, client, pool, octocrabs).await,
+        "list_blockers" => handle_list_blockers(arguments, pool),
+        "add_blocker" => handle_add_blocker(arguments, pool),
+        "clear_blocker" => handle_clear_blocker(arguments, pool),
         _ => ToolCallResult::error(format!("Unknown tool: {}", tool_name)),
     }
 }
@@ -166,6 +222,7 @@ async fn handle_list_deploy_configs(
                 .map(|r| format!("{}/{}", r.owner, r.repo));
             let config_repo = config.config_repository();
             let config_repo_name = format!("{}/{}", config_repo.owner, config_repo.repo);
+            let blockers = Blocker::active_for(&conn, &config.name_any()).unwrap_or_default();
 
             json!({
                 "name": config.name_any(),
@@ -174,6 +231,8 @@ async fn handle_list_deploy_configs(
                 "kind": config.kind(),
                 "state": state,
                 "orphaned": config.is_orphaned(),
+                "blocked": !blockers.is_empty(),
+                "blockers": blockers.iter().map(blocker_json).collect::<Vec<_>>(),
                 "artifact_repo": artifact_repo_name,
                 "config_repo": config_repo_name,
                 "artifact_sha": artifact_sha,
@@ -190,10 +249,18 @@ async fn handle_list_deploy_configs(
     ToolCallResult::text(serde_json::to_string_pretty(&results).unwrap_or_default())
 }
 
-async fn handle_get_deploy_config(arguments: Value, client: &Client) -> ToolCallResult {
+async fn handle_get_deploy_config(
+    arguments: Value,
+    client: &Client,
+    pool: &Pool<SqliteConnectionManager>,
+) -> ToolCallResult {
     let name = match arguments.get("name").and_then(|v| v.as_str()) {
         Some(n) => n,
         None => return ToolCallResult::error("Missing required parameter: name".to_string()),
+    };
+    let blockers = match pool.get() {
+        Ok(conn) => Blocker::active_for(&conn, name).unwrap_or_default(),
+        Err(e) => return ToolCallResult::error(format!("Database error: {}", e)),
     };
 
     let config = match get_deploy_config(client, name).await {
@@ -244,6 +311,8 @@ async fn handle_get_deploy_config(arguments: Value, client: &Client) -> ToolCall
         "kind": config.kind(),
         "state": state,
         "orphaned": config.is_orphaned(),
+        "blocked": !blockers.is_empty(),
+        "blockers": blockers.iter().map(blocker_json).collect::<Vec<_>>(),
         "supports_bounce": config.supports_bounce(),
         "supports_execute_job": config.supports_execute_job(),
         "artifact_repo": artifact_repo.as_ref().map(|r| format!("{}/{}", r.owner, r.repo)),
@@ -417,6 +486,85 @@ async fn handle_action(
     };
 
     execute_deploy_action(&action, name, &config, client, pool, octocrabs).await
+}
+
+fn handle_list_blockers(arguments: Value, pool: &Pool<SqliteConnectionManager>) -> ToolCallResult {
+    let conn = match pool.get() {
+        Ok(c) => c,
+        Err(e) => return ToolCallResult::error(format!("Database error: {}", e)),
+    };
+    let include_cleared = arguments
+        .get("include_cleared")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let result = match arguments.get("name").and_then(|v| v.as_str()) {
+        Some(name) if include_cleared => Blocker::history_for(&conn, name, 50),
+        Some(name) => Blocker::active_for(&conn, name),
+        None => Blocker::all_active(&conn),
+    };
+    match result {
+        Ok(blockers) => ToolCallResult::text(
+            serde_json::to_string_pretty(&blockers.iter().map(blocker_json).collect::<Vec<_>>())
+                .unwrap_or_default(),
+        ),
+        Err(e) => ToolCallResult::error(format!("Failed to list blockers: {}", e)),
+    }
+}
+
+fn handle_add_blocker(arguments: Value, pool: &Pool<SqliteConnectionManager>) -> ToolCallResult {
+    let name = match arguments.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n,
+        None => return ToolCallResult::error("Missing required parameter: name".to_string()),
+    };
+    let reason = arguments
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let by = arguments
+        .get("by")
+        .and_then(|v| v.as_str())
+        .unwrap_or("mcp");
+    let conn = match pool.get() {
+        Ok(c) => c,
+        Err(e) => return ToolCallResult::error(format!("Database error: {}", e)),
+    };
+    match Blocker::create(&conn, name, reason, by) {
+        Ok(b) => ToolCallResult::text(
+            serde_json::to_string_pretty(&blocker_json(&b)).unwrap_or_default(),
+        ),
+        Err(e) => ToolCallResult::error(format!("Failed to add blocker: {}", e)),
+    }
+}
+
+fn handle_clear_blocker(arguments: Value, pool: &Pool<SqliteConnectionManager>) -> ToolCallResult {
+    let name = match arguments.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n,
+        None => return ToolCallResult::error("Missing required parameter: name".to_string()),
+    };
+    let id = match arguments.get("id").and_then(|v| v.as_i64()) {
+        Some(id) => id,
+        None => return ToolCallResult::error("Missing required parameter: id".to_string()),
+    };
+    let by = arguments
+        .get("by")
+        .and_then(|v| v.as_str())
+        .unwrap_or("mcp");
+    let conn = match pool.get() {
+        Ok(c) => c,
+        Err(e) => return ToolCallResult::error(format!("Database error: {}", e)),
+    };
+    match Blocker::get(&conn, id) {
+        Ok(Some(b)) if b.config_name == name => {}
+        Ok(_) => return ToolCallResult::error(format!("No blocker {} on {}", id, name)),
+        Err(e) => return ToolCallResult::error(format!("Failed to look up blocker: {}", e)),
+    }
+    match Blocker::clear(&conn, id, by) {
+        Ok(true) => ToolCallResult::text(format!("Cleared blocker {} on {}", id, name)),
+        Ok(false) => {
+            ToolCallResult::text(format!("Blocker {} on {} was already cleared", id, name))
+        }
+        Err(e) => ToolCallResult::error(format!("Failed to clear blocker: {}", e)),
+    }
 }
 
 async fn execute_deploy_action(

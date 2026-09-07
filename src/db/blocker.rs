@@ -41,7 +41,6 @@ impl Blocker {
         })
     }
 
-    #[allow(dead_code)] // used by the MCP tools in the next PR
     pub fn is_active(&self) -> bool {
         self.cleared_at.is_none()
     }
@@ -117,7 +116,6 @@ impl Blocker {
     }
 
     /// Full history for one config, newest first.
-    #[allow(dead_code)] // used by the MCP tools in the next PR
     pub fn history_for(
         conn: &PooledConnection<SqliteConnectionManager>,
         config_name: &str,
