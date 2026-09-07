@@ -2,133 +2,65 @@ use super::DeployConfig;
 use super::Repository;
 use crate::error::format_error_chain;
 use crate::kubernetes::repo::DeploymentState;
-use crate::kubernetes::{ensure_namespace_exists, Error};
+use crate::kubernetes::{cr_writers, ensure_namespace_exists, Error};
 use crate::prelude::*;
 use itertools::Itertools;
-use kube::api::{DeleteParams, PostParams};
+use kube::api::DeleteParams;
 use kube::{
-    api::{Api, Patch, PatchParams, ResourceExt},
+    api::{Api, ResourceExt},
     client::Client,
 };
-use serde_json::Value;
 
-// Goals: sync spec.config, spec.artifact, spec.team, spec.kind, status.orphaned (always false here)
-// NON-GOALS: spec.specs (since that is updated ONLY by deploy events)
-// TODO: There's some other semantics here that need to be figured out, but lets get this online again first.
-// TODO: update_deploy_config does not handle namespace changes
-async fn update_deploy_config(
+/// Write the declared part of a config (parameters, config repo, kind,
+/// team) under the config-sync field manager and mark it not orphaned.
+/// Creates the object when it does not exist. Selections, patches and the
+/// manifest templates belong to other managers and are never touched here.
+///
+/// Namespace changes are not supported: the object would be created anew
+/// in the other namespace while the old one kept running.
+async fn sync_deploy_config(
     client: &Client,
-    existing_config: &DeployConfig,
+    existing_config: Option<&DeployConfig>,
     final_config: &DeployConfig,
 ) -> Result<(), Error> {
-    let ns = existing_config
-        .namespace()
-        .unwrap_or_else(|| "default".to_string());
-    let new_ns = final_config
-        .namespace()
-        .unwrap_or_else(|| "default".to_string());
-    let name = existing_config.name_any();
-
-    if new_ns != ns {
-        return Err(Error::App(AppError::Internal(
-            "Namespace change not supported. You must undeploy, delete the config, and recreate it with the new namespace.".to_owned(),
-        )));
-    }
-
-    // Ensure namespace exists (in case namespace changed)
-    // TODO: We don't currently support namespace changes without an undeploy so this is a no-op, but it's a reminder that if we ever support it we need to do this too.
-    let template_namespace = std::env::var("TEMPLATE_NAMESPACE").ok();
-    ensure_namespace_exists(client, &ns, template_namespace.as_deref())
-        .await
-        .map_err(Error::App)?;
-
-    // We always use the existing config's specs, since specs are only updated by deploy events.
-    let mut merge_patch = final_config.clone();
-    merge_patch.spec.spec.specs = existing_config.spec.spec.specs.clone();
-    let merge_patch = spec_merge_patch(existing_config, &merge_patch)?;
-
-    let api: Api<DeployConfig> = Api::namespaced(client.clone(), &ns);
-    api.patch(&name, &PatchParams::default(), &Patch::Merge(&merge_patch))
-        .await?;
-
-    api.patch_status(
-        &name,
-        &PatchParams::default(),
-        &Patch::Merge(&serde_json::json!({
-            "status": {
-              "orphaned": false,
-            }
-        })),
-    )
-    .await?;
-
-    log::info!("Updated DeployConfig {}/{}", ns, name);
-
-    Ok(())
-}
-
-/// Serialize the desired config as a merge patch, adding an explicit `null`
-/// for every parameter the existing config has but the desired one does not.
-/// A merge patch cannot remove a map key any other way, and `parameters` is
-/// omitted from the serialized spec when empty, so without this a parameter
-/// removed from the config repo would linger on the resource.
-fn spec_merge_patch(existing: &DeployConfig, desired: &DeployConfig) -> Result<Value, Error> {
-    let mut patch = serde_json::to_value(desired)
-        .map_err(|e| Error::App(AppError::Internal(format!("serialize DeployConfig: {e}"))))?;
-
-    let removed: Vec<&String> = existing
-        .spec
-        .spec
-        .parameters
-        .keys()
-        .filter(|key| !desired.spec.spec.parameters.contains_key(*key))
-        .collect();
-    if !removed.is_empty() {
-        let params = &mut patch["spec"]["parameters"];
-        if !params.is_object() {
-            *params = serde_json::json!({});
-        }
-        for key in removed {
-            params[key] = Value::Null;
-        }
-    }
-
-    Ok(patch)
-}
-
-async fn create_deploy_config(client: &Client, final_config: &DeployConfig) -> Result<(), Error> {
     let ns = final_config
         .namespace()
         .unwrap_or_else(|| "default".to_string());
     let name = final_config.name_any();
 
-    // Ensure namespace exists before creating DeployConfig
+    if let Some(existing) = existing_config {
+        let old_ns = existing
+            .namespace()
+            .unwrap_or_else(|| "default".to_string());
+        if old_ns != ns {
+            return Err(Error::App(AppError::Internal(
+                "Namespace change not supported. You must undeploy, delete the config, and recreate it with the new namespace.".to_owned(),
+            )));
+        }
+    }
+
     let template_namespace = std::env::var("TEMPLATE_NAMESPACE").ok();
     ensure_namespace_exists(client, &ns, template_namespace.as_deref())
         .await
         .map_err(Error::App)?;
 
-    let api: Api<DeployConfig> = Api::namespaced(client.clone(), &ns);
+    cr_writers::apply_config_sync(client, &ns, &name, &final_config.spec.spec)
+        .await
+        .map_err(Error::App)?;
+    cr_writers::set_orphaned(client, &ns, &name, false)
+        .await
+        .map_err(Error::App)?;
 
-    // We always create new configs without their specs, since specs are only updated by deploy events.
-    let mut create_config = final_config.clone();
-    create_config.spec.spec.specs = vec![];
-
-    api.create(&PostParams::default(), &create_config).await?;
-
-    api.patch_status(
-        &name,
-        &PatchParams::default(),
-        &Patch::Merge(&serde_json::json!({
-            "status": {
-              "orphaned": false,
-            }
-        })),
-    )
-    .await?;
-
-    log::info!("Created DeployConfig {}/{}", ns, name);
-
+    log::info!(
+        "{} DeployConfig {}/{}",
+        if existing_config.is_some() {
+            "Updated"
+        } else {
+            "Created"
+        },
+        ns,
+        name
+    );
     Ok(())
 }
 
@@ -147,16 +79,9 @@ async fn delete_deploy_config(
 
         log::info!("Deleted DeployConfig {}/{}", ns, name);
     } else {
-        api.patch_status(
-            &name,
-            &PatchParams::default(),
-            &Patch::Merge(&serde_json::json!({
-                "status": {
-                  "orphaned": true,
-                }
-            })),
-        )
-        .await?;
+        cr_writers::set_orphaned(client, &ns, &name, true)
+            .await
+            .map_err(Error::App)?;
 
         log::info!(
             "DeployConfig {}/{} currently deployed, marking as orphaned instead of deleting",
@@ -277,11 +202,8 @@ pub async fn update_deploy_configs_by_defining_repo(
         let final_config = final_deploy_configs.iter().find(|dc| dc.name_any() == name);
 
         match (existing_config, final_config) {
-            (Some(existing_config), Some(final_config)) => {
-                update_deploy_config(client, existing_config, final_config).await?;
-            }
-            (None, Some(final_config)) => {
-                create_deploy_config(client, final_config).await?;
+            (existing_config, Some(final_config)) => {
+                sync_deploy_config(client, existing_config.copied(), final_config).await?;
             }
             (Some(existing_config), None) => {
                 delete_deploy_config(client, existing_config).await?;
@@ -293,80 +215,4 @@ pub async fn update_deploy_configs_by_defining_repo(
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::kubernetes::{
-        deploy_config::{DeployConfigSpec, DeployConfigSpecFields},
-        parameters::{ParameterSource, SHA_PARAMETER},
-        repo::RepositoryBranch,
-        Repository,
-    };
-
-    fn dc(params: &[&str]) -> DeployConfig {
-        let mut parameters = Default::default();
-        for key in params {
-            let rb = RepositoryBranch {
-                owner: "o".into(),
-                repo: (*key).to_lowercase(),
-                branch: "master".into(),
-            };
-            let mut one = ParameterSource::sha_map(Some(rb));
-            let source = one.remove(SHA_PARAMETER);
-            if let Some(source) = source {
-                let map: &mut std::collections::BTreeMap<String, ParameterSource> = &mut parameters;
-                map.insert((*key).to_string(), source);
-            }
-        }
-        DeployConfig::new(
-            "test",
-            DeployConfigSpec {
-                spec: DeployConfigSpecFields {
-                    team: "t".into(),
-                    kind: "service".into(),
-                    parameters,
-                    selections: Default::default(),
-                    patches: vec![],
-                    config: Repository {
-                        owner: "o".into(),
-                        repo: "cfg".into(),
-                    },
-                    specs: vec![],
-                },
-            },
-        )
-    }
-
-    #[test]
-    fn removed_parameters_become_explicit_nulls() -> Result<(), Error> {
-        let existing = dc(&["SHA", "OTHER"]);
-        let desired = dc(&["SHA"]);
-        let patch = spec_merge_patch(&existing, &desired)?;
-        assert!(patch["spec"]["parameters"]["SHA"].is_object());
-        assert_eq!(patch["spec"]["parameters"]["OTHER"], Value::Null);
-        Ok(())
-    }
-
-    #[test]
-    fn dropping_every_parameter_still_nulls_them() -> Result<(), Error> {
-        let existing = dc(&["SHA"]);
-        let desired = dc(&[]);
-        let patch = spec_merge_patch(&existing, &desired)?;
-        assert_eq!(patch["spec"]["parameters"]["SHA"], Value::Null);
-        // Legacy artifact is serialized as null too, clearing it as before.
-        assert_eq!(patch["spec"]["artifact"], Value::Null);
-        Ok(())
-    }
-
-    #[test]
-    fn unchanged_parameters_add_nothing() -> Result<(), Error> {
-        let existing = dc(&["SHA"]);
-        let desired = dc(&["SHA"]);
-        let patch = spec_merge_patch(&existing, &desired)?;
-        assert!(patch["spec"]["parameters"].get("OTHER").is_none());
-        assert!(patch["spec"]["parameters"]["SHA"].is_object());
-        Ok(())
-    }
 }

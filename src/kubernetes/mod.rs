@@ -1,7 +1,7 @@
 pub mod api;
 pub mod controller;
+pub mod cr_writers;
 pub mod deploy_config;
-pub mod deploy_config_status_builder;
 pub mod deploy_handlers;
 pub mod parameters;
 pub mod patches;
@@ -13,7 +13,6 @@ pub mod webhook_handlers;
 
 pub use api::{apply, delete_dynamic_object, ensure_namespace_exists, list_namespace_objects};
 pub use deploy_config::DeployConfig;
-pub use deploy_config_status_builder::DeployConfigStatusBuilder;
 pub use repo::Repository;
 
 /// Error type for controller operations
