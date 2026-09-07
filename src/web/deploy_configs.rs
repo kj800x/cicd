@@ -1,6 +1,7 @@
 #![allow(clippy::expect_used)]
 
 use crate::crab_ext::Octocrabs;
+use crate::db::blocker::Blocker;
 use crate::db::deploy_config_version::DeployConfigVersion;
 use crate::db::git_branch::GitBranch;
 use crate::db::git_commit::GitCommit;
@@ -447,6 +448,7 @@ async fn generate_status_header(
     owner: &str,
     repo: &str,
     client: &Client,
+    active_blockers: usize,
 ) -> Markup {
     let default_branch = config
         .artifact_repository()
@@ -499,6 +501,18 @@ async fn generate_status_header(
                         (AutodeployStatus(true))
                     } @else {
                         (AutodeployStatus(false))
+                    }
+                }
+            }
+            div class="status-item" {
+                "Held: "
+                strong {
+                    @if active_blockers == 0 {
+                        "No"
+                    } @else if active_blockers == 1 {
+                        "Yes, 1 blocker"
+                    } @else {
+                        (format!("Yes, {} blockers", active_blockers))
                     }
                 }
             }
@@ -742,6 +756,13 @@ pub async fn render_preview_content(
     for alert in build_status(action, selected_config, conn).await {
         alerts.push(alert);
     }
+    match Blocker::active_for(conn, &selected_config.name_any()) {
+        Ok(blockers) if !blockers.is_empty() => {
+            alerts.push(crate::web::blockers::render_blocker_alert(&blockers))
+        }
+        Ok(_) => {}
+        Err(e) => log::warn!("Failed to load blockers for preview: {}", e),
+    }
 
     html! {
         @for alert in alerts {
@@ -778,11 +799,15 @@ async fn generate_preview(
         .repo
         .to_string();
 
+    let active_blockers = Blocker::active_for(conn, &selected_config.name_any())
+        .map(|b| b.len())
+        .unwrap_or(0);
+
     // Wrap the preview content in the container markup
     html! {
         div class="preview-container" {
             div class="preview-content" {
-                (generate_status_header(selected_config, &owner, &repo, client).await)
+                (generate_status_header(selected_config, &owner, &repo, client, active_blockers).await)
 
                 div.preview-content-poll-wrapper hx-get=(format!("/fragments/deploy-preview/{}/{}?{}", selected_config.namespace().unwrap_or("default".to_string()), selected_config.name_any(), action.as_params())) hx-trigger="load, every 2s" hx-swap="morph:innerHTML" {
                     (render_preview_content(selected_config, action, conn, namespaced_objs).await)
@@ -961,6 +986,27 @@ pub async fn deploy_configs(
         vec![]
     };
 
+    let held_strip = match Blocker::all_active(&conn) {
+        Ok(blockers) => crate::web::blockers::render_held_strip(&blockers),
+        Err(e) => {
+            log::warn!("Failed to load active blockers: {}", e);
+            html! {}
+        }
+    };
+    let blocker_panel = match selected_config {
+        Some(config) => {
+            let name = config.name_any();
+            let blockers = Blocker::active_for(&conn, &name).unwrap_or_default();
+            let return_url = format!(
+                "/deploy?selected={}&{}",
+                name,
+                Action::from_query(&query).as_params()
+            );
+            crate::web::blockers::render_blocker_panel(&blockers, &name, &return_url)
+        }
+        None => html! {},
+    };
+
     // Render the HTML template using Maud
     let markup = html! {
         (DOCTYPE)
@@ -988,6 +1034,7 @@ pub async fn deploy_configs(
             body.deploy-page hx-ext="morph" {
                 (header::render("deploy"))
                 div class="content" {
+                (held_strip)
                 @if sorted_deploy_configs.is_empty() {
                     div style="text-align:center; margin-top:40px;" {
                         h2 { "No DeployConfigs Found" }
@@ -1098,6 +1145,7 @@ pub async fn deploy_configs(
                                             }
                                         }
                                     }
+                                    (blocker_panel)
                                 }
                             }
 

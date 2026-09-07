@@ -51,9 +51,9 @@ use crate::webhooks::manager::WebhookManager;
 use crate::webhooks::metrics::MetricsHandler;
 use cicd::serve_static_file;
 use web::{
-    all_recent_builds, bootstrap, deploy_config, deploy_history, deploy_history_index, index,
-    resource_logs_download, resource_logs_fragment, resource_logs_page, root, settings_fragment,
-    settings_index, toggle_repo, toggle_team,
+    add_blocker, all_recent_builds, bootstrap, clear_blocker, deploy_config, deploy_history,
+    deploy_history_index, index, resource_logs_download, resource_logs_fragment,
+    resource_logs_page, root, settings_fragment, settings_index, toggle_repo, toggle_team,
 };
 
 async fn start_http(
@@ -87,6 +87,8 @@ async fn start_http(
             app = app
                 .app_data(Data::new(client.clone()))
                 .service(deploy_config)
+                .service(add_blocker)
+                .service(clear_blocker)
                 .route("/mcp", actix_web::web::post().to(mcp::handle_mcp))
         }
 

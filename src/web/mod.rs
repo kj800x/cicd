@@ -1,4 +1,5 @@
 mod all_recent_builds;
+pub mod blockers;
 mod bootstrap;
 mod build_status_helpers;
 mod deploy_configs;
@@ -15,6 +16,7 @@ mod watchdog;
 mod webhook_debug;
 
 pub use all_recent_builds::*;
+pub use blockers::*;
 pub use bootstrap::*;
 pub use deploy_configs::*;
 pub use deploy_history::*;
