@@ -460,6 +460,52 @@ impl DeployConfig {
         apply_patches(&templates, rendered, &self.spec.spec.patches)
     }
 
+    /// Turn rendered manifests into the child objects the controller applies:
+    /// parsed, moved into the test-mode namespace when that is on, with the
+    /// deploy env vars injected and this config's owner reference, labels and
+    /// annotations set. Manifest kinds test mode skips are dropped.
+    ///
+    /// The controller and patch validation both go through here so a dry run
+    /// sees exactly the objects a reconcile would apply.
+    pub fn child_objects(
+        &self,
+        rendered: Vec<serde_json::Value>,
+    ) -> crate::error::AppResult<Vec<DynamicObject>> {
+        use crate::kubernetes::spec_editing::WithInjectedEnv;
+        use crate::kubernetes::test_mode;
+        let ns = self.namespace().unwrap_or_else(|| "default".to_string());
+        let deploy_env_vars = self.deploy_env_vars();
+        let mut objects = Vec::with_capacity(rendered.len());
+        for resource in rendered {
+            let mut obj: DynamicObject = serde_json::from_value(resource).map_err(|e| {
+                crate::error::AppError::Internal(format!(
+                    "JSON didn't look like a Kubernetes object (apiVersion/kind/metadata): {}",
+                    e
+                ))
+            })?;
+
+            if let Some(kind) = obj.types.as_ref().map(|t| t.kind.as_str()) {
+                if test_mode::skips_kind(kind) {
+                    log::debug!("Test mode: skipping {} {}", kind, obj.name_any());
+                    continue;
+                }
+            }
+            if test_mode::ENABLED && obj.metadata.namespace.is_some() {
+                // Manifests name their production namespace; in test mode the
+                // DeployConfig lives in the prefixed one and children follow it.
+                obj.metadata.namespace = Some(ns.clone());
+            }
+
+            obj = obj.with_injected_env(&deploy_env_vars);
+
+            self.ensure_owner_reference(&mut obj);
+            self.ensure_labels(&mut obj);
+            self.ensure_annotations(&mut obj);
+            objects.push(obj);
+        }
+        Ok(objects)
+    }
+
     #[allow(clippy::expect_used)]
     pub fn spec_hash(&self) -> String {
         let mut hasher = Sha256::new();
