@@ -77,6 +77,13 @@ pub fn selection_change(
                 .with_note(intent.note.as_deref(), intent.by.as_deref()),
         )),
         Action::ClearSelection => sha(None),
+        Action::SetParameter { parameter, value } => Some((
+            parameter.clone(),
+            value.as_ref().map(|v| {
+                Selection::pin(v, intent.durability.unwrap_or(Durability::Standing))
+                    .with_note(intent.note.as_deref(), intent.by.as_deref())
+            }),
+        )),
         // Latest honours the selection; rollback and undeploy leave intent
         // alone on purpose; the rest do not touch versions at all.
         Action::DeployLatest
@@ -117,7 +124,7 @@ pub fn check_blockers(
     action: &Action,
     config_name: &str,
 ) -> AppResult<()> {
-    if !action.is_deploy() && !action.is_clear_selection() {
+    if !action.is_deploy() && !action.is_clear_selection() && !action.is_set_parameter() {
         return Ok(());
     }
     let active = Blocker::active_for(conn, config_name)?;
@@ -153,6 +160,7 @@ pub fn to_deploy_action(
         | Action::DeployCommit { .. }
         | Action::Rollback { .. }
         | Action::ClearSelection
+        | Action::SetParameter { .. }
         | Action::Undeploy => match state {
             DeploymentState::DeployedWithArtifact { artifact, config } => DeployAction::Deploy {
                 name: name.to_string(),
@@ -201,6 +209,19 @@ pub async fn run_action(
 ) -> AppResult<DeployAction> {
     let name = kube::ResourceExt::name_any(config);
     check_blockers(conn, action, &name)?;
+    if let Action::SetParameter { parameter, .. } = action {
+        let is_static = config
+            .spec
+            .spec
+            .parameters
+            .get(parameter)
+            .is_some_and(|s| s.default_value().is_some());
+        if !is_static {
+            return Err(AppError::InvalidInput(format!(
+                "{parameter} is not a value parameter of {name}; only value parameters can be set"
+            )));
+        }
+    }
 
     // The selection this action implies is applied to an in-memory copy
     // first, so static parameters resolve against the new intent, and is
@@ -444,6 +465,27 @@ mod tests {
         ] {
             assert_eq!(selection_change(&untouched, Some("master"), &intent), None);
         }
+
+        let set = Action::SetParameter {
+            parameter: "REPLICAS".into(),
+            value: Some("5".into()),
+        };
+        match selection_change(&set, Some("master"), &intent) {
+            Some((param, Some(s))) => {
+                assert_eq!(param, "REPLICAS");
+                assert_eq!(s.pin.as_ref().map(|p| p.value.as_str()), Some("5"));
+                assert_eq!(s.durability, Durability::Standing);
+            }
+            other => panic!("expected a pin on REPLICAS, got {other:?}"),
+        }
+        let reset = Action::SetParameter {
+            parameter: "REPLICAS".into(),
+            value: None,
+        };
+        assert_eq!(
+            selection_change(&reset, Some("master"), &intent),
+            Some(("REPLICAS".to_string(), None))
+        );
     }
 
     #[test]

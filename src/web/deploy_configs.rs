@@ -139,10 +139,10 @@ impl ResolvedVersion {
                 .expect("Failed to get git repo");
 
         match action {
-            Action::DeployLatest | Action::ClearSelection => {
+            Action::DeployLatest | Action::SetParameter { .. } | Action::ClearSelection => {
                 let selection = config.selection(SHA_PARAMETER);
-                let branch_name: &str = match (action, selection.mode()) {
-                    (Action::DeployLatest, Mode::Pin(value)) => {
+                let branch_name: &str = match (action.deploys_latest(), selection.mode()) {
+                    (true, Mode::Pin(value)) => {
                         // Latest of a pinned parameter is the pin itself.
                         return match GitCommit::get_by_sha(value, repo.id, conn).ok().flatten() {
                             Some(commit) => ResolvedVersion::TrackedSha {
@@ -154,7 +154,7 @@ impl ResolvedVersion {
                             },
                         };
                     }
-                    (Action::DeployLatest, Mode::Track(branch)) => branch,
+                    (true, Mode::Track(branch)) => branch,
                     _ => &artifact_repository.branch,
                 };
 
@@ -580,13 +580,14 @@ impl DeploymentState {
 
         match (action, artifact_repository) {
             (Action::DeployLatest, Some(artifact_repository))
+            | (Action::SetParameter { .. }, Some(artifact_repository))
             | (Action::ClearSelection, Some(artifact_repository)) => {
                 // "Latest" means latest according to the parameter's selection:
                 // the default channel, an override branch, or, for a pin, the
                 // pin itself. Clearing the selection always means the default.
                 let selection = config.selection(SHA_PARAMETER);
-                let branch_name: &str = match (action, selection.mode()) {
-                    (Action::DeployLatest, Mode::Pin(value)) => {
+                let branch_name: &str = match (action.deploys_latest(), selection.mode()) {
+                    (true, Mode::Pin(value)) => {
                         let pinned = ShaMaybeBranch {
                             sha: value.to_string(),
                             branch: None,
@@ -607,7 +608,7 @@ impl DeploymentState {
                             artifact: pinned,
                         });
                     }
-                    (Action::DeployLatest, Mode::Track(branch)) => branch,
+                    (true, Mode::Track(branch)) => branch,
                     _ => &artifact_repository.branch,
                 };
 
@@ -636,7 +637,9 @@ impl DeploymentState {
                     },
                 })
             }
-            (Action::DeployLatest, None) | (Action::ClearSelection, None) => {
+            (Action::DeployLatest, None)
+            | (Action::SetParameter { .. }, None)
+            | (Action::ClearSelection, None) => {
                 let deployment_state = config.deployment_state();
                 // FIXME: Misleading: artifact_branch is just the tracking branch.
                 let branch_name = deployment_state.artifact_branch().unwrap_or("master");
@@ -821,6 +824,7 @@ pub async fn render_preview_content(
         | Action::DeployCommit { .. }
         | Action::Rollback { .. }
         | Action::ClearSelection
+        | Action::SetParameter { .. }
         | Action::Undeploy => deploy_transition.format(&owner, &repo).await,
         Action::Bounce => {
             html! {
@@ -941,6 +945,12 @@ pub enum Action {
     /// Drop the SHA parameter's override or pin and deploy the latest of
     /// its default channel.
     ClearSelection,
+    /// Pin a static parameter to `value` (or reset it to its default with
+    /// `None`) and redeploy with the SHA parameter's current selection.
+    SetParameter {
+        parameter: String,
+        value: Option<String>,
+    },
     Bounce,
     ExecuteJob,
     ToggleAutodeploy,
@@ -970,6 +980,13 @@ impl Action {
                 None => Action::DeployLatest,
             },
             "clear-selection" => Action::ClearSelection,
+            "set-parameter" => match query.get("parameter").filter(|p| !p.is_empty()) {
+                Some(parameter) => Action::SetParameter {
+                    parameter: parameter.clone(),
+                    value: query.get("value").filter(|v| !v.is_empty()).cloned(),
+                },
+                None => Action::DeployLatest,
+            },
             "toggle-autodeploy" => Action::ToggleAutodeploy,
             "undeploy" => Action::Undeploy,
             "bounce" => Action::Bounce,
@@ -985,6 +1002,11 @@ impl Action {
             Action::DeployCommit { sha } => format!("action=deploy&sha={}", sha),
             Action::Rollback { revision } => format!("action=rollback&revision={}", revision),
             Action::ClearSelection => "action=clear-selection".to_string(),
+            Action::SetParameter { parameter, value } => format!(
+                "action=set-parameter&parameter={}&value={}",
+                parameter,
+                value.clone().unwrap_or_default()
+            ),
             Action::Bounce => "action=bounce".to_string(),
             Action::ExecuteJob => "action=execute-job".to_string(),
             Action::ToggleAutodeploy => "action=toggle-autodeploy".to_string(),
@@ -1009,6 +1031,7 @@ impl Action {
             }
             Action::Rollback { .. } => "rollback",
             Action::ClearSelection => "clear_selection",
+            Action::SetParameter { .. } => "set_parameter",
             Action::Undeploy => "undeploy",
             Action::Bounce => "bounce",
             Action::ExecuteJob => "execute_job",
@@ -1018,6 +1041,15 @@ impl Action {
 
     pub fn is_clear_selection(&self) -> bool {
         matches!(self, Action::ClearSelection)
+    }
+
+    pub fn is_set_parameter(&self) -> bool {
+        matches!(self, Action::SetParameter { .. })
+    }
+
+    /// Actions that resolve the SHA parameter through its current selection.
+    pub fn deploys_latest(&self) -> bool {
+        matches!(self, Action::DeployLatest | Action::SetParameter { .. })
     }
 
     fn is_toggle_autodeploy(&self) -> bool {
@@ -1126,6 +1158,13 @@ pub async fn deploy_configs(
             log::warn!("Failed to load active blockers: {}", e);
             html! {}
         }
+    };
+    let parameters_panel = match selected_config {
+        Some(config) => {
+            let return_url = format!("/deploy?selected={}", config.name_any());
+            crate::web::parameters::render_parameters_panel(config, &return_url)
+        }
+        None => html! {},
     };
     let blocker_panel = match selected_config {
         Some(config) => {
@@ -1311,9 +1350,13 @@ pub async fn deploy_configs(
                                                 Action::ClearSelection => {
                                                     "Clear and deploy latest"
                                                 }
+                                                Action::SetParameter { .. } => {
+                                                    "Set and deploy"
+                                                }
                                             }
                                         }
                                     }
+                                    (parameters_panel)
                                     (blocker_panel)
                                 }
                             }
@@ -1349,6 +1392,9 @@ pub async fn deploy_configs(
                                             }
                                             Action::ClearSelection => {
                                                 "Back to the default branch for "
+                                            }
+                                            Action::SetParameter { ref parameter, .. } => {
+                                                (format!("Set ${} on ", parameter))
                                             }
                                         }
                                         strong {

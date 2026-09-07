@@ -81,7 +81,6 @@ impl ParameterSource {
         }
     }
 
-    #[allow(dead_code)] // reported over MCP in the next PR
     pub fn type_name(&self) -> &'static str {
         match self {
             ParameterSource::Commit { .. } => "commit",
