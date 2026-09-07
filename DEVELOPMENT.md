@@ -356,6 +356,13 @@ html! {
 - `spec.patches` are JSON Patch operations applied to rendered manifests after substitution, targeted by kind, name and optionally file. A patch that no longer fits fails the render loudly. Manage them from the Patches panel or `add_patch` / `remove_patch`
 - Autodeploy (`src/webhooks/autodeploy.rs`): a successful check run on the branch a config's `SHA` parameter tracks deploys latest, unless the parameter is pinned, the config is a temporary deployment, or a blocker is active
 
+**Writers to the DeployConfig (server-side apply):**
+- Every write to the custom resource goes through `src/kubernetes/cr_writers.rs` as a server-side apply under the manager that owns those keys: `cicd-config-sync` (parameters, config, kind, team; `status.orphaned`), `cicd-deploy` (`spec.specs`; `status.parameters`, `status.config`), `cicd-selections` (the whole selection map), `cicd-patches` (the patch list), `cicd-autodeploy` (`status.autodeploy`)
+- A manager sends the complete set it owns every time; a key it stops sending is removed by the server. Never add a writer that sends part of what a manager owns
+- Clear a map by omitting the key: the server rejects an owned empty map as null. Lists are atomic, so an empty list is fine
+- A field set by anything else (`kubectl patch`, the merge-patch writers before this) stays until that owner releases it. `kubernetes/migration/adopt-field-managers.sh` rewrites `managedFields` once so existing objects belong to these managers; and a hand-set field must be removed by hand
+- `cargo test --features test-crd -- --ignored live_writers` rehearses every writer against the cluster on a TestDeployConfig and asserts ownership and removal
+
 **Environment variables injected into every container:**
 - `CICD_DEPLOY_CONFIG`, `CICD_TEAM`
 - `CICD_TEMPORARY_DEPLOY`: `true` while a temporary override is active. Apps refuse dangerous work (schema migrations) on it; a standing pin does not trip it

@@ -62,6 +62,9 @@ new, then remove the old fields. `migration/` holds the tooling:
 - `migration-status.sh`: legacy and `parameters` fields side by side, exits
   non-zero if any config is inconsistent. This is the gate before deploying a
   controller that reads only the new fields.
+- `adopt-field-managers.sh`: rewrite every DeployConfig's `managedFields` so each
+  field belongs to the server-side-apply manager that writes it; run once after
+  deploying the controller that uses them (`--dry-run` to preview).
 - `migrate-parameters.sh`: emergency forward fill for a config the controller's
   own backfill did not reach.
 
