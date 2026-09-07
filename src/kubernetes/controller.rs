@@ -3,6 +3,7 @@ use crate::error::format_error_chain;
 use crate::kubernetes::api::ListMode;
 use crate::kubernetes::repo::DeploymentState;
 use crate::kubernetes::spec_editing::{WithInjectedEnv, WithVersion};
+use crate::kubernetes::test_mode;
 use crate::kubernetes::{
     apply, delete_dynamic_object, ensure_namespace_exists, list_namespace_objects,
 };
@@ -52,6 +53,18 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> AppRes
                 e
             ))
         })?;
+
+        if let Some(kind) = obj.types.as_ref().map(|t| t.kind.as_str()) {
+            if test_mode::skips_kind(kind) {
+                log::debug!("Test mode: skipping {} {}", kind, obj.name_any());
+                continue;
+            }
+        }
+        if test_mode::ENABLED && obj.metadata.namespace.is_some() {
+            // Manifests name their production namespace; in test mode the
+            // DeployConfig lives in the prefixed one and children follow it.
+            obj.metadata.namespace = Some(ns.clone());
+        }
 
         if let DeploymentState::DeployedWithArtifact { artifact, .. } = dc.deployment_state() {
             obj = obj.with_version(&artifact.sha);

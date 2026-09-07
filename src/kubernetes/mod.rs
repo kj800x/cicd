@@ -6,6 +6,7 @@ pub mod deploy_handlers;
 pub mod parameters;
 pub mod repo;
 pub mod spec_editing;
+pub mod test_mode;
 pub mod webhook_handlers;
 
 pub use api::{apply, delete_dynamic_object, ensure_namespace_exists, list_namespace_objects};

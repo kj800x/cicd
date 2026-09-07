@@ -19,6 +19,7 @@ use crate::{
         deploy_config::{DeployConfig, DeployConfigSpec, DeployConfigSpecFields},
         parameters::ParameterSource,
         repo::RepositoryBranch,
+        test_mode,
         webhook_handlers::{
             orphan_deploy_configs_for_repo, update_deploy_configs_by_defining_repo,
         },
@@ -530,7 +531,7 @@ pub async fn fetch_deploy_configs_by_sha(
             },
             metadata: ObjectMeta {
                 name: Some(config_name.to_owned()),
-                namespace: Some(config.namespace),
+                namespace: Some(test_mode::deploy_namespace(&config.namespace)),
                 ..ObjectMeta::default()
             },
             status: None,
