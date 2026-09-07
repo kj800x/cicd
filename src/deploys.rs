@@ -3,7 +3,7 @@
 //! The web handler and the MCP tools used to carry identical copies of this
 //! sequence: resolve the requested action against the config's current
 //! state, turn it into a [`DeployAction`], execute it against the cluster,
-//! mirror the result to GitHub, and record a deploy event. Keeping it here
+//! mirror the result to GitHub, and record a revision. Keeping it here
 //! means anything that must apply to every deploy (a gate, an audit record)
 //! is written once.
 
@@ -15,7 +15,6 @@ use crate::{
     crab_ext::Octocrabs,
     db::{
         blocker::Blocker,
-        deploy_event::DeployEvent,
         revision::{NewRevision, Revision},
     },
     error::{AppError, AppResult},
@@ -97,10 +96,9 @@ pub fn to_deploy_action(action: &Action, name: &str, state: DeploymentState) -> 
 /// says where the action came from (`web`, `mcp`) and is recorded on the
 /// revision.
 ///
-/// The GitHub deployment mirror, the deploy event and the revision are
-/// bookkeeping: their failures are logged, not returned, because the cluster
-/// change has already happened by then and reporting it as a failure would
-/// mislead.
+/// The GitHub deployment mirror and the revision are bookkeeping: their
+/// failures are logged, not returned, because the cluster change has already
+/// happened by then and reporting it as a failure would mislead.
 pub async fn run_action(
     action: &Action,
     config: &DeployConfig,
@@ -120,16 +118,6 @@ pub async fn run_action(
 
     // Best-effort: mirror the new state into the GitHub Deployments API.
     crate::github_deployments::report_deploy_action(octocrabs, config, &deploy_action).await;
-
-    match DeployEvent::from_user_deploy_action(&deploy_action, conn, config) {
-        Ok(Some(event)) => {
-            if let Err(e) = event.insert(conn) {
-                log::error!("Failed to insert deploy event for {}: {}", name, e);
-            }
-        }
-        Ok(None) => {}
-        Err(e) => log::error!("Failed to build deploy event for {}: {}", name, e),
-    }
 
     if let Some(mut new) = NewRevision::from_deploy_action(&deploy_action, config, conn, actor) {
         if let Action::Rollback { revision } = action {

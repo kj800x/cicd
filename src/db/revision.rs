@@ -2,9 +2,9 @@
 //!
 //! A revision captures everything a deploy was made from: the config commit,
 //! and for every parameter the value that was deployed and the channel it
-//! was resolved from. Rollback will replay a revision; the history page will
-//! read them. For now they are written beside `deploy_event` and read by
-//! nothing, so the shape can settle before anything depends on it.
+//! was resolved from. Rollback replays a revision and the history page lists
+//! them. They replaced the `deploy_event` table, which is kept only because
+//! migration 5 reads it.
 
 use chrono::Utc;
 use r2d2::PooledConnection;
