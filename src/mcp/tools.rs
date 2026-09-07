@@ -5,13 +5,11 @@ use serde_json::{json, Value};
 
 use crate::build_status::BuildStatus;
 use crate::crab_ext::Octocrabs;
-use crate::db::deploy_event::DeployEvent;
 use crate::db::git_branch::GitBranch;
 use crate::db::git_repo::GitRepo;
 use crate::kubernetes::api::{
     get_all_deploy_configs, get_deploy_config, list_namespace_objects, ListMode,
 };
-use crate::kubernetes::deploy_handlers::DeployAction;
 use crate::kubernetes::repo::DeploymentState;
 use crate::web::Action;
 use crate::web::ResourceStatuses;
@@ -434,64 +432,8 @@ async fn execute_deploy_action(
         Err(e) => return ToolCallResult::error(format!("Database error: {}", e)),
     };
 
-    let deployment_state = match DeploymentState::from_action(action, config, &conn) {
-        Ok(s) => s,
-        Err(e) => {
-            return ToolCallResult::error(format!("Failed to resolve deployment state: {}", e));
-        }
-    };
-
-    let deploy_action = match action {
-        Action::DeployLatest
-        | Action::DeployBranch { .. }
-        | Action::DeployCommit { .. }
-        | Action::Undeploy => match deployment_state {
-            DeploymentState::DeployedWithArtifact { artifact, config } => DeployAction::Deploy {
-                name: name.to_string(),
-                artifact: Some(artifact),
-                config,
-            },
-            DeploymentState::DeployedOnlyConfig { config } => DeployAction::Deploy {
-                name: name.to_string(),
-                artifact: None,
-                config,
-            },
-            DeploymentState::Undeployed => DeployAction::Undeploy {
-                name: name.to_string(),
-            },
-        },
-        Action::Bounce => DeployAction::Bounce {
-            name: name.to_string(),
-        },
-        Action::ExecuteJob => DeployAction::ExecuteJob {
-            name: name.to_string(),
-        },
-        Action::ToggleAutodeploy => DeployAction::ToggleAutodeploy {
-            name: name.to_string(),
-        },
-    };
-
-    if let Err(e) = deploy_action
-        .execute(client, octocrabs, config.config_repository())
-        .await
-    {
+    if let Err(e) = crate::deploys::run_action(action, config, client, octocrabs, &conn).await {
         return ToolCallResult::error(format!("Failed to execute action: {}", e));
-    }
-
-    // Best-effort: mirror the new state into the GitHub Deployments API.
-    crate::github_deployments::report_deploy_action(octocrabs, config, &deploy_action).await;
-
-    // Log deploy event
-    match DeployEvent::from_user_deploy_action(&deploy_action, &conn, config) {
-        Ok(Some(event)) => {
-            if let Err(e) = event.insert(&conn) {
-                log::error!("Failed to insert MCP deploy event: {}", e);
-            }
-        }
-        Ok(None) => {}
-        Err(e) => {
-            log::error!("Failed to create MCP deploy event: {}", e);
-        }
     }
 
     let action_desc = match action {

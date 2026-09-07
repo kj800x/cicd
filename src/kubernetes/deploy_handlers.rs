@@ -40,16 +40,6 @@ pub enum DeployAction {
 }
 
 impl DeployAction {
-    pub fn config_name(&self) -> &str {
-        match self {
-            DeployAction::Bounce { name } => name,
-            DeployAction::ExecuteJob { name } => name,
-            DeployAction::Deploy { name, .. } => name,
-            DeployAction::Undeploy { name } => name,
-            DeployAction::ToggleAutodeploy { name } => name,
-        }
-    }
-
     pub fn action_type(&self) -> &'static str {
         match self {
             DeployAction::Bounce { .. } => "bounce",
