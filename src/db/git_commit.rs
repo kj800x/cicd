@@ -56,6 +56,28 @@ impl GitCommit {
         Ok(commit)
     }
 
+    /// Commits of a repo whose sha starts with `prefix`, for expanding an
+    /// abbreviated sha. `prefix` must already be validated as hex.
+    pub fn find_by_prefix(
+        prefix: &str,
+        repo_id: u64,
+        conn: &PooledConnection<SqliteConnectionManager>,
+    ) -> AppResult<Vec<Self>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, sha, repo_id, message, author, committer, timestamp FROM git_commit \
+             WHERE repo_id = ?1 AND sha LIKE ?2 LIMIT 3",
+        )?;
+        let pattern = format!("{prefix}%");
+        let rows = stmt.query_map(params![repo_id, pattern], |row| {
+            Ok(GitCommit::from_row(row))
+        })?;
+        let mut commits = Vec::new();
+        for row in rows {
+            commits.push(row??);
+        }
+        Ok(commits)
+    }
+
     pub fn get_parents(
         &self,
         conn: &PooledConnection<SqliteConnectionManager>,

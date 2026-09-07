@@ -17,6 +17,8 @@ use crate::{
     crab_ext::Octocrabs,
     db::{
         blocker::Blocker,
+        git_commit::GitCommit,
+        git_repo::GitRepo,
         revision::{NewRevision, Revision},
     },
     error::{AppError, AppResult},
@@ -169,6 +171,69 @@ pub fn temporary_changes(config: &DeployConfig) -> TemporaryChanges {
         selections,
         patches: (removed_patches > 0).then_some(kept),
         removed_patches,
+    }
+}
+
+/// What a person typed as a commit sha.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ShaForm {
+    /// Forty hex characters: usable as is.
+    Full,
+    /// Seven to thirty-nine hex characters: must be expanded to a known commit.
+    Abbreviated,
+    /// Not a sha at all.
+    Invalid,
+}
+
+pub fn sha_form(sha: &str) -> ShaForm {
+    let hex = sha.len() >= 7 && sha.len() <= 40 && sha.bytes().all(|b| b.is_ascii_hexdigit());
+    match (hex, sha.len()) {
+        (true, 40) => ShaForm::Full,
+        (true, _) => ShaForm::Abbreviated,
+        (false, _) => ShaForm::Invalid,
+    }
+}
+
+/// The full sha to deploy for what was typed. Image tags are
+/// `commit-<full sha>`, so an abbreviated sha deployed as typed would name
+/// an image that does not exist; it is expanded against the commits known
+/// for the artifact repo and refused unless exactly one matches.
+fn full_commit_sha(
+    conn: &PooledConnection<SqliteConnectionManager>,
+    config: &DeployConfig,
+    sha: &str,
+) -> AppResult<String> {
+    let sha = sha.trim();
+    match sha_form(sha) {
+        ShaForm::Full => Ok(sha.to_ascii_lowercase()),
+        ShaForm::Invalid => Err(AppError::InvalidInput(format!(
+            "'{sha}' is not a commit sha (expected 7 to 40 hex characters)"
+        ))),
+        ShaForm::Abbreviated => {
+            let name = kube::ResourceExt::name_any(config);
+            let repo = config.artifact_repository().ok_or_else(|| {
+                AppError::InvalidInput(format!("{name} has no commit parameter to pin"))
+            })?;
+            let git_repo =
+                GitRepo::get_by_name(&repo.owner, &repo.repo, conn)?.ok_or_else(|| {
+                    AppError::InvalidInput(format!(
+                        "{}/{} is not a known repository",
+                        repo.owner, repo.repo
+                    ))
+                })?;
+            let matches = GitCommit::find_by_prefix(&sha.to_ascii_lowercase(), git_repo.id, conn)?;
+            match matches.as_slice() {
+                [one] => Ok(one.sha.clone()),
+                [] => Err(AppError::InvalidInput(format!(
+                    "No commit of {}/{} starts with {sha}; pass the full 40-character sha",
+                    repo.owner, repo.repo
+                ))),
+                _ => Err(AppError::InvalidInput(format!(
+                    "{sha} is ambiguous in {}/{}; pass a longer or full sha",
+                    repo.owner, repo.repo
+                ))),
+            }
+        }
     }
 }
 
@@ -381,6 +446,17 @@ pub async fn run_action(
     // not Sync, and the webhook handlers need this future to be Send.
     let conn = pool.get()?;
     check_blockers(&conn, action, &name)?;
+    // An abbreviated sha is expanded before anything is recorded or applied.
+    let normalized;
+    let action = match action {
+        Action::DeployCommit { sha } => {
+            normalized = Action::DeployCommit {
+                sha: full_commit_sha(&conn, config, sha)?,
+            };
+            &normalized
+        }
+        other => other,
+    };
     if let Action::SetParameter { parameter, .. } = action {
         let is_static = config
             .spec
@@ -837,5 +913,14 @@ mod tests {
         )
         .is_none());
         Ok(())
+    }
+    #[test]
+    fn sha_forms_are_classified() {
+        assert_eq!(sha_form(&"a".repeat(40)), ShaForm::Full);
+        assert_eq!(sha_form("911fcbb"), ShaForm::Abbreviated);
+        assert_eq!(sha_form(&"b".repeat(39)), ShaForm::Abbreviated);
+        assert_eq!(sha_form("911fcb"), ShaForm::Invalid, "too short");
+        assert_eq!(sha_form("master"), ShaForm::Invalid);
+        assert_eq!(sha_form(&"c".repeat(41)), ShaForm::Invalid);
     }
 }

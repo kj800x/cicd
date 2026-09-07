@@ -61,14 +61,14 @@ pub fn tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "deploy".to_string(),
-            description: "Deploy a config. With no branch or sha, deploys the latest according to the config's selection (the default branch, an override branch, or a pin). A branch records a track override; a sha records a pin. Both are sticky until cleared with clear_selection."
+            description: "Deploy a config. Call it with only `name`: that deploys the latest according to the config's selection (its default branch, or whatever override is in place), which is the right deploy in almost every case, including after a build of a new commit. Pass `sha` or `branch` ONLY when the person explicitly asked to pin an exact commit or to track another branch: both record a sticky override on the config (a pin or a track) that outlives this deploy and must later be undone with clear_selection or end_temporary_deployment. Never pass `sha` just to name the commit you expect latest to be."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "name": { "type": "string", "description": "Name of the deploy config" },
-                    "branch": { "type": "string", "description": "Branch to deploy from (records a track override)" },
-                    "sha": { "type": "string", "description": "Specific commit SHA to deploy (records a pin)" },
+                    "branch": { "type": "string", "description": "Only when the person asked to track a different branch: records a track override." },
+                    "sha": { "type": "string", "description": "Only when the person asked to pin an exact commit: records a standing pin. The full 40-character sha; an abbreviated sha (7+ characters) is expanded if it names exactly one known commit, otherwise refused." },
                     "durability": { "type": "string", "enum": ["temporary", "standing"], "description": "How long the override is meant to last. Temporary marks the config as a temporary deployment. Defaults: temporary for a branch, standing for a sha." },
                     "note": { "type": "string", "description": "Why this override exists" },
                     "by": { "type": "string", "description": "Who is making it" }
