@@ -10,8 +10,6 @@
 //!
 //! Selections live under `spec.selections`, keyed by parameter name, and are
 //! written by the deploy handler, never by config sync.
-#![allow(dead_code)] // the deploy path starts writing and resolving these in the next PR
-
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -27,6 +25,7 @@ pub enum Durability {
 }
 
 impl Durability {
+    #[allow(dead_code)] // the deploy page renders this in the next PR
     pub fn as_str(self) -> &'static str {
         match self {
             Durability::Temporary => "temporary",

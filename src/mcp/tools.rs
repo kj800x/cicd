@@ -688,7 +688,9 @@ async fn execute_deploy_action(
         Err(e) => return ToolCallResult::error(format!("Database error: {}", e)),
     };
 
-    match crate::deploys::run_action(action, config, client, octocrabs, &conn, "mcp").await {
+    let intent = crate::deploys::SelectionIntent::default();
+    match crate::deploys::run_action(action, config, client, octocrabs, &conn, "mcp", &intent).await
+    {
         Ok(_) => {}
         Err(crate::error::AppError::Blocked(message)) => {
             return ToolCallResult::error(format!(
@@ -707,6 +709,7 @@ async fn execute_deploy_action(
         Action::DeployBranch { branch } => format!("Deploy (branch: {})", branch),
         Action::DeployCommit { sha } => format!("Deploy (sha: {})", sha),
         Action::Rollback { revision } => format!("Rollback (revision: {})", revision),
+        Action::ClearSelection => "Clear selection and deploy latest".to_string(),
         Action::Undeploy => "Undeploy".to_string(),
         Action::Bounce => "Bounce".to_string(),
         Action::ExecuteJob => "Execute job".to_string(),

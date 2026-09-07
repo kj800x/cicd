@@ -52,8 +52,16 @@ pub async fn rollback(
     }
 
     let action = Action::Rollback { revision };
-    let result =
-        crate::deploys::run_action(&action, &config, &client, &octocrabs, &conn, "web").await;
+    let result = crate::deploys::run_action(
+        &action,
+        &config,
+        &client,
+        &octocrabs,
+        &conn,
+        "web",
+        &crate::deploys::SelectionIntent::default(),
+    )
+    .await;
     crate::metrics::get().deploy_actions.add(
         1,
         &[

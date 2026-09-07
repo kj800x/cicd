@@ -12,6 +12,7 @@ use crate::kubernetes::api::{
 };
 use crate::kubernetes::parameters::SHA_PARAMETER;
 use crate::kubernetes::repo::{DeploymentState, ShaMaybeBranch};
+use crate::kubernetes::selections::Mode;
 use crate::kubernetes::{list_namespace_objects, DeployConfig};
 use crate::prelude::*;
 use crate::web::team_prefs::TeamsCookie;
@@ -138,9 +139,24 @@ impl ResolvedVersion {
                 .expect("Failed to get git repo");
 
         match action {
-            Action::DeployLatest => {
-                let deployment_state = config.deployment_state();
-                let branch_name = deployment_state.artifact_branch().unwrap_or("master");
+            Action::DeployLatest | Action::ClearSelection => {
+                let selection = config.selection(SHA_PARAMETER);
+                let branch_name: &str = match (action, selection.mode()) {
+                    (Action::DeployLatest, Mode::Pin(value)) => {
+                        // Latest of a pinned parameter is the pin itself.
+                        return match GitCommit::get_by_sha(value, repo.id, conn).ok().flatten() {
+                            Some(commit) => ResolvedVersion::TrackedSha {
+                                sha: commit.sha,
+                                build_time: commit.timestamp as u64,
+                            },
+                            None => ResolvedVersion::UnknownSha {
+                                sha: value.to_string(),
+                            },
+                        };
+                    }
+                    (Action::DeployLatest, Mode::Track(branch)) => branch,
+                    _ => &artifact_repository.branch,
+                };
 
                 let branch = GitBranch::get_by_name(branch_name, repo.id, conn)
                     .ok()
@@ -557,14 +573,37 @@ impl DeploymentState {
         let artifact_repository = config.artifact_repository();
 
         match (action, artifact_repository) {
-            (Action::DeployLatest, Some(artifact_repository)) => {
-                // In this case we are deploying the latest commit of the tracked branch and we know that the config has an artifact repository.
-                // We don't know the tracked branch yet (it could be the default or a custom branch, so we need to use config.deployment_state() to see what it is.)
-                // There also might not be a tracked branch if a specific commit is currently deployed, in which case we should deploy the latest commit of the default branch.
-                let deployment_state = config.deployment_state();
-                let branch_name = deployment_state
-                    .artifact_branch()
-                    .unwrap_or(&artifact_repository.branch);
+            (Action::DeployLatest, Some(artifact_repository))
+            | (Action::ClearSelection, Some(artifact_repository)) => {
+                // "Latest" means latest according to the parameter's selection:
+                // the default channel, an override branch, or, for a pin, the
+                // pin itself. Clearing the selection always means the default.
+                let selection = config.selection(SHA_PARAMETER);
+                let branch_name: &str = match (action, selection.mode()) {
+                    (Action::DeployLatest, Mode::Pin(value)) => {
+                        let pinned = ShaMaybeBranch {
+                            sha: value.to_string(),
+                            branch: None,
+                        };
+                        return Ok(DeploymentState::DeployedWithArtifact {
+                            config: if artifact_repository.clone().into_repo()
+                                == config.config_repository()
+                            {
+                                pinned.clone()
+                            } else {
+                                ShaMaybeBranch::latest_for_branch(
+                                    config.config_repository(),
+                                    "master",
+                                    BuildFilter::Any,
+                                    conn,
+                                )?
+                            },
+                            artifact: pinned,
+                        });
+                    }
+                    (Action::DeployLatest, Mode::Track(branch)) => branch,
+                    _ => &artifact_repository.branch,
+                };
 
                 Ok(DeploymentState::DeployedWithArtifact {
                     artifact: ShaMaybeBranch::latest_for_branch(
@@ -591,7 +630,7 @@ impl DeploymentState {
                     },
                 })
             }
-            (Action::DeployLatest, None) => {
+            (Action::DeployLatest, None) | (Action::ClearSelection, None) => {
                 let deployment_state = config.deployment_state();
                 // FIXME: Misleading: artifact_branch is just the tracking branch.
                 let branch_name = deployment_state.artifact_branch().unwrap_or("master");
@@ -775,6 +814,7 @@ pub async fn render_preview_content(
         | Action::DeployBranch { .. }
         | Action::DeployCommit { .. }
         | Action::Rollback { .. }
+        | Action::ClearSelection
         | Action::Undeploy => deploy_transition.format(&owner, &repo).await,
         Action::Bounce => {
             html! {
@@ -887,6 +927,9 @@ pub enum Action {
     Rollback {
         revision: i64,
     },
+    /// Drop the SHA parameter's override or pin and deploy the latest of
+    /// its default channel.
+    ClearSelection,
     Bounce,
     ExecuteJob,
     ToggleAutodeploy,
@@ -915,6 +958,7 @@ impl Action {
                 Some(revision) => Action::Rollback { revision },
                 None => Action::DeployLatest,
             },
+            "clear-selection" => Action::ClearSelection,
             "toggle-autodeploy" => Action::ToggleAutodeploy,
             "undeploy" => Action::Undeploy,
             "bounce" => Action::Bounce,
@@ -929,6 +973,7 @@ impl Action {
             Action::DeployBranch { branch } => format!("action=deploy&branch={}", branch),
             Action::DeployCommit { sha } => format!("action=deploy&sha={}", sha),
             Action::Rollback { revision } => format!("action=rollback&revision={}", revision),
+            Action::ClearSelection => "action=clear-selection".to_string(),
             Action::Bounce => "action=bounce".to_string(),
             Action::ExecuteJob => "action=execute-job".to_string(),
             Action::ToggleAutodeploy => "action=toggle-autodeploy".to_string(),
@@ -952,11 +997,16 @@ impl Action {
                 "deploy"
             }
             Action::Rollback { .. } => "rollback",
+            Action::ClearSelection => "clear_selection",
             Action::Undeploy => "undeploy",
             Action::Bounce => "bounce",
             Action::ExecuteJob => "execute_job",
             Action::ToggleAutodeploy => "toggle_autodeploy",
         }
+    }
+
+    pub fn is_clear_selection(&self) -> bool {
+        matches!(self, Action::ClearSelection)
     }
 
     fn is_toggle_autodeploy(&self) -> bool {
@@ -1217,6 +1267,9 @@ pub async fn deploy_configs(
                                                 Action::Rollback { .. } => {
                                                     "Roll back"
                                                 }
+                                                Action::ClearSelection => {
+                                                    "Clear and deploy latest"
+                                                }
                                             }
                                         }
                                     }
@@ -1252,6 +1305,9 @@ pub async fn deploy_configs(
                                             }
                                             Action::Rollback { revision } => {
                                                 (format!("Rollback to revision {} of ", revision))
+                                            }
+                                            Action::ClearSelection => {
+                                                "Back to the default branch for "
                                             }
                                         }
                                         strong {
@@ -1344,8 +1400,10 @@ pub async fn deploy_config(
         form.get("sha").unwrap_or(&"".to_string())
     );
 
+    let intent = crate::deploys::SelectionIntent::from_form(&form);
     let result =
-        crate::deploys::run_action(&action, &config, &client, &octocrabs, &conn, "web").await;
+        crate::deploys::run_action(&action, &config, &client, &octocrabs, &conn, "web", &intent)
+            .await;
     let (action_type, outcome) = match &result {
         Ok(deploy_action) => (deploy_action.action_type(), "success"),
         Err(_) => (action.action_type(), "error"),

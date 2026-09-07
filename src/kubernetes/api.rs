@@ -176,6 +176,27 @@ pub async fn set_deploy_config_specs(
     Ok(())
 }
 
+/// Set or remove one parameter's selection under `spec.selections`.
+/// `None` sends a JSON null, which a merge patch treats as delete.
+pub async fn patch_deploy_config_selection(
+    client: &Client,
+    namespace: &str,
+    name: &str,
+    parameter: &str,
+    selection: Option<&crate::kubernetes::selections::Selection>,
+) -> AppResult<()> {
+    let api: Api<DeployConfig> = Api::namespaced(client.clone(), namespace);
+    let value = match selection {
+        Some(s) => serde_json::to_value(s)?,
+        None => serde_json::Value::Null,
+    };
+    let patch = Patch::Merge(serde_json::json!({ "spec": { "selections": { parameter: value } } }));
+    api.patch(name, &PatchParams::default(), &patch)
+        .await
+        .map_err(AppError::Kubernetes)?;
+    Ok(())
+}
+
 /// Update the DeployConfig status according to the given status builder
 pub async fn update_deploy_config_status(
     client: &Client,
