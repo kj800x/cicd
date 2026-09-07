@@ -126,8 +126,19 @@ pub fn tool_definitions() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "end_temporary_deployment".to_string(),
+            description: "Clear every temporary selection (SHA override, pinned value parameters) and remove every temporary patch, then deploy latest of what remains. Standing overrides and patches stay. Refused when nothing is temporary.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of the deploy config" }
+                },
+                "required": ["name"]
+            }),
+        },
+        Tool {
             name: "clear_selection".to_string(),
-            description: "Drop a config's branch override or pin and deploy the latest of its default branch. Ends a temporary deployment.".to_string(),
+            description: "Drop a config's branch override or pin (temporary or standing) and deploy the latest of its default branch. To undo everything temporary at once, use end_temporary_deployment.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -350,6 +361,16 @@ pub async fn dispatch(
         "deploy" => handle_deploy(arguments, client, pool, octocrabs).await,
         "clear_selection" => {
             handle_action("clear_selection", arguments, client, pool, octocrabs).await
+        }
+        "end_temporary_deployment" => {
+            handle_action(
+                "end_temporary_deployment",
+                arguments,
+                client,
+                pool,
+                octocrabs,
+            )
+            .await
         }
         "set_parameter" => handle_set_parameter(arguments, client, pool, octocrabs).await,
         "add_patch" => handle_patch_change(arguments, true, client, pool, octocrabs).await,
@@ -827,6 +848,14 @@ async fn handle_action(
                 );
             }
             Action::ClearSelection
+        }
+        "end_temporary_deployment" => {
+            if config.is_orphaned() {
+                return ToolCallResult::error(
+                    "Cannot deploy an orphaned config. Only undeploy is allowed.".to_string(),
+                );
+            }
+            Action::EndTemporary
         }
         "bounce" => {
             if config.is_orphaned() {

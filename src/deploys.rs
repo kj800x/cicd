@@ -116,6 +116,23 @@ impl TemporaryChanges {
         self.selections.is_empty() && self.patches.is_none()
     }
 
+    /// What ending would do, in the present tense, such as
+    /// `clear SHA, GREETING; remove 2 patches`. Shown before the action.
+    pub fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.selections.is_empty() {
+            parts.push(format!("clear {}", self.selections.join(", ")));
+        }
+        if self.removed_patches > 0 {
+            parts.push(format!(
+                "remove {} patch{}",
+                self.removed_patches,
+                if self.removed_patches == 1 { "" } else { "es" }
+            ));
+        }
+        parts.join("; ")
+    }
+
     /// A one-line summary for the revision, such as
     /// `ended temporary deployment: cleared SHA, GREETING; removed 2 patches`.
     pub fn describe(&self) -> String {
