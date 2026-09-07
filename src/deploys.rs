@@ -86,13 +86,72 @@ pub fn selection_change(
             }),
         )),
         // Latest honours the selection; rollback and undeploy leave intent
-        // alone on purpose; the rest do not touch versions at all.
+        // alone on purpose; ending a temporary deployment computes its
+        // changes from the config (see [`temporary_changes`]); the rest do
+        // not touch versions at all.
         Action::DeployLatest
+        | Action::EndTemporary
         | Action::Rollback { .. }
         | Action::Undeploy
         | Action::Bounce
         | Action::ExecuteJob
         | Action::ToggleAutodeploy => None,
+    }
+}
+
+/// Everything temporary on a config: the selections to clear and, when any
+/// patch is temporary, the patch list with those removed. This is what
+/// "End temporary deployment" undoes in one step.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TemporaryChanges {
+    /// Parameters whose selection is temporary, in name order.
+    pub selections: Vec<String>,
+    /// The patch list without its temporary patches, if there were any.
+    pub patches: Option<Vec<ManifestPatch>>,
+    removed_patches: usize,
+}
+
+impl TemporaryChanges {
+    pub fn is_empty(&self) -> bool {
+        self.selections.is_empty() && self.patches.is_none()
+    }
+
+    /// A one-line summary for the revision, such as
+    /// `ended temporary deployment: cleared SHA, GREETING; removed 2 patches`.
+    pub fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.selections.is_empty() {
+            parts.push(format!("cleared {}", self.selections.join(", ")));
+        }
+        if self.removed_patches > 0 {
+            parts.push(format!(
+                "removed {} patch{}",
+                self.removed_patches,
+                if self.removed_patches == 1 { "" } else { "es" }
+            ));
+        }
+        format!("ended temporary deployment: {}", parts.join("; "))
+    }
+}
+
+/// What ending a temporary deployment would clear on `config`. Standing
+/// overrides and standing patches are not temporary and stay.
+pub fn temporary_changes(config: &DeployConfig) -> TemporaryChanges {
+    let selections: Vec<String> = config
+        .spec
+        .spec
+        .selections
+        .iter()
+        .filter(|(_, s)| s.is_temporary())
+        .map(|(name, _)| name.clone())
+        .collect();
+    let all = &config.spec.spec.patches;
+    let kept: Vec<ManifestPatch> = all.iter().filter(|p| !p.is_temporary()).cloned().collect();
+    let removed_patches = all.len() - kept.len();
+    TemporaryChanges {
+        selections,
+        patches: (removed_patches > 0).then_some(kept),
+        removed_patches,
     }
 }
 
@@ -212,7 +271,11 @@ pub fn check_blockers(
     action: &Action,
     config_name: &str,
 ) -> AppResult<()> {
-    if !action.is_deploy() && !action.is_clear_selection() && !action.is_set_parameter() {
+    if !action.is_deploy()
+        && !action.is_clear_selection()
+        && !action.is_set_parameter()
+        && !action.is_end_temporary()
+    {
         return Ok(());
     }
     let active = Blocker::active_for(conn, config_name)?;
@@ -249,6 +312,7 @@ pub fn to_deploy_action(
         | Action::Rollback { .. }
         | Action::ClearSelection
         | Action::SetParameter { .. }
+        | Action::EndTemporary
         | Action::Undeploy => match state {
             DeploymentState::DeployedWithArtifact { artifact, config } => DeployAction::Deploy {
                 name: name.to_string(),
@@ -314,13 +378,30 @@ pub async fn run_action(
         }
     }
 
-    // The selection this action implies is applied to an in-memory copy
-    // first, so static parameters resolve against the new intent, and is
-    // persisted after the deploy succeeds.
+    // The selection changes this action implies are applied to an in-memory
+    // copy first, so static parameters resolve against the new intent, and
+    // are persisted after the deploy succeeds. Ending a temporary deployment
+    // is the one action that changes several selections and the patch list
+    // at once.
     let default_branch = config.artifact_repository().map(|r| r.branch);
-    let change = selection_change(action, default_branch.as_deref(), intent);
+    let mut changes: Vec<(String, Option<Selection>)> = Vec::new();
+    let mut new_patches: Option<Vec<ManifestPatch>> = None;
+    let mut reason: Option<String> = None;
+    if action.is_end_temporary() {
+        let temporary = temporary_changes(config);
+        if temporary.is_empty() {
+            return Err(AppError::InvalidInput(format!(
+                "{name} has nothing temporary to end"
+            )));
+        }
+        reason = Some(temporary.describe());
+        changes.extend(temporary.selections.iter().map(|p| (p.clone(), None)));
+        new_patches = temporary.patches;
+    } else if let Some(change) = selection_change(action, default_branch.as_deref(), intent) {
+        changes.push(change);
+    }
     let mut effective = config.clone();
-    if let Some((parameter, selection)) = &change {
+    for (parameter, selection) in &changes {
         match selection {
             Some(s) => {
                 effective
@@ -333,6 +414,9 @@ pub async fn run_action(
                 effective.spec.spec.selections.remove(parameter);
             }
         }
+    }
+    if let Some(patches) = &new_patches {
+        effective.spec.spec.patches = patches.clone();
     }
 
     let state = DeploymentState::from_action(action, &effective, &conn)?;
@@ -350,12 +434,19 @@ pub async fn run_action(
     // Record the intent behind the deploy. Bookkeeping like the rest: the
     // deploy has happened, and a missing selection only means the next
     // "latest" derives it from what is deployed.
-    if let Some((parameter, selection)) = &change {
-        let ns = kube::ResourceExt::namespace(config).unwrap_or_else(|| "default".to_string());
+    let ns = kube::ResourceExt::namespace(config).unwrap_or_else(|| "default".to_string());
+    for (parameter, selection) in &changes {
         if let Err(e) =
             patch_deploy_config_selection(client, &ns, &name, parameter, selection.as_ref()).await
         {
             log::error!("Failed to record selection for {}: {}", name, e);
+        }
+    }
+    if let Some(patches) = &new_patches {
+        if let Err(e) =
+            crate::kubernetes::api::set_deploy_config_patches(client, &ns, &name, patches).await
+        {
+            log::error!("Failed to record patch list for {}: {}", name, e);
         }
     }
 
@@ -363,9 +454,13 @@ pub async fn run_action(
     crate::github_deployments::report_deploy_action(octocrabs, config, &deploy_action).await;
 
     let conn = pool.get()?;
-    if let Some(mut new) = NewRevision::from_deploy_action(&deploy_action, config, &conn, actor) {
+    if let Some(mut new) = NewRevision::from_deploy_action(&deploy_action, &effective, &conn, actor)
+    {
         if let Action::Rollback { revision } = action {
             new.reason = Some(format!("rollback to revision {revision}"));
+        }
+        if reason.is_some() {
+            new.reason = reason.clone();
         }
         match Revision::record(&conn, new) {
             Ok(rev) => log::info!("Recorded revision {} for {} ({})", rev.id, name, rev.action),
@@ -629,5 +724,101 @@ mod tests {
             ),
             DeployAction::ToggleAutodeploy { .. }
         ));
+    }
+    fn bare_config() -> DeployConfig {
+        use crate::kubernetes::deploy_config::{DeployConfigSpec, DeployConfigSpecFields};
+        use crate::kubernetes::parameters::ParameterSource;
+        use crate::kubernetes::repo::Repository;
+        DeployConfig::new(
+            "site",
+            DeployConfigSpec {
+                spec: DeployConfigSpecFields {
+                    team: "t".into(),
+                    kind: "service".into(),
+                    parameters: ParameterSource::sha_map(Some(
+                        Repository {
+                            owner: "o".into(),
+                            repo: "r".into(),
+                        }
+                        .with_branch("master"),
+                    )),
+                    selections: Default::default(),
+                    patches: vec![],
+                    config: Repository {
+                        owner: "o".into(),
+                        repo: "c".into(),
+                    },
+                    specs: vec![],
+                },
+            },
+        )
+    }
+
+    fn patch(durability: Durability) -> ManifestPatch {
+        use crate::kubernetes::patches::{PatchOp, PatchTarget};
+        ManifestPatch {
+            target: PatchTarget {
+                file: None,
+                kind: "Deployment".into(),
+                name: "web".into(),
+            },
+            op: PatchOp::Replace,
+            path: "/spec/replicas".into(),
+            value: Some(serde_json::json!(3)),
+            durability,
+            note: None,
+            by: None,
+            since: None,
+        }
+    }
+
+    #[test]
+    fn ending_a_temporary_deployment_clears_only_what_is_temporary() {
+        let mut config = bare_config();
+        assert!(temporary_changes(&config).is_empty());
+
+        let selections = &mut config.spec.spec.selections;
+        selections.insert(
+            SHA_PARAMETER.into(),
+            Selection::track("feature", Durability::Temporary),
+        );
+        selections.insert(
+            "GREETING".into(),
+            Selection::pin("howdy", Durability::Temporary),
+        );
+        selections.insert("REPLICAS".into(), Selection::pin("5", Durability::Standing));
+        config.spec.spec.patches = vec![
+            patch(Durability::Standing),
+            patch(Durability::Temporary),
+            patch(Durability::Temporary),
+        ];
+
+        let changes = temporary_changes(&config);
+        assert_eq!(changes.selections, vec!["GREETING", SHA_PARAMETER]);
+        assert_eq!(changes.patches.as_ref().map(Vec::len), Some(1));
+        assert_eq!(
+            changes.describe(),
+            "ended temporary deployment: cleared GREETING, SHA; removed 2 patches"
+        );
+
+        // Standing patches alone leave the patch list untouched.
+        config.spec.spec.patches = vec![patch(Durability::Standing)];
+        assert!(temporary_changes(&config).patches.is_none());
+    }
+
+    #[test]
+    fn ending_a_temporary_deployment_is_gated_like_a_deploy() -> AppResult<()> {
+        let pool = migrated_memory_pool();
+        let conn = pool.get()?;
+        assert!(check_blockers(&conn, &Action::EndTemporary, "site").is_ok());
+        Blocker::create(&conn, "site", "incident", "kevin")?;
+        assert!(check_blockers(&conn, &Action::EndTemporary, "site").is_err());
+        assert!(selection_change(
+            &Action::EndTemporary,
+            Some("master"),
+            &SelectionIntent::default()
+        )
+        .is_none());
+        Ok(())
     }
 }

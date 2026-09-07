@@ -1026,6 +1026,7 @@ async fn execute_deploy_action_with(
         Action::DeployCommit { sha } => format!("Deploy (sha: {})", sha),
         Action::Rollback { revision } => format!("Rollback (revision: {})", revision),
         Action::ClearSelection => "Clear selection and deploy latest".to_string(),
+        Action::EndTemporary => "End temporary deployment".to_string(),
         Action::SetParameter { parameter, value } => match value {
             Some(v) => format!("Set ${} = {} and deploy", parameter, v),
             None => format!("Reset ${} to its default and deploy", parameter),
