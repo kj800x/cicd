@@ -119,8 +119,6 @@ impl NewRevision {
 const COLUMNS: &str =
     "id, config_name, created_at, actor, action, reason, config_sha, config_branch, config_version_hash";
 
-// Read paths are used by the history page and rollback in the next PRs.
-#[allow(dead_code)]
 impl Revision {
     fn from_row(row: &Row) -> rusqlite::Result<Self> {
         Ok(Revision {
@@ -198,6 +196,7 @@ impl Revision {
         })
     }
 
+    #[allow(dead_code)] // rollback uses these in the next PR
     pub fn get(
         conn: &PooledConnection<SqliteConnectionManager>,
         id: i64,
@@ -219,6 +218,7 @@ impl Revision {
     }
 
     /// The newest revision for a config, if it has any.
+    #[allow(dead_code)] // rollback uses these in the next PR
     pub fn latest_for(
         conn: &PooledConnection<SqliteConnectionManager>,
         config_name: &str,

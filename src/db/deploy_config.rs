@@ -24,7 +24,6 @@ impl DeployConfig {
         })
     }
 
-    #[allow(dead_code)] // the history page uses this in the next PR
     pub fn get_by_name(
         name: &str,
         conn: &PooledConnection<SqliteConnectionManager>,
