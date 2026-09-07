@@ -1211,7 +1211,7 @@ impl ResourceStatuses for DeployConfig {
     async fn format_resources(&self, namespaced_objs: &[DynamicObject]) -> Markup {
         html! {
             ul.deployable-item__child-list {
-                @for resource in self.resource_specs() {
+                @for resource in &self.resource_specs() {
                     @match TryInto::<LiteResource>::try_into(resource) {
                         Ok(resource) => {
                             (resource.format(namespaced_objs))

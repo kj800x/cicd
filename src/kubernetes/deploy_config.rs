@@ -65,9 +65,42 @@ pub struct DeployConfigSpecFields {
     /// Repository information
     pub config: Repository,
 
-    /// Array of Kubernetes resource manifests
+    /// Manifest templates as they were in the config repo at the deployed
+    /// config commit. Each entry is `{file, manifest}`; entries written
+    /// before filenames were recorded are the bare manifest and are read
+    /// as having no file. Written by the deploy handler only.
     #[serde(default)]
     pub specs: Vec<serde_json::Value>,
+}
+
+/// One manifest template and the `.deploy/<config>/` file it came from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Template {
+    pub file: Option<String>,
+    pub manifest: serde_json::Value,
+}
+
+impl Template {
+    /// The stored form: `{"file": ..., "manifest": ...}`.
+    pub fn stored(file: &str, manifest: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "file": file, "manifest": manifest })
+    }
+
+    /// Read either the stored form or a bare manifest from before filenames
+    /// were recorded. A bare manifest always has `kind`, and the stored form
+    /// never does at the top level, so the two cannot be confused.
+    pub fn from_stored(value: &serde_json::Value) -> Template {
+        match (value.get("file"), value.get("manifest")) {
+            (Some(file), Some(manifest)) if value.get("kind").is_none() => Template {
+                file: file.as_str().map(String::from),
+                manifest: manifest.clone(),
+            },
+            _ => Template {
+                file: None,
+                manifest: value.clone(),
+            },
+        }
+    }
 }
 
 /// The DeployConfig CustomResource
@@ -334,9 +367,22 @@ impl DeployConfig {
         self.spec.spec.config.clone()
     }
 
-    /// Get the Kubernetes resource specs
-    pub fn resource_specs(&self) -> &[serde_json::Value] {
-        &self.spec.spec.specs
+    /// The manifest templates, without their filenames.
+    pub fn resource_specs(&self) -> Vec<serde_json::Value> {
+        self.resource_templates()
+            .into_iter()
+            .map(|t| t.manifest)
+            .collect()
+    }
+
+    /// The manifest templates with the file each came from, when known.
+    pub fn resource_templates(&self) -> Vec<Template> {
+        self.spec
+            .spec
+            .specs
+            .iter()
+            .map(Template::from_stored)
+            .collect()
     }
 
     /// What every static (`value`) parameter resolves to right now: its
@@ -384,8 +430,8 @@ impl DeployConfig {
         let values = self.parameter_values();
         let declared = &self.spec.spec.parameters;
         let mut rendered = Vec::with_capacity(self.spec.spec.specs.len());
-        for template in &self.spec.spec.specs {
-            for name in referenced_parameters(template) {
+        for template in self.resource_specs() {
+            for name in referenced_parameters(&template) {
                 if declared.contains_key(&name) && !values.contains_key(&name) {
                     return Err(crate::error::AppError::Internal(format!(
                         "DeployConfig {} declares parameter {name} and its manifests use ${name}, \
@@ -661,6 +707,24 @@ mod tests {
             !base.is_temporary_deployment(),
             "undeployed is never temporary"
         );
+    }
+
+    #[test]
+    fn templates_read_both_stored_shapes() {
+        let bare = serde_json::json!({"kind": "Deployment", "metadata": {"name": "web"}});
+        let t = Template::from_stored(&bare);
+        assert_eq!(t.file, None);
+        assert_eq!(t.manifest, bare);
+
+        let stored = Template::stored("deployment.yaml", bare.clone());
+        let t = Template::from_stored(&stored);
+        assert_eq!(t.file.as_deref(), Some("deployment.yaml"));
+        assert_eq!(t.manifest, bare);
+
+        let mut dc = config(repo("kj800x", "app"), None);
+        dc.spec.spec.specs = vec![stored, bare.clone()];
+        assert_eq!(dc.resource_specs(), vec![bare.clone(), bare]);
+        assert!(dc.supports_bounce());
     }
 
     #[test]

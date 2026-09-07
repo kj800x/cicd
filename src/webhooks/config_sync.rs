@@ -16,7 +16,7 @@ use crate::{
     },
     error::{AppError, AppResult},
     kubernetes::{
-        deploy_config::{DeployConfig, DeployConfigSpec, DeployConfigSpecFields},
+        deploy_config::{DeployConfig, DeployConfigSpec, DeployConfigSpecFields, Template},
         parameters::{ParameterSource, ParameterSources, SHA_PARAMETER},
         repo::RepositoryBranch,
         test_mode,
@@ -439,7 +439,7 @@ pub async fn fetch_deploy_configs_by_sha(
             let files = content_items.items;
             log::debug!("Found {} files in .deploy/{}", files.len(), config_name);
 
-            let mut result: Vec<String> = vec![];
+            let mut result: Vec<(String, String)> = vec![];
 
             for file in files {
                 log::debug!("  Reading file: {}", file.name);
@@ -474,7 +474,7 @@ pub async fn fetch_deploy_configs_by_sha(
                 if decoded_content.is_empty() {
                     log::warn!("  WARNING: File {} is empty!", file.name);
                 }
-                result.push(decoded_content);
+                result.push((file.name.clone(), decoded_content));
             }
 
             result
@@ -518,19 +518,18 @@ pub async fn fetch_deploy_configs_by_sha(
         );
         let child_files: Vec<Value> = child_files
             .into_iter()
-            .enumerate()
-            .map(|(idx, file)| {
-                log::debug!("  Parsing child file [{}]", idx);
+            .map(|(file_name, file)| {
+                log::debug!("  Parsing child file {}", file_name);
                 let parsed: Value = serde_yaml::from_str(&file).map_err(AppError::Yaml)?;
-                log::debug!("  Parsed child file [{}]: {}", idx, parsed);
+                log::debug!("  Parsed child file {}: {}", file_name, parsed);
                 if parsed.is_null() {
                     log::warn!(
-                        "  WARNING: Child file [{}] parsed as null! Content was: {}",
-                        idx,
+                        "  WARNING: Child file {} parsed as null! Content was: {}",
+                        file_name,
                         file
                     );
                 }
-                Ok(parsed)
+                Ok(Template::stored(&file_name, parsed))
             })
             .collect::<Result<Vec<Value>, AppError>>()?;
 
