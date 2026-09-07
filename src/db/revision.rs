@@ -217,7 +217,6 @@ impl Revision {
     }
 
     /// The newest revision for a config, if it has any.
-    #[allow(dead_code)] // reported by the MCP tools in the next PR
     pub fn latest_for(
         conn: &PooledConnection<SqliteConnectionManager>,
         config_name: &str,
