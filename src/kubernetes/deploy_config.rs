@@ -342,6 +342,48 @@ impl DeployConfig {
         &self.spec.spec.specs
     }
 
+    /// The rendered value of every deployed parameter, keyed by name, as it
+    /// is substituted for `$NAME` in the manifests.
+    pub fn parameter_values(&self) -> BTreeMap<String, String> {
+        self.status
+            .as_ref()
+            .map(|s| {
+                s.parameters
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.rendered()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The manifests with every parameter substituted, or an error naming
+    /// the first declared parameter a template mentions that has no
+    /// deployed value. Undeclared `$TOKENS` are left alone; they belong to
+    /// the shell or the kubelet, not to us.
+    ///
+    /// This is the second half of the rule from the design: deployed means
+    /// every declared parameter has a value, and anything else is refused
+    /// rather than rendered with a literal `$NAME`.
+    pub fn render_manifests(&self) -> crate::error::AppResult<Vec<serde_json::Value>> {
+        use crate::kubernetes::spec_editing::{referenced_parameters, WithParameters};
+        let values = self.parameter_values();
+        let declared = &self.spec.spec.parameters;
+        let mut rendered = Vec::with_capacity(self.spec.spec.specs.len());
+        for template in &self.spec.spec.specs {
+            for name in referenced_parameters(template) {
+                if declared.contains_key(&name) && !values.contains_key(&name) {
+                    return Err(crate::error::AppError::Internal(format!(
+                        "DeployConfig {} declares parameter {name} and its manifests use ${name}, \
+                         but no value is deployed for it; refusing to render",
+                        self.name_any()
+                    )));
+                }
+            }
+            rendered.push(template.with_parameters(&values));
+        }
+        Ok(rendered)
+    }
+
     #[allow(clippy::expect_used)]
     pub fn spec_hash(&self) -> String {
         let mut hasher = Sha256::new();
@@ -603,6 +645,35 @@ mod tests {
         assert!(
             !base.is_temporary_deployment(),
             "undeployed is never temporary"
+        );
+    }
+
+    #[test]
+    fn render_substitutes_values_and_refuses_missing_declared_ones() {
+        let mut dc = with_status(
+            config(repo("kj800x", "app"), Some(repo("kj800x", "app"))),
+            "abc",
+            Some("master"),
+        );
+        dc.spec.spec.specs = vec![serde_json::json!({
+            "kind": "Deployment",
+            "spec": { "image": "app:commit-$SHA", "cmd": "echo $HOME" }
+        })];
+        let rendered = dc.render_manifests().unwrap_or_default();
+        assert_eq!(rendered[0]["spec"]["image"], "app:commit-abc");
+        assert_eq!(rendered[0]["spec"]["cmd"], "echo $HOME");
+
+        // Declared, referenced, but not deployed: refuse.
+        let mut undeployed = config(repo("kj800x", "app"), Some(repo("kj800x", "app")));
+        undeployed.spec.spec.specs = dc.spec.spec.specs.clone();
+        assert!(undeployed.render_manifests().is_err());
+
+        // Referenced but not declared: not ours, rendered as is.
+        let mut plain = config(repo("kj800x", "app"), None);
+        plain.spec.spec.specs = vec![serde_json::json!({"cmd": "$SHA"})];
+        assert_eq!(
+            plain.render_manifests().unwrap_or_default()[0]["cmd"],
+            "$SHA"
         );
     }
 

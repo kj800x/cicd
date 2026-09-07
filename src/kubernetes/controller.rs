@@ -2,7 +2,7 @@ use super::DeployConfig;
 use crate::error::format_error_chain;
 use crate::kubernetes::api::ListMode;
 use crate::kubernetes::repo::DeploymentState;
-use crate::kubernetes::spec_editing::{WithInjectedEnv, WithVersion};
+use crate::kubernetes::spec_editing::WithInjectedEnv;
 use crate::kubernetes::test_mode;
 use crate::kubernetes::{
     apply, delete_dynamic_object, ensure_namespace_exists, list_namespace_objects,
@@ -51,7 +51,7 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> AppRes
     // are written before the status), and applying them then would render
     // `$SHA` literally and roll out an image that does not exist.
     let state = dc.deployment_state();
-    let resources: &[serde_json::Value] = if state == DeploymentState::Undeployed {
+    let resources: Vec<serde_json::Value> = if state == DeploymentState::Undeployed {
         if !dc.resource_specs().is_empty() {
             log::debug!(
                 "DeployConfig {}/{} is undeployed; not applying its {} manifest templates",
@@ -60,13 +60,15 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> AppRes
                 dc.resource_specs().len()
             );
         }
-        &[]
+        vec![]
     } else {
-        dc.resource_specs()
+        // Every declared parameter the templates use must have a deployed
+        // value; otherwise this errors and nothing is applied or pruned.
+        dc.render_manifests()?
     };
 
     // Create or update resources as needed
-    for resource in resources {
+    for resource in &resources {
         let mut obj: DynamicObject = serde_json::from_value(resource.clone()).map_err(|e| {
             AppError::Internal(format!(
                 "JSON didn't look like a Kubernetes object (apiVersion/kind/metadata): {}",
@@ -84,10 +86,6 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> AppRes
             // Manifests name their production namespace; in test mode the
             // DeployConfig lives in the prefixed one and children follow it.
             obj.metadata.namespace = Some(ns.clone());
-        }
-
-        if let DeploymentState::DeployedWithArtifact { artifact, .. } = &state {
-            obj = obj.with_version(&artifact.sha);
         }
 
         obj = obj.with_injected_env(&deploy_env_vars);

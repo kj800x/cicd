@@ -87,6 +87,13 @@ impl From<RepositoryBranch> for ParameterSource {
 }
 
 impl ParameterValue {
+    /// The string substituted for `$NAME` in manifests.
+    pub fn rendered(&self) -> String {
+        match self {
+            ParameterValue::Commit { value, .. } => value.clone(),
+        }
+    }
+
     /// The SHA and branch, for values that are commit based.
     pub fn as_sha_maybe_branch(&self) -> Option<ShaMaybeBranch> {
         match self {
