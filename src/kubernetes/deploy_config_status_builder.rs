@@ -1,4 +1,9 @@
-use crate::kubernetes::{parameters::SHA_PARAMETER, repo::ShaMaybeBranch};
+use std::collections::BTreeMap;
+
+use crate::kubernetes::{
+    parameters::{ParameterValue, ParameterValues, SHA_PARAMETER},
+    repo::ShaMaybeBranch,
+};
 
 /// Builder for patch updates to DeployConfigStatus.
 /// Since the values are optional, we need to use Option<Option<String>> to represent them in this builder.
@@ -8,7 +13,10 @@ use crate::kubernetes::{parameters::SHA_PARAMETER, repo::ShaMaybeBranch};
 pub struct DeployConfigStatusBuilder {
     autodeploy: Option<Option<bool>>,
     orphaned: Option<Option<bool>>,
-    artifact: Option<Option<ShaMaybeBranch>>,
+    /// Per-parameter patches: `None` deletes the key.
+    parameters: BTreeMap<String, Option<ParameterValue>>,
+    /// Replace the whole parameters map with null (undeploy).
+    clear_parameters: bool,
     config: Option<Option<ShaMaybeBranch>>,
 }
 
@@ -26,20 +34,28 @@ impl From<DeployConfigStatusBuilder> for serde_json::Value {
             }
         }
 
-        if let Some(artifact) = val.artifact {
+        if val.clear_parameters {
+            status["parameters"] = serde_json::Value::Null;
+        } else if !val.parameters.is_empty() {
             // Built by hand so that an absent branch becomes an explicit
             // null; a nested merge patch would otherwise keep the previous
             // deploy's branch. A `null` entry deletes the key.
-            status["parameters"] = match artifact {
-                Some(artifact) => serde_json::json!({
-                    SHA_PARAMETER: {
+            let mut params = serde_json::json!({});
+            for (name, value) in &val.parameters {
+                params[name] = match value {
+                    Some(ParameterValue::Commit { value, branch }) => serde_json::json!({
                         "type": "commit",
-                        "value": artifact.sha,
-                        "branch": artifact.branch,
-                    }
-                }),
-                None => serde_json::json!({ SHA_PARAMETER: null }),
-            };
+                        "value": value,
+                        "branch": branch,
+                    }),
+                    Some(ParameterValue::Value { value }) => serde_json::json!({
+                        "type": "value",
+                        "value": value,
+                    }),
+                    None => serde_json::Value::Null,
+                };
+            }
+            status["parameters"] = params;
         }
 
         if let Some(autodeploy) = val.autodeploy {
@@ -71,8 +87,28 @@ impl DeployConfigStatusBuilder {
         self
     }
 
-    pub fn with_artifact(mut self, artifact: Option<ShaMaybeBranch>) -> Self {
-        self.artifact = Some(artifact);
+    /// Patch the legacy artifact, i.e. the `SHA` parameter.
+    pub fn with_artifact(self, artifact: Option<ShaMaybeBranch>) -> Self {
+        self.with_parameter(SHA_PARAMETER, artifact.map(ParameterValue::from))
+    }
+
+    /// Set or delete (`None`) one parameter's deployed value.
+    pub fn with_parameter(mut self, name: &str, value: Option<ParameterValue>) -> Self {
+        self.parameters.insert(name.to_string(), value);
+        self
+    }
+
+    /// Set every parameter in `values`.
+    pub fn with_parameters(mut self, values: ParameterValues) -> Self {
+        for (name, value) in values {
+            self.parameters.insert(name, Some(value));
+        }
+        self
+    }
+
+    /// Delete every deployed parameter value (undeploy).
+    pub fn clear_parameters(mut self) -> Self {
+        self.clear_parameters = true;
         self
     }
 
@@ -118,6 +154,28 @@ mod tests {
     fn undeploy_deletes_the_sha_parameter() {
         let patch: Value = DeployConfigStatusBuilder::new().with_artifact(None).into();
         assert_eq!(patch, json!({"status": {"parameters": {"SHA": null}}}));
+    }
+
+    #[test]
+    fn value_parameters_and_clearing() {
+        let patch: Value = DeployConfigStatusBuilder::new()
+            .with_parameters(ParameterValues::from([(
+                "REPLICAS".to_string(),
+                ParameterValue::Value { value: "3".into() },
+            )]))
+            .with_artifact(Some(ShaMaybeBranch {
+                sha: "abc".into(),
+                branch: None,
+            }))
+            .into();
+        assert_eq!(
+            patch["status"]["parameters"]["REPLICAS"],
+            json!({"type": "value", "value": "3"})
+        );
+        assert_eq!(patch["status"]["parameters"]["SHA"]["value"], "abc");
+
+        let cleared: Value = DeployConfigStatusBuilder::new().clear_parameters().into();
+        assert_eq!(cleared, json!({"status": {"parameters": null}}));
     }
 
     #[test]

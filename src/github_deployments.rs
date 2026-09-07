@@ -42,6 +42,7 @@ pub async fn report_deploy_action(
             name,
             artifact,
             config: config_ref,
+            ..
         } => {
             // Artifact deployment: environment `{name}` on the artifact repo.
             if let (Some(artifact_ref), Some(artifact_repo)) =

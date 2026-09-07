@@ -34,6 +34,9 @@ pub enum ParameterSource {
         /// Default Git branch to track
         branch: String,
     },
+    /// A static value with no feed. Its only channel is the default; a
+    /// selection can pin it to something else.
+    Value { default: String },
 }
 
 /// The value currently deployed for a parameter (`status.parameters.<key>`).
@@ -46,6 +49,8 @@ pub enum ParameterValue {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<String>,
     },
+    /// The deployed value of a static parameter.
+    Value { value: String },
 }
 
 pub type ParameterSources = BTreeMap<String, ParameterSource>;
@@ -64,11 +69,30 @@ impl ParameterSource {
                 repo: repo.clone(),
                 branch: branch.clone(),
             }),
+            ParameterSource::Value { .. } => None,
+        }
+    }
+
+    /// The default for a static parameter; `None` for feeds.
+    pub fn default_value(&self) -> Option<&str> {
+        match self {
+            ParameterSource::Value { default } => Some(default),
+            ParameterSource::Commit { .. } => None,
+        }
+    }
+
+    #[allow(dead_code)] // reported over MCP in the next PR
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            ParameterSource::Commit { .. } => "commit",
+            ParameterSource::Value { .. } => "value",
         }
     }
 
     /// Build the map for the legacy single-artifact shape: either empty or a
-    /// single commit source under [`SHA_PARAMETER`].
+    /// single commit source under [`SHA_PARAMETER`]. Test convenience now
+    /// that config sync reads a full parameters block.
+    #[cfg(test)]
     pub fn sha_map(artifact: Option<RepositoryBranch>) -> ParameterSources {
         artifact
             .map(|rb| BTreeMap::from([(SHA_PARAMETER.to_string(), ParameterSource::from(rb))]))
@@ -90,7 +114,22 @@ impl ParameterValue {
     /// The string substituted for `$NAME` in manifests.
     pub fn rendered(&self) -> String {
         match self {
-            ParameterValue::Commit { value, .. } => value.clone(),
+            ParameterValue::Commit { value, .. } | ParameterValue::Value { value } => value.clone(),
+        }
+    }
+
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            ParameterValue::Commit { .. } => "commit",
+            ParameterValue::Value { .. } => "value",
+        }
+    }
+
+    /// The branch a commit value was resolved from, if any.
+    pub fn branch(&self) -> Option<&str> {
+        match self {
+            ParameterValue::Commit { branch, .. } => branch.as_deref(),
+            ParameterValue::Value { .. } => None,
         }
     }
 
@@ -101,6 +140,7 @@ impl ParameterValue {
                 sha: value.clone(),
                 branch: branch.clone(),
             }),
+            ParameterValue::Value { .. } => None,
         }
     }
 }
@@ -151,6 +191,23 @@ mod tests {
             }
         );
         assert_eq!(serde_json::to_value(&parsed)?, without);
+        Ok(())
+    }
+
+    #[test]
+    fn value_parameters_round_trip() -> Result<(), serde_json::Error> {
+        let src: ParameterSource =
+            serde_json::from_value(json!({"type": "value", "default": "2"}))?;
+        assert_eq!(src.default_value(), Some("2"));
+        assert!(src.as_repository_branch().is_none());
+        assert_eq!(
+            serde_json::to_value(&src)?,
+            json!({"type": "value", "default": "2"})
+        );
+        let val: ParameterValue = serde_json::from_value(json!({"type": "value", "value": "5"}))?;
+        assert_eq!(val.rendered(), "5");
+        assert!(val.as_sha_maybe_branch().is_none());
+        assert_eq!(val.branch(), None);
         Ok(())
     }
 

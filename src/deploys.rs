@@ -23,7 +23,7 @@ use crate::{
     kubernetes::{
         api::patch_deploy_config_selection,
         deploy_handlers::DeployAction,
-        parameters::SHA_PARAMETER,
+        parameters::{ParameterValue, ParameterValues, SHA_PARAMETER},
         repo::DeploymentState,
         selections::{Durability, Selection},
         DeployConfig,
@@ -56,26 +56,27 @@ impl SelectionIntent {
     }
 }
 
-/// The selection change an action implies for the `SHA` parameter.
-/// `None` means leave it alone; `Some(None)` removes it; `Some(Some(s))`
-/// sets it. A branch deploy of the default branch is a clear, not an
-/// override of the default with itself.
+/// The selection change an action implies: which parameter, and either
+/// `None` to remove its selection or `Some(s)` to set it. A branch deploy
+/// of the default branch is a clear, not an override of the default with
+/// itself.
 pub fn selection_change(
     action: &Action,
     default_branch: Option<&str>,
     intent: &SelectionIntent,
-) -> Option<Option<Selection>> {
+) -> Option<(String, Option<Selection>)> {
+    let sha = |change: Option<Selection>| Some((SHA_PARAMETER.to_string(), change));
     match action {
-        Action::DeployBranch { branch } if Some(branch.as_str()) == default_branch => Some(None),
-        Action::DeployBranch { branch } => Some(Some(
+        Action::DeployBranch { branch } if Some(branch.as_str()) == default_branch => sha(None),
+        Action::DeployBranch { branch } => sha(Some(
             Selection::track(branch, intent.durability.unwrap_or(Durability::Temporary))
                 .with_note(intent.note.as_deref(), intent.by.as_deref()),
         )),
-        Action::DeployCommit { sha } => Some(Some(
-            Selection::pin(sha, intent.durability.unwrap_or(Durability::Standing))
+        Action::DeployCommit { sha: value } => sha(Some(
+            Selection::pin(value, intent.durability.unwrap_or(Durability::Standing))
                 .with_note(intent.note.as_deref(), intent.by.as_deref()),
         )),
-        Action::ClearSelection => Some(None),
+        Action::ClearSelection => sha(None),
         // Latest honours the selection; rollback and undeploy leave intent
         // alone on purpose; the rest do not touch versions at all.
         Action::DeployLatest
@@ -85,6 +86,22 @@ pub fn selection_change(
         | Action::ExecuteJob
         | Action::ToggleAutodeploy => None,
     }
+}
+
+/// The static parameter values a rollback replays, from the revision's
+/// recorded rows. Commit parameters are replayed through the resolver.
+fn values_from_revision(
+    conn: &PooledConnection<SqliteConnectionManager>,
+    revision: i64,
+) -> AppResult<ParameterValues> {
+    let rev = Revision::get(conn, revision)?
+        .ok_or_else(|| AppError::InvalidInput(format!("Revision {revision} does not exist")))?;
+    Ok(rev
+        .parameters
+        .into_iter()
+        .filter(|p| p.kind == "value")
+        .map(|p| (p.name, ParameterValue::Value { value: p.value }))
+        .collect())
 }
 
 /// Refuse a deploy while the config has an active blocker.
@@ -122,8 +139,14 @@ pub fn check_blockers(
 }
 
 /// Turn a requested [`Action`] plus the state it resolves to into the
-/// concrete [`DeployAction`] to execute.
-pub fn to_deploy_action(action: &Action, name: &str, state: DeploymentState) -> DeployAction {
+/// concrete [`DeployAction`] to execute. `values` are the resolved static
+/// parameters, carried along for deploys.
+pub fn to_deploy_action(
+    action: &Action,
+    name: &str,
+    state: DeploymentState,
+    values: ParameterValues,
+) -> DeployAction {
     match action {
         Action::DeployLatest
         | Action::DeployBranch { .. }
@@ -135,11 +158,13 @@ pub fn to_deploy_action(action: &Action, name: &str, state: DeploymentState) -> 
                 name: name.to_string(),
                 artifact: Some(artifact),
                 config,
+                values,
             },
             DeploymentState::DeployedOnlyConfig { config } => DeployAction::Deploy {
                 name: name.to_string(),
                 artifact: None,
                 config,
+                values,
             },
             DeploymentState::Undeployed => DeployAction::Undeploy {
                 name: name.to_string(),
@@ -176,8 +201,34 @@ pub async fn run_action(
 ) -> AppResult<DeployAction> {
     let name = kube::ResourceExt::name_any(config);
     check_blockers(conn, action, &name)?;
-    let state = DeploymentState::from_action(action, config, conn)?;
-    let deploy_action = to_deploy_action(action, &name, state);
+
+    // The selection this action implies is applied to an in-memory copy
+    // first, so static parameters resolve against the new intent, and is
+    // persisted after the deploy succeeds.
+    let default_branch = config.artifact_repository().map(|r| r.branch);
+    let change = selection_change(action, default_branch.as_deref(), intent);
+    let mut effective = config.clone();
+    if let Some((parameter, selection)) = &change {
+        match selection {
+            Some(s) => {
+                effective
+                    .spec
+                    .spec
+                    .selections
+                    .insert(parameter.clone(), s.clone());
+            }
+            None => {
+                effective.spec.spec.selections.remove(parameter);
+            }
+        }
+    }
+
+    let state = DeploymentState::from_action(action, &effective, conn)?;
+    let values = match action {
+        Action::Rollback { revision } => values_from_revision(conn, *revision)?,
+        _ => effective.resolve_value_parameters(),
+    };
+    let deploy_action = to_deploy_action(action, &name, state, values);
 
     deploy_action
         .execute(client, octocrabs, config.config_repository())
@@ -186,11 +237,10 @@ pub async fn run_action(
     // Record the intent behind the deploy. Bookkeeping like the rest: the
     // deploy has happened, and a missing selection only means the next
     // "latest" derives it from what is deployed.
-    let default_branch = config.artifact_repository().map(|r| r.branch);
-    if let Some(change) = selection_change(action, default_branch.as_deref(), intent) {
+    if let Some((parameter, selection)) = &change {
         let ns = kube::ResourceExt::namespace(config).unwrap_or_else(|| "default".to_string());
         if let Err(e) =
-            patch_deploy_config_selection(client, &ns, &name, SHA_PARAMETER, change.as_ref()).await
+            patch_deploy_config_selection(client, &ns, &name, parameter, selection.as_ref()).await
         {
             log::error!("Failed to record selection for {}: {}", name, e);
         }
@@ -278,7 +328,7 @@ mod tests {
             config: sha("c"),
         };
         assert!(matches!(
-            to_deploy_action(&Action::DeployLatest, "x", with),
+            to_deploy_action(&Action::DeployLatest, "x", with, ParameterValues::default()),
             DeployAction::Deploy {
                 artifact: Some(_),
                 ..
@@ -286,11 +336,21 @@ mod tests {
         ));
         let only = DeploymentState::DeployedOnlyConfig { config: sha("c") };
         assert!(matches!(
-            to_deploy_action(&Action::DeployBranch { branch: "b".into() }, "x", only),
+            to_deploy_action(
+                &Action::DeployBranch { branch: "b".into() },
+                "x",
+                only,
+                ParameterValues::default()
+            ),
             DeployAction::Deploy { artifact: None, .. }
         ));
         assert!(matches!(
-            to_deploy_action(&Action::Undeploy, "x", DeploymentState::Undeployed),
+            to_deploy_action(
+                &Action::Undeploy,
+                "x",
+                DeploymentState::Undeployed,
+                ParameterValues::default()
+            ),
             DeployAction::Undeploy { .. }
         ));
     }
@@ -302,7 +362,12 @@ mod tests {
             config: sha("c"),
         };
         assert!(matches!(
-            to_deploy_action(&Action::Rollback { revision: 7 }, "x", with),
+            to_deploy_action(
+                &Action::Rollback { revision: 7 },
+                "x",
+                with,
+                ParameterValues::default()
+            ),
             DeployAction::Deploy {
                 artifact: Some(_),
                 ..
@@ -322,7 +387,7 @@ mod tests {
             branch: "feature".into(),
         };
         match selection_change(&branch, Some("master"), &intent) {
-            Some(Some(s)) => {
+            Some((_, Some(s))) => {
                 assert_eq!(s.track.as_ref().map(|t| t.branch.as_str()), Some("feature"));
                 assert_eq!(
                     s.durability,
@@ -337,7 +402,7 @@ mod tests {
         };
         assert_eq!(
             selection_change(&default_branch, Some("master"), &intent),
-            Some(None),
+            Some((SHA_PARAMETER.to_string(), None)),
             "deploying the default branch clears the override"
         );
         let pin = Action::DeployCommit { sha: "abc".into() };
@@ -347,7 +412,7 @@ mod tests {
             by: Some("kevin".into()),
         };
         match selection_change(&pin, Some("master"), &noted) {
-            Some(Some(s)) => {
+            Some((_, Some(s))) => {
                 assert_eq!(s.pin.as_ref().map(|p| p.value.as_str()), Some("abc"));
                 assert_eq!(
                     s.durability,
@@ -360,7 +425,7 @@ mod tests {
             other => panic!("expected a pin selection, got {other:?}"),
         }
         match selection_change(&pin, Some("master"), &intent) {
-            Some(Some(s)) => assert_eq!(
+            Some((_, Some(s))) => assert_eq!(
                 s.durability,
                 Durability::Standing,
                 "pins default to standing"
@@ -369,7 +434,7 @@ mod tests {
         }
         assert_eq!(
             selection_change(&Action::ClearSelection, Some("master"), &intent),
-            Some(None)
+            Some((SHA_PARAMETER.to_string(), None))
         );
         for untouched in [
             Action::DeployLatest,
@@ -385,7 +450,12 @@ mod tests {
     fn clear_selection_is_gated_and_maps_like_a_deploy() -> AppResult<()> {
         let only = DeploymentState::DeployedOnlyConfig { config: sha("c") };
         assert!(matches!(
-            to_deploy_action(&Action::ClearSelection, "x", only),
+            to_deploy_action(
+                &Action::ClearSelection,
+                "x",
+                only,
+                ParameterValues::default()
+            ),
             DeployAction::Deploy { artifact: None, .. }
         ));
         let pool = migrated_memory_pool();
@@ -398,15 +468,30 @@ mod tests {
     #[test]
     fn non_deploy_actions_ignore_state() {
         assert!(matches!(
-            to_deploy_action(&Action::Bounce, "x", DeploymentState::Undeployed),
+            to_deploy_action(
+                &Action::Bounce,
+                "x",
+                DeploymentState::Undeployed,
+                ParameterValues::default()
+            ),
             DeployAction::Bounce { .. }
         ));
         assert!(matches!(
-            to_deploy_action(&Action::ExecuteJob, "x", DeploymentState::Undeployed),
+            to_deploy_action(
+                &Action::ExecuteJob,
+                "x",
+                DeploymentState::Undeployed,
+                ParameterValues::default()
+            ),
             DeployAction::ExecuteJob { .. }
         ));
         assert!(matches!(
-            to_deploy_action(&Action::ToggleAutodeploy, "x", DeploymentState::Undeployed),
+            to_deploy_action(
+                &Action::ToggleAutodeploy,
+                "x",
+                DeploymentState::Undeployed,
+                ParameterValues::default()
+            ),
             DeployAction::ToggleAutodeploy { .. }
         ));
     }
