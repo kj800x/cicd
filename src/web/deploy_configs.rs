@@ -2,14 +2,12 @@
 
 use crate::crab_ext::Octocrabs;
 use crate::db::deploy_config_version::DeployConfigVersion;
-use crate::db::deploy_event::DeployEvent;
 use crate::db::git_branch::GitBranch;
 use crate::db::git_commit::GitCommit;
 use crate::db::git_repo::GitRepo;
 use crate::kubernetes::api::{
     get_all_deploy_configs, get_deploy_config, get_namespace_uid, ListMode,
 };
-use crate::kubernetes::deploy_handlers::DeployAction;
 use crate::kubernetes::repo::{DeploymentState, ShaMaybeBranch};
 use crate::kubernetes::{list_namespace_objects, DeployConfig};
 use crate::prelude::*;
@@ -842,11 +840,26 @@ impl Action {
         }
     }
 
-    fn is_deploy(&self) -> bool {
+    pub fn is_deploy(&self) -> bool {
         matches!(
             self,
             Action::DeployLatest | Action::DeployBranch { .. } | Action::DeployCommit { .. }
         )
+    }
+
+    /// Metrics label for the action as requested, before it is resolved
+    /// against the config's state (a requested deploy of an undeployable
+    /// config resolves to an undeploy, for example).
+    pub fn action_type(&self) -> &'static str {
+        match self {
+            Action::DeployLatest | Action::DeployBranch { .. } | Action::DeployCommit { .. } => {
+                "deploy"
+            }
+            Action::Undeploy => "undeploy",
+            Action::Bounce => "bounce",
+            Action::ExecuteJob => "execute_job",
+            Action::ToggleAutodeploy => "toggle_autodeploy",
+        }
     }
 
     fn is_toggle_autodeploy(&self) -> bool {
@@ -1205,96 +1218,24 @@ pub async fn deploy_config(
         form.get("sha").unwrap_or(&"".to_string())
     );
 
-    let deployment_state = match DeploymentState::from_action(&action, &config, &conn) {
-        Ok(deployment_state) => deployment_state,
-        Err(e) => {
-            log::error!("Failed to get deployment state: {}", e);
-            return HttpResponse::InternalServerError()
-                .content_type("text/html; charset=utf-8")
-                .body("Failed to get deployment state");
-        }
+    let result = crate::deploys::run_action(&action, &config, &client, &octocrabs, &conn).await;
+    let (action_type, outcome) = match &result {
+        Ok(deploy_action) => (deploy_action.action_type(), "success"),
+        Err(_) => (action.action_type(), "error"),
     };
-
-    let deploy_action = match &action {
-        Action::DeployLatest
-        | Action::DeployBranch { .. }
-        | Action::DeployCommit { .. }
-        | Action::Undeploy => match deployment_state {
-            DeploymentState::DeployedWithArtifact { artifact, config } => DeployAction::Deploy {
-                name: name.to_string(),
-                artifact: Some(artifact),
-                config,
-            },
-            DeploymentState::DeployedOnlyConfig { config } => DeployAction::Deploy {
-                name: name.to_string(),
-                artifact: None,
-                config,
-            },
-            DeploymentState::Undeployed => DeployAction::Undeploy {
-                name: name.to_string(),
-            },
-        },
-        Action::Bounce => DeployAction::Bounce {
-            name: name.to_string(),
-        },
-        Action::ExecuteJob => DeployAction::ExecuteJob {
-            name: name.to_string(),
-        },
-        Action::ToggleAutodeploy => DeployAction::ToggleAutodeploy {
-            name: name.to_string(),
-        },
-    };
-
-    match deploy_action
-        .execute(&client, &octocrabs, config.config_repository())
-        .await
-    {
-        Ok(()) => (),
-        Err(e) => {
-            log::error!("Failed to execute deploy action: {}", e);
-            crate::metrics::get().deploy_actions.add(
-                1,
-                &[
-                    opentelemetry::KeyValue::new("name", deploy_action.config_name().to_string()),
-                    opentelemetry::KeyValue::new("action", deploy_action.action_type()),
-                    opentelemetry::KeyValue::new("result", "error"),
-                ],
-            );
-            return HttpResponse::InternalServerError()
-                .content_type("text/html; charset=utf-8")
-                .body("Failed to execute deploy action");
-        }
-    }
     crate::metrics::get().deploy_actions.add(
         1,
         &[
-            opentelemetry::KeyValue::new("name", deploy_action.config_name().to_string()),
-            opentelemetry::KeyValue::new("action", deploy_action.action_type()),
-            opentelemetry::KeyValue::new("result", "success"),
+            opentelemetry::KeyValue::new("name", name.clone()),
+            opentelemetry::KeyValue::new("action", action_type),
+            opentelemetry::KeyValue::new("result", outcome),
         ],
     );
-
-    // Best-effort: mirror the new state into the GitHub Deployments API.
-    crate::github_deployments::report_deploy_action(&octocrabs, &config, &deploy_action).await;
-
-    let Ok(maybe_deploy_event) =
-        DeployEvent::from_user_deploy_action(&deploy_action, &conn, &config)
-    else {
+    if let Err(e) = result {
+        log::error!("Failed to execute deploy action on {}: {}", name, e);
         return HttpResponse::InternalServerError()
             .content_type("text/html; charset=utf-8")
-            .body("Failed to create deploy event");
-    };
-    if let Some(deploy_event) = maybe_deploy_event {
-        match deploy_event.insert(&conn) {
-            Ok(_) => (),
-            Err(e) => {
-                log::error!("Failed to insert deploy event: {}", e);
-
-                return HttpResponse::InternalServerError()
-                    .content_type("text/html; charset=utf-8")
-                    .body("Failed to insert deploy event");
-            }
-        }
+            .body(format!("Failed to execute deploy action: {}", e));
     }
 
     // Redirect back to the DeployConfig page with the selected config

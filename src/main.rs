@@ -32,6 +32,7 @@ pub mod prelude {
 mod build_status;
 mod crab_ext;
 mod db;
+mod deploys;
 mod error;
 mod github_deployments;
 mod kubernetes;
