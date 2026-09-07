@@ -1,11 +1,85 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use kube::api::DynamicObject;
 
-pub trait WithInterpolatedVersion {
-    fn with_interpolated_version(&self, version: &str) -> Self;
+/// `$NAME` tokens: an uppercase identifier after a dollar sign.
+fn parameter_token_regex() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    #[allow(clippy::expect_used)]
+    RE.get_or_init(|| {
+        regex::Regex::new(r"\$([A-Z][A-Z0-9_]*)").expect("valid parameter token regex")
+    })
 }
 
-pub trait WithVersion {
-    fn with_version(&self, version: &str) -> Self;
+/// Substitute `$NAME` with the parameter's value wherever a string mentions
+/// it. Tokens that are not in `values` are left exactly as they are: a
+/// manifest may legitimately contain `$HOME` or `$(POD_NAME)` for a shell
+/// or the kubelet to expand, and only declared parameters are ours.
+pub trait WithParameters {
+    fn with_parameters(&self, values: &BTreeMap<String, String>) -> Self;
+}
+
+/// Every `$NAME` token mentioned anywhere in a value.
+pub fn referenced_parameters(value: &serde_json::Value) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    collect_tokens(value, &mut out);
+    out
+}
+
+fn collect_tokens(value: &serde_json::Value, out: &mut BTreeSet<String>) {
+    match value {
+        serde_json::Value::Object(map) => map.values().for_each(|v| collect_tokens(v, out)),
+        serde_json::Value::Array(arr) => arr.iter().for_each(|v| collect_tokens(v, out)),
+        serde_json::Value::String(s) => {
+            for cap in parameter_token_regex().captures_iter(s) {
+                if let Some(name) = cap.get(1) {
+                    out.insert(name.as_str().to_string());
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn substitute(s: &str, values: &BTreeMap<String, String>) -> String {
+    parameter_token_regex()
+        .replace_all(s, |cap: &regex::Captures| {
+            let name = cap.get(1).map(|m| m.as_str()).unwrap_or_default();
+            match values.get(name) {
+                Some(v) => v.clone(),
+                None => cap
+                    .get(0)
+                    .map(|m| m.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            }
+        })
+        .into_owned()
+}
+
+impl WithParameters for serde_json::Value {
+    fn with_parameters(&self, values: &BTreeMap<String, String>) -> Self {
+        match self {
+            serde_json::Value::Object(map) => serde_json::Value::Object(
+                map.iter()
+                    .map(|(k, v)| (k.clone(), v.with_parameters(values)))
+                    .collect(),
+            ),
+            serde_json::Value::Array(arr) => {
+                serde_json::Value::Array(arr.iter().map(|v| v.with_parameters(values)).collect())
+            }
+            serde_json::Value::String(s) => serde_json::Value::String(substitute(s, values)),
+            _ => self.clone(),
+        }
+    }
+}
+
+impl WithParameters for DynamicObject {
+    fn with_parameters(&self, values: &BTreeMap<String, String>) -> Self {
+        let mut obj = self.clone();
+        obj.data = obj.data.with_parameters(values);
+        obj
+    }
 }
 
 pub trait WithInjectedEnv {
@@ -99,52 +173,6 @@ impl WithInjectedEnv for DynamicObject {
     }
 }
 
-impl WithInterpolatedVersion for serde_json::Value {
-    fn with_interpolated_version(&self, version: &str) -> Self {
-        match self {
-            serde_json::Value::Object(json) => {
-                let mut new_json = serde_json::Map::new();
-                for (key, value) in json {
-                    new_json.insert(key.clone(), value.with_interpolated_version(version));
-                }
-                serde_json::Value::Object(new_json)
-            }
-            serde_json::Value::Array(array) => {
-                let mut new_array = Vec::new();
-                for value in array {
-                    new_array.push(value.with_interpolated_version(version));
-                }
-                serde_json::Value::Array(new_array)
-            }
-            serde_json::Value::String(string) => {
-                serde_json::Value::String(string.replace("$SHA", version))
-            }
-            _ => self.clone(),
-        }
-    }
-}
-
-impl WithInterpolatedVersion for serde_json::Map<String, serde_json::Value> {
-    fn with_interpolated_version(&self, version: &str) -> Self {
-        #[allow(clippy::expect_used)]
-        serde_json::Value::Object(self.clone())
-            .with_interpolated_version(version)
-            .as_object()
-            .expect("with_interpolated_version should return an object")
-            .clone()
-    }
-}
-
-impl WithVersion for DynamicObject {
-    /// Interpolates the data with the given version
-    fn with_version(&self, version: &str) -> Self {
-        let mut obj = self.clone();
-
-        obj.data = obj.data.with_interpolated_version(version);
-        obj
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -189,6 +217,43 @@ mod tests {
             .get("value")?
             .as_str()
             .map(|s| s.to_string())
+    }
+
+    #[test]
+    fn substitutes_declared_parameters_and_leaves_the_rest() {
+        let spec = json!({
+            "image": "ghcr.io/x/app:commit-$SHA",
+            "args": ["--nginx=$NGINX", "--home=$HOME", "$(POD_NAME)", "$SHA_SUFFIX"],
+            "replicas": "$REPLICAS",
+            "nested": { "list": [ { "v": "$SHA-$NGINX" } ] }
+        });
+        let values = BTreeMap::from([
+            ("SHA".to_string(), "abc".to_string()),
+            ("NGINX".to_string(), "1.25".to_string()),
+        ]);
+        let out = spec.with_parameters(&values);
+        assert_eq!(out["image"], "ghcr.io/x/app:commit-abc");
+        assert_eq!(out["args"][0], "--nginx=1.25");
+        assert_eq!(
+            out["args"][1], "--home=$HOME",
+            "undeclared tokens are untouched"
+        );
+        assert_eq!(out["args"][2], "$(POD_NAME)");
+        assert_eq!(
+            out["args"][3], "$SHA_SUFFIX",
+            "a longer name is not a prefix match"
+        );
+        assert_eq!(
+            out["replicas"], "$REPLICAS",
+            "declared-looking but absent stays"
+        );
+        assert_eq!(out["nested"]["list"][0]["v"], "abc-1.25");
+
+        let refs = referenced_parameters(&spec);
+        assert_eq!(
+            refs.into_iter().collect::<Vec<_>>(),
+            vec!["HOME", "NGINX", "REPLICAS", "SHA", "SHA_SUFFIX"]
+        );
     }
 
     #[test]
