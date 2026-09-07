@@ -1159,6 +1159,13 @@ pub async fn deploy_configs(
             html! {}
         }
     };
+    let patches_panel = match selected_config {
+        Some(config) => {
+            let return_url = format!("/deploy?selected={}", config.name_any());
+            crate::web::patches::render_patches_panel(config, &return_url)
+        }
+        None => html! {},
+    };
     let parameters_panel = match selected_config {
         Some(config) => {
             let return_url = format!("/deploy?selected={}", config.name_any());
@@ -1357,6 +1364,7 @@ pub async fn deploy_configs(
                                         }
                                     }
                                     (parameters_panel)
+                                    (patches_panel)
                                     (blocker_panel)
                                 }
                             }

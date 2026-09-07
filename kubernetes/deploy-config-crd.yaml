@@ -85,6 +85,49 @@ spec:
                     x-kubernetes-validations:
                       - rule: "!(has(self.track) && has(self.pin))"
                         message: "a selection is either track or pin, not both"
+                patches:
+                  type: array
+                  description: "JSON Patch operations applied to the rendered manifests, in order. Written by the deploy handler."
+                  items:
+                    type: object
+                    required:
+                      - target
+                      - op
+                      - path
+                    properties:
+                      target:
+                        type: object
+                        required:
+                          - kind
+                          - name
+                        properties:
+                          file:
+                            type: string
+                          kind:
+                            type: string
+                          name:
+                            type: string
+                      op:
+                        type: string
+                        enum:
+                          - add
+                          - replace
+                          - remove
+                      path:
+                        type: string
+                      value:
+                        x-kubernetes-preserve-unknown-fields: true
+                      durability:
+                        type: string
+                        enum:
+                          - temporary
+                          - standing
+                      note:
+                        type: string
+                      by:
+                        type: string
+                      since:
+                        type: string
                 team:
                   type: string
                 kind:

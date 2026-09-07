@@ -95,6 +95,39 @@ pub fn tool_definitions() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "add_patch".to_string(),
+            description: "Add a JSON Patch operation to one of a config's rendered manifests (an extra env var, a mount, a replica count) without changing the config repo. Validated against the manifests before it is saved; a patch that does not fit is refused. Sticky until removed; temporary patches make the config a temporary deployment.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of the deploy config" },
+                    "kind": { "type": "string", "description": "Kind of the manifest to patch, e.g. Deployment" },
+                    "manifest": { "type": "string", "description": "metadata.name of the manifest to patch" },
+                    "file": { "type": "string", "description": "Template file, only needed when kind and name are ambiguous" },
+                    "op": { "type": "string", "enum": ["add", "replace", "remove"] },
+                    "path": { "type": "string", "description": "JSON pointer, e.g. /spec/replicas or /spec/template/spec/containers/0/env/-" },
+                    "value": { "description": "Any JSON value; required for add and replace" },
+                    "durability": { "type": "string", "enum": ["temporary", "standing"], "description": "Default temporary" },
+                    "note": { "type": "string" },
+                    "by": { "type": "string" }
+                },
+                "required": ["name", "kind", "manifest", "op", "path"]
+            }),
+        },
+        Tool {
+            name: "remove_patch".to_string(),
+            description: "Remove a patch by its index from get_deploy_config's patches list.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of the deploy config" },
+                    "index": { "type": "integer" },
+                    "by": { "type": "string" }
+                },
+                "required": ["name", "index"]
+            }),
+        },
+        Tool {
             name: "clear_selection".to_string(),
             description: "Drop a config's branch override or pin and deploy the latest of its default branch. Ends a temporary deployment.".to_string(),
             input_schema: json!({
@@ -310,6 +343,8 @@ pub async fn dispatch(
             handle_action("clear_selection", arguments, client, pool, octocrabs).await
         }
         "set_parameter" => handle_set_parameter(arguments, client, pool, octocrabs).await,
+        "add_patch" => handle_patch_change(arguments, true, client, pool, octocrabs).await,
+        "remove_patch" => handle_patch_change(arguments, false, client, pool, octocrabs).await,
         "undeploy" => handle_action("undeploy", arguments, client, pool, octocrabs).await,
         "bounce" => handle_action("bounce", arguments, client, pool, octocrabs).await,
         "execute_job" => handle_action("execute_job", arguments, client, pool, octocrabs).await,
@@ -465,6 +500,17 @@ async fn handle_get_deploy_config(
         "selection": selection_json(&config),
         "parameters": parameters_json(&config),
         "latest_revision": latest_revision.as_ref().map(revision_json),
+        "patches": config.spec.spec.patches.iter().enumerate().map(|(i, p)| json!({
+            "index": i,
+            "description": p.describe(),
+            "target": p.target,
+            "op": p.op,
+            "path": p.path,
+            "value": p.value,
+            "durability": p.durability.as_str(),
+            "note": p.note,
+            "by": p.by,
+        })).collect::<Vec<_>>(),
         "supports_bounce": config.supports_bounce(),
         "supports_execute_job": config.supports_execute_job(),
         "artifact_repo": artifact_repo.as_ref().map(|r| format!("{}/{}", r.owner, r.repo)),
@@ -613,6 +659,85 @@ async fn handle_deploy(
             .map(String::from),
     };
     execute_deploy_action_with(&action, name, &config, client, pool, octocrabs, &intent).await
+}
+
+async fn handle_patch_change(
+    arguments: Value,
+    add: bool,
+    client: &Client,
+    pool: &Pool<SqliteConnectionManager>,
+    octocrabs: &Octocrabs,
+) -> ToolCallResult {
+    use crate::deploys::PatchChange;
+    use crate::kubernetes::patches::{ManifestPatch, PatchOp, PatchTarget};
+    use crate::kubernetes::selections::Durability;
+
+    let name = match arguments.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n,
+        None => return ToolCallResult::error("Missing required parameter: name".to_string()),
+    };
+    let config = match get_deploy_config(client, name).await {
+        Ok(Some(c)) => c,
+        Ok(None) => return ToolCallResult::error(format!("Deploy config '{}' not found", name)),
+        Err(e) => return ToolCallResult::error(format!("Failed to get deploy config: {}", e)),
+    };
+    let text = |key: &str| {
+        arguments
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    };
+    let actor = text("by").unwrap_or_else(|| "mcp".to_string());
+    let change = if add {
+        let (Some(kind), Some(manifest), Some(path)) =
+            (text("kind"), text("manifest"), text("path"))
+        else {
+            return ToolCallResult::error("kind, manifest and path are required".to_string());
+        };
+        let op = match text("op").as_deref() {
+            Some("add") => PatchOp::Add,
+            Some("replace") => PatchOp::Replace,
+            Some("remove") => PatchOp::Remove,
+            _ => return ToolCallResult::error("op must be add, replace or remove".to_string()),
+        };
+        PatchChange::Add(ManifestPatch {
+            target: PatchTarget {
+                file: text("file"),
+                kind,
+                name: manifest,
+            },
+            op,
+            path,
+            value: arguments.get("value").cloned(),
+            durability: match text("durability").as_deref() {
+                Some("standing") => Durability::Standing,
+                _ => Durability::Temporary,
+            },
+            note: text("note"),
+            by: Some(actor.clone()),
+            since: Some(chrono::Utc::now().to_rfc3339()),
+        })
+    } else {
+        match arguments.get("index").and_then(|v| v.as_u64()) {
+            Some(i) => PatchChange::Remove(i as usize),
+            None => return ToolCallResult::error("Missing required parameter: index".to_string()),
+        }
+    };
+    let conn = match pool.get() {
+        Ok(c) => c,
+        Err(e) => return ToolCallResult::error(format!("Database error: {}", e)),
+    };
+    match crate::deploys::change_patches(&config, client, &conn, &actor, change, octocrabs).await {
+        Ok(()) => ToolCallResult::text(format!(
+            "Patch list updated on {}; reconcile applies it within a few seconds.",
+            name
+        )),
+        Err(crate::error::AppError::Blocked(m)) => ToolCallResult::error(format!("Refused: {m}")),
+        Err(crate::error::AppError::InvalidInput(m)) => ToolCallResult::error(m),
+        Err(e) => ToolCallResult::error(format!("Failed: {e}")),
+    }
 }
 
 async fn handle_set_parameter(

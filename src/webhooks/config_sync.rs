@@ -546,6 +546,7 @@ pub async fn fetch_deploy_configs_by_sha(
                     // Selections are user intent, owned by the deploy handler;
                     // empty here means "leave whatever is on the object".
                     selections: Default::default(),
+                    patches: vec![],
                     config: Repository {
                         owner: owner.clone(),
                         repo: repo.clone(),

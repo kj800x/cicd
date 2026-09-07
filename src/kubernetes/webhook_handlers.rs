@@ -328,6 +328,7 @@ mod tests {
                     kind: "service".into(),
                     parameters,
                     selections: Default::default(),
+                    patches: vec![],
                     config: Repository {
                         owner: "o".into(),
                         repo: "cfg".into(),
