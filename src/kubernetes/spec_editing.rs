@@ -128,7 +128,19 @@ fn inject_env_into_containers(
             let mut obj = obj.clone();
             let mut env_arr: Vec<serde_json::Value> = match obj.get("env") {
                 Some(serde_json::Value::Array(a)) => a.clone(),
-                _ => Vec::new(),
+                None => Vec::new(),
+                // A malformed `env` (a patch that replaced the array with an
+                // object, say) is left exactly as it is so the API server
+                // rejects it. Rebuilding it here would quietly drop every
+                // variable the template declared and apply cleanly.
+                Some(other) => {
+                    log::warn!(
+                        "container {} has a non-array env ({}); not injecting deploy env vars",
+                        obj.get("name").and_then(|n| n.as_str()).unwrap_or("?"),
+                        other
+                    );
+                    return serde_json::Value::Object(obj);
+                }
             };
             for (name, value) in vars {
                 upsert_env(&mut env_arr, name, value);
@@ -387,5 +399,18 @@ mod tests {
             .unwrap();
         assert_eq!(entry.get("value").and_then(|v| v.as_str()), Some("abc123"));
         assert!(entry.get("valueFrom").is_none());
+    }
+    #[test]
+    fn leaves_a_malformed_env_alone_instead_of_rebuilding_it() {
+        // This is what a patch with `add /.../env` (instead of `/env/-`) does.
+        let broken = json!({ "name": "X", "value": "1" });
+        let spec = json!({
+            "spec": { "template": { "spec": { "containers": [
+                { "name": "app", "image": "img", "env": broken.clone() }
+            ] } } }
+        });
+        let out = spec.with_injected_env(&vars());
+        let env = &out["spec"]["template"]["spec"]["containers"][0]["env"];
+        assert_eq!(env, &broken, "env must not be turned into a fresh array");
     }
 }
