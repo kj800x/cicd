@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use kube::{api::ObjectMeta, Client, ResourceExt};
 use octocrab::models::repos::Content;
@@ -17,7 +17,7 @@ use crate::{
     error::{AppError, AppResult},
     kubernetes::{
         deploy_config::{DeployConfig, DeployConfigSpec, DeployConfigSpecFields},
-        parameters::ParameterSource,
+        parameters::{ParameterSource, ParameterSources, SHA_PARAMETER},
         repo::RepositoryBranch,
         test_mode,
         webhook_handlers::{
@@ -283,11 +283,40 @@ struct GitHubArtifactRepo {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct GitHubDeployConfig {
+    /// Sugar for a commit parameter named `SHA`.
     #[serde(rename = "artifactRepo")]
     artifact_repo: Option<GitHubArtifactRepo>,
+    /// Declared parameters: `{type: commit, owner, repo, branch}` or
+    /// `{type: value, default}`, keyed by the `$NAME` used in manifests.
+    #[serde(default)]
+    parameters: BTreeMap<String, ParameterSource>,
     team: String,
     kind: String,
     namespace: String,
+}
+
+impl GitHubDeployConfig {
+    /// Every declared parameter, with `artifactRepo` folded in as `SHA`.
+    /// Declaring `SHA` both ways is a mistake worth refusing.
+    fn parameter_sources(&self) -> AppResult<ParameterSources> {
+        let mut sources = self.parameters.clone();
+        if let Some(artifact) = &self.artifact_repo {
+            if sources.contains_key(SHA_PARAMETER) {
+                return Err(AppError::InvalidInput(format!(
+                    "both artifactRepo and parameters.{SHA_PARAMETER} are set; declare one"
+                )));
+            }
+            sources.insert(
+                SHA_PARAMETER.to_string(),
+                ParameterSource::from(RepositoryBranch {
+                    owner: artifact.owner.clone(),
+                    repo: artifact.repo.clone(),
+                    branch: artifact.branch.clone(),
+                }),
+            );
+        }
+        Ok(sources)
+    }
 }
 
 pub async fn fetch_deploy_config_by_sha(
@@ -510,16 +539,11 @@ pub async fn fetch_deploy_configs_by_sha(
             config_name,
             child_files.len()
         );
-        let artifact = config.artifact_repo.map(|artifact_repo| RepositoryBranch {
-            owner: artifact_repo.owner,
-            repo: artifact_repo.repo,
-            branch: artifact_repo.branch,
-        });
+        let parameters = config.parameter_sources()?;
         let dc = DeployConfig {
             spec: DeployConfigSpec {
                 spec: DeployConfigSpecFields {
-                    // The on-disk `artifactRepo` becomes the `SHA` parameter.
-                    parameters: ParameterSource::sha_map(artifact),
+                    parameters,
                     // Selections are user intent, owned by the deploy handler;
                     // empty here means "leave whatever is on the object".
                     selections: Default::default(),

@@ -274,9 +274,6 @@ impl DeployConfig {
         };
 
         for (name, value) in &status.parameters {
-            let Some(deployed) = value.as_sha_maybe_branch() else {
-                continue;
-            };
             let key = name
                 .to_ascii_uppercase()
                 .replace(|c: char| !c.is_ascii_alphanumeric(), "_");
@@ -284,9 +281,9 @@ impl DeployConfig {
             let (mode, channel) = match selection.mode() {
                 Mode::Pin(_) => ("pin", None),
                 Mode::Track(branch) => ("override", Some(branch.to_string())),
-                Mode::Default => ("track", deployed.branch.clone()),
+                Mode::Default => ("track", value.branch().map(String::from)),
             };
-            vars.push((format!("CICD_PARAM_{key}"), deployed.sha));
+            vars.push((format!("CICD_PARAM_{key}"), value.rendered()));
             vars.push((format!("CICD_PARAM_{key}_MODE"), mode.to_string()));
             if let Some(channel) = channel {
                 vars.push((format!("CICD_PARAM_{key}_CHANNEL"), channel));
@@ -340,6 +337,24 @@ impl DeployConfig {
     /// Get the Kubernetes resource specs
     pub fn resource_specs(&self) -> &[serde_json::Value] {
         &self.spec.spec.specs
+    }
+
+    /// What every static (`value`) parameter resolves to right now: its
+    /// pinned value if the selection pins it, otherwise its default.
+    pub fn resolve_value_parameters(&self) -> ParameterValues {
+        self.spec
+            .spec
+            .parameters
+            .iter()
+            .filter_map(|(name, source)| {
+                let default = source.default_value()?;
+                let value = match self.selection(name).mode() {
+                    crate::kubernetes::selections::Mode::Pin(v) => v.to_string(),
+                    _ => default.to_string(),
+                };
+                Some((name.clone(), ParameterValue::Value { value }))
+            })
+            .collect()
     }
 
     /// The rendered value of every deployed parameter, keyed by name, as it
@@ -646,6 +661,50 @@ mod tests {
             !base.is_temporary_deployment(),
             "undeployed is never temporary"
         );
+    }
+
+    #[test]
+    fn value_parameters_resolve_to_default_or_pin() {
+        let mut dc = config(repo("kj800x", "app"), Some(repo("kj800x", "app")));
+        dc.spec.spec.parameters.insert(
+            "REPLICAS".into(),
+            ParameterSource::Value {
+                default: "2".into(),
+            },
+        );
+        assert_eq!(
+            dc.resolve_value_parameters()
+                .get("REPLICAS")
+                .map(|v| v.rendered()),
+            Some("2".into())
+        );
+        dc.spec
+            .spec
+            .selections
+            .insert("REPLICAS".into(), Selection::pin("5", Durability::Standing));
+        assert_eq!(
+            dc.resolve_value_parameters()
+                .get("REPLICAS")
+                .map(|v| v.rendered()),
+            Some("5".into())
+        );
+        assert!(
+            !dc.resolve_value_parameters().contains_key(SHA_PARAMETER),
+            "feeds are not static"
+        );
+
+        // Deployed value parameters show up in env vars with their mode.
+        let mut status = DeployConfigStatus::default();
+        status.parameters.insert(
+            "REPLICAS".into(),
+            ParameterValue::Value { value: "5".into() },
+        );
+        dc.status = Some(status);
+        let env: std::collections::BTreeMap<String, String> =
+            dc.deploy_env_vars().into_iter().collect();
+        assert_eq!(env["CICD_PARAM_REPLICAS"], "5");
+        assert_eq!(env["CICD_PARAM_REPLICAS_MODE"], "pin");
+        assert!(!env.contains_key("CICD_PARAM_REPLICAS_CHANNEL"));
     }
 
     #[test]

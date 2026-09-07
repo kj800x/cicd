@@ -15,7 +15,7 @@ use crate::webhooks::config_sync::fetch_deploy_config_by_sha;
 use crate::{
     crab_ext::IRepo,
     error::{AppError, AppResult},
-    kubernetes::repo::ShaMaybeBranch,
+    kubernetes::{parameters::ParameterValues, repo::ShaMaybeBranch},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +30,8 @@ pub enum DeployAction {
         name: String,
         artifact: Option<ShaMaybeBranch>,
         config: ShaMaybeBranch,
+        /// Resolved values for every parameter other than `SHA`.
+        values: ParameterValues,
     },
     Undeploy {
         name: String,
@@ -73,12 +75,14 @@ impl DeployAction {
                 name,
                 artifact,
                 config,
+                values,
             } => {
                 log::debug!(
-                    "Deploy action: name={}, artifact={:?}, config={:?}",
+                    "Deploy action: name={}, artifact={:?}, config={:?}, values={:?}",
                     name,
                     artifact,
-                    config
+                    config,
+                    values
                 );
                 log::debug!(
                     "Fetching config from repo {}/{} at sha: {}",
@@ -115,6 +119,7 @@ impl DeployAction {
                     name,
                     DeployConfigStatusBuilder::default()
                         .with_artifact(artifact.clone())
+                        .with_parameters(values.clone())
                         .with_config(Some(config.clone())),
                 )
                 .await?;
@@ -135,7 +140,7 @@ impl DeployAction {
                     &namespace,
                     name,
                     DeployConfigStatusBuilder::default()
-                        .with_artifact(None)
+                        .clear_parameters()
                         .with_config(None),
                 )
                 .await?;

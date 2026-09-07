@@ -72,6 +72,7 @@ impl NewRevision {
                 name,
                 artifact,
                 config: cfg,
+                values,
             } => {
                 let repo = config.config_repository();
                 let config_version_hash = GitRepo::get_by_name(&repo.owner, &repo.repo, conn)
@@ -79,7 +80,7 @@ impl NewRevision {
                     .flatten()
                     .and_then(|r| DeployConfigVersion::get_hash(name, r.id, &cfg.sha, conn).ok())
                     .flatten();
-                let parameters = artifact
+                let mut parameters: Vec<RevisionParameter> = artifact
                     .iter()
                     .map(|a| RevisionParameter {
                         name: SHA_PARAMETER.to_string(),
@@ -88,6 +89,14 @@ impl NewRevision {
                         branch: a.branch.clone(),
                     })
                     .collect();
+                for (pname, value) in values {
+                    parameters.push(RevisionParameter {
+                        name: pname.clone(),
+                        kind: value.type_name().to_string(),
+                        value: value.rendered(),
+                        branch: value.branch().map(String::from),
+                    });
+                }
                 Some(NewRevision {
                     config_name: name.clone(),
                     actor: actor.to_string(),
@@ -342,6 +351,7 @@ mod tests {
                 sha: "cfg".into(),
                 branch: Some("master".into()),
             },
+            values: Default::default(),
         };
         let new = NewRevision::from_deploy_action(&deploy, &cfg, &conn, "web")
             .ok_or_else(|| crate::error::AppError::Internal("expected a revision".into()))?;
@@ -462,6 +472,7 @@ mod tests {
                 sha: "cfg".into(),
                 branch: Some("master".into()),
             },
+            values: Default::default(),
         };
         let new = NewRevision::from_deploy_action(&deploy, &config(), &conn, "web")
             .ok_or_else(|| crate::error::AppError::Internal("expected a revision".into()))?;
