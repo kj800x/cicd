@@ -12,7 +12,7 @@ use crate::kubernetes::api::{
 };
 use crate::kubernetes::parameters::SHA_PARAMETER;
 use crate::kubernetes::repo::{DeploymentState, ShaMaybeBranch};
-use crate::kubernetes::selections::Mode;
+use crate::kubernetes::selections::{Mode, Selection};
 use crate::kubernetes::{list_namespace_objects, DeployConfig};
 use crate::prelude::*;
 use crate::web::team_prefs::TeamsCookie;
@@ -139,8 +139,11 @@ impl ResolvedVersion {
                 .expect("Failed to get git repo");
 
         match action {
-            Action::DeployLatest | Action::SetParameter { .. } | Action::ClearSelection => {
-                let selection = config.selection(SHA_PARAMETER);
+            Action::DeployLatest
+            | Action::SetParameter { .. }
+            | Action::ClearSelection
+            | Action::EndTemporary => {
+                let selection = action.effective_sha_selection(config);
                 let branch_name: &str = match (action.deploys_latest(), selection.mode()) {
                     (true, Mode::Pin(value)) => {
                         // Latest of a pinned parameter is the pin itself.
@@ -581,11 +584,12 @@ impl DeploymentState {
         match (action, artifact_repository) {
             (Action::DeployLatest, Some(artifact_repository))
             | (Action::SetParameter { .. }, Some(artifact_repository))
-            | (Action::ClearSelection, Some(artifact_repository)) => {
+            | (Action::ClearSelection, Some(artifact_repository))
+            | (Action::EndTemporary, Some(artifact_repository)) => {
                 // "Latest" means latest according to the parameter's selection:
                 // the default channel, an override branch, or, for a pin, the
                 // pin itself. Clearing the selection always means the default.
-                let selection = config.selection(SHA_PARAMETER);
+                let selection = action.effective_sha_selection(config);
                 let branch_name: &str = match (action.deploys_latest(), selection.mode()) {
                     (true, Mode::Pin(value)) => {
                         let pinned = ShaMaybeBranch {
@@ -639,7 +643,8 @@ impl DeploymentState {
             }
             (Action::DeployLatest, None)
             | (Action::SetParameter { .. }, None)
-            | (Action::ClearSelection, None) => {
+            | (Action::ClearSelection, None)
+            | (Action::EndTemporary, None) => {
                 let deployment_state = config.deployment_state();
                 // FIXME: Misleading: artifact_branch is just the tracking branch.
                 let branch_name = deployment_state.artifact_branch().unwrap_or("master");
@@ -825,6 +830,7 @@ pub async fn render_preview_content(
         | Action::Rollback { .. }
         | Action::ClearSelection
         | Action::SetParameter { .. }
+        | Action::EndTemporary
         | Action::Undeploy => deploy_transition.format(&owner, &repo).await,
         Action::Bounce => {
             html! {
@@ -951,6 +957,10 @@ pub enum Action {
         parameter: String,
         value: Option<String>,
     },
+    /// Clear every temporary selection and remove every temporary patch,
+    /// then deploy latest of what remains. The one-step way out of a
+    /// temporary deployment; standing overrides are left alone.
+    EndTemporary,
     Bounce,
     ExecuteJob,
     ToggleAutodeploy,
@@ -980,6 +990,7 @@ impl Action {
                 None => Action::DeployLatest,
             },
             "clear-selection" => Action::ClearSelection,
+            "end-temporary" => Action::EndTemporary,
             "set-parameter" => match query.get("parameter").filter(|p| !p.is_empty()) {
                 Some(parameter) => Action::SetParameter {
                     parameter: parameter.clone(),
@@ -1002,6 +1013,7 @@ impl Action {
             Action::DeployCommit { sha } => format!("action=deploy&sha={}", sha),
             Action::Rollback { revision } => format!("action=rollback&revision={}", revision),
             Action::ClearSelection => "action=clear-selection".to_string(),
+            Action::EndTemporary => "action=end-temporary".to_string(),
             Action::SetParameter { parameter, value } => format!(
                 "action=set-parameter&parameter={}&value={}",
                 parameter,
@@ -1031,6 +1043,7 @@ impl Action {
             }
             Action::Rollback { .. } => "rollback",
             Action::ClearSelection => "clear_selection",
+            Action::EndTemporary => "end_temporary",
             Action::SetParameter { .. } => "set_parameter",
             Action::Undeploy => "undeploy",
             Action::Bounce => "bounce",
@@ -1047,9 +1060,28 @@ impl Action {
         matches!(self, Action::SetParameter { .. })
     }
 
+    pub fn is_end_temporary(&self) -> bool {
+        matches!(self, Action::EndTemporary)
+    }
+
     /// Actions that resolve the SHA parameter through its current selection.
     pub fn deploys_latest(&self) -> bool {
-        matches!(self, Action::DeployLatest | Action::SetParameter { .. })
+        matches!(
+            self,
+            Action::DeployLatest | Action::SetParameter { .. } | Action::EndTemporary
+        )
+    }
+
+    /// The SHA selection this action resolves against. Ending a temporary
+    /// deployment drops a temporary selection before resolving, so a
+    /// preview of it shows the default channel rather than the override.
+    pub fn effective_sha_selection(&self, config: &DeployConfig) -> Selection {
+        let selection = config.selection(SHA_PARAMETER);
+        if self.is_end_temporary() && selection.is_temporary() {
+            Selection::default()
+        } else {
+            selection
+        }
     }
 
     fn is_toggle_autodeploy(&self) -> bool {
@@ -1357,6 +1389,9 @@ pub async fn deploy_configs(
                                                 Action::ClearSelection => {
                                                     "Clear and deploy latest"
                                                 }
+                                                Action::EndTemporary => {
+                                                    "End temporary deployment"
+                                                }
                                                 Action::SetParameter { .. } => {
                                                     "Set and deploy"
                                                 }
@@ -1400,6 +1435,9 @@ pub async fn deploy_configs(
                                             }
                                             Action::ClearSelection => {
                                                 "Back to the default branch for "
+                                            }
+                                            Action::EndTemporary => {
+                                                "End of the temporary deployment of "
                                             }
                                             Action::SetParameter { ref parameter, .. } => {
                                                 (format!("Set ${} on ", parameter))
