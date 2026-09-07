@@ -1738,3 +1738,40 @@ header {
   border-radius: 6px;
   background-color: white;
 }
+
+/* Parameters panel */
+.parameters-panel {
+  margin-top: 24px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-color);
+}
+.parameters-panel h3 {
+  margin-top: 0;
+}
+.parameter-item {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 14px;
+}
+.parameter-head code {
+  font-weight: 600;
+}
+.parameter-value {
+  margin: 4px 0;
+}
+.parameter-set {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-top: 6px;
+}
+.parameter-set input,
+.parameter-set select {
+  padding: 3px 8px;
+  font-size: 13px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+}
+.parameter-set input[name="value"] {
+  grid-column: 1 / -1;
+}

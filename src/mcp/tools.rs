@@ -79,6 +79,22 @@ pub fn tool_definitions() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "set_parameter".to_string(),
+            description: "Pin a value parameter to a new value (or reset it to its default by omitting value) and redeploy. Only parameters of type value can be set; versions are set with deploy.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of the deploy config" },
+                    "parameter": { "type": "string", "description": "Parameter name, e.g. REPLICAS" },
+                    "value": { "type": "string", "description": "New value; omit to reset to the default" },
+                    "durability": { "type": "string", "enum": ["temporary", "standing"], "description": "Default standing" },
+                    "note": { "type": "string" },
+                    "by": { "type": "string" }
+                },
+                "required": ["name", "parameter"]
+            }),
+        },
+        Tool {
             name: "clear_selection".to_string(),
             description: "Drop a config's branch override or pin and deploy the latest of its default branch. Ends a temporary deployment.".to_string(),
             input_schema: json!({
@@ -187,6 +203,38 @@ pub fn tool_definitions() -> Vec<Tool> {
     ]
 }
 
+/// Every declared parameter: its source, what is deployed, and its selection.
+fn parameters_json(config: &DeployConfig) -> Value {
+    let deployed = config.parameter_values();
+    let mut out = serde_json::Map::new();
+    for (name, source) in &config.spec.spec.parameters {
+        let s = config.selection(name);
+        let (mode, channel, pinned) = match s.mode() {
+            Mode::Default => (
+                "track",
+                source.as_repository_branch().map(|r| r.branch),
+                None,
+            ),
+            Mode::Track(b) => ("override", Some(b.to_string()), None),
+            Mode::Pin(v) => ("pin", None, Some(v.to_string())),
+        };
+        out.insert(
+            name.clone(),
+            json!({
+                "type": source.type_name(),
+                "default": source.default_value(),
+                "deployed": deployed.get(name),
+                "mode": mode,
+                "channel": channel,
+                "pinned": pinned,
+                "durability": if s.is_override() { Some(s.durability.as_str()) } else { None },
+                "note": s.note,
+            }),
+        );
+    }
+    Value::Object(out)
+}
+
 /// The `SHA` parameter's selection as agents should see it.
 fn selection_json(config: &DeployConfig) -> Value {
     if config.artifact_repository().is_none() {
@@ -261,6 +309,7 @@ pub async fn dispatch(
         "clear_selection" => {
             handle_action("clear_selection", arguments, client, pool, octocrabs).await
         }
+        "set_parameter" => handle_set_parameter(arguments, client, pool, octocrabs).await,
         "undeploy" => handle_action("undeploy", arguments, client, pool, octocrabs).await,
         "bounce" => handle_action("bounce", arguments, client, pool, octocrabs).await,
         "execute_job" => handle_action("execute_job", arguments, client, pool, octocrabs).await,
@@ -328,6 +377,7 @@ async fn handle_list_deploy_configs(
                 "blockers": blockers.iter().map(blocker_json).collect::<Vec<_>>(),
                 "temporary": config.is_temporary_deployment(),
                 "selection": selection_json(config),
+                "parameters": parameters_json(config),
                 "artifact_repo": artifact_repo_name,
                 "config_repo": config_repo_name,
                 "artifact_sha": artifact_sha,
@@ -413,6 +463,7 @@ async fn handle_get_deploy_config(
         "blockers": blockers.iter().map(blocker_json).collect::<Vec<_>>(),
         "temporary": config.is_temporary_deployment(),
         "selection": selection_json(&config),
+        "parameters": parameters_json(&config),
         "latest_revision": latest_revision.as_ref().map(revision_json),
         "supports_bounce": config.supports_bounce(),
         "supports_execute_job": config.supports_execute_job(),
@@ -546,6 +597,55 @@ async fn handle_deploy(
         Action::DeployLatest
     };
 
+    let intent = crate::deploys::SelectionIntent {
+        durability: match arguments.get("durability").and_then(|v| v.as_str()) {
+            Some("temporary") => Some(Durability::Temporary),
+            Some("standing") => Some(Durability::Standing),
+            _ => None,
+        },
+        note: arguments
+            .get("note")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        by: arguments
+            .get("by")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+    };
+    execute_deploy_action_with(&action, name, &config, client, pool, octocrabs, &intent).await
+}
+
+async fn handle_set_parameter(
+    arguments: Value,
+    client: &Client,
+    pool: &Pool<SqliteConnectionManager>,
+    octocrabs: &Octocrabs,
+) -> ToolCallResult {
+    let name = match arguments.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n,
+        None => return ToolCallResult::error("Missing required parameter: name".to_string()),
+    };
+    let parameter = match arguments.get("parameter").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => return ToolCallResult::error("Missing required parameter: parameter".to_string()),
+    };
+    let config = match get_deploy_config(client, name).await {
+        Ok(Some(c)) => c,
+        Ok(None) => return ToolCallResult::error(format!("Deploy config '{}' not found", name)),
+        Err(e) => return ToolCallResult::error(format!("Failed to get deploy config: {}", e)),
+    };
+    if config.is_orphaned() {
+        return ToolCallResult::error(
+            "Cannot change parameters on an orphaned config.".to_string(),
+        );
+    }
+    let value = arguments
+        .get("value")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(String::from);
+    let action = Action::SetParameter { parameter, value };
     let intent = crate::deploys::SelectionIntent {
         durability: match arguments.get("durability").and_then(|v| v.as_str()) {
             Some("temporary") => Some(Durability::Temporary),
@@ -796,6 +896,10 @@ async fn execute_deploy_action_with(
         Action::DeployCommit { sha } => format!("Deploy (sha: {})", sha),
         Action::Rollback { revision } => format!("Rollback (revision: {})", revision),
         Action::ClearSelection => "Clear selection and deploy latest".to_string(),
+        Action::SetParameter { parameter, value } => match value {
+            Some(v) => format!("Set ${} = {} and deploy", parameter, v),
+            None => format!("Reset ${} to its default and deploy", parameter),
+        },
         Action::Undeploy => "Undeploy".to_string(),
         Action::Bounce => "Bounce".to_string(),
         Action::ExecuteJob => "Execute job".to_string(),
