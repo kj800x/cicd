@@ -1558,6 +1558,11 @@ pub async fn deploy_config(
                 .content_type("text/html; charset=utf-8")
                 .body(message);
         }
+        Err(AppError::InvalidInput(message)) => {
+            return HttpResponse::BadRequest()
+                .content_type("text/html; charset=utf-8")
+                .body(message);
+        }
         Err(e) => {
             log::error!("Failed to execute deploy action on {}: {}", name, e);
             return HttpResponse::InternalServerError()
