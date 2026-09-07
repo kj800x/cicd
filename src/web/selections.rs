@@ -43,7 +43,10 @@ fn render_durability(selection: &Selection) -> Markup {
 }
 
 /// The warning shown in the preview while a config is a temporary deployment.
+/// Says what is temporary and links to the one action that ends all of it.
 pub fn render_temporary_alert(config: &DeployConfig) -> Markup {
+    let changes = crate::deploys::temporary_changes(config);
+    let name = config.name_any();
     html! {
         div.alert.alert-warning {
             div class="alert-header" {
@@ -53,7 +56,11 @@ pub fn render_temporary_alert(config: &DeployConfig) -> Markup {
             div class="alert-content" {
                 div class="details" {
                     "This config is " (render_selection_summary(config)) ". "
-                    "Autodeploy stays off until the override is cleared. Choose “Back to default branch” to end it."
+                    "Autodeploy stays off until every temporary change is gone. "
+                    a href=(format!("/deploy?selected={name}&action=end-temporary")) {
+                        "End temporary deployment"
+                    }
+                    " will " (changes.summary()) " and deploy latest."
                 }
             }
         }

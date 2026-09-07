@@ -1314,6 +1314,12 @@ pub async fn deploy_configs(
                                                     "Back to default branch"
                                                 }
                                             }
+                                            @if selected_config.is_temporary_deployment() && !is_orphaned {
+                                                label class="action-radio" {
+                                                    input type="radio" name="action" value="end-temporary" checked[action.is_end_temporary()] onchange="this.form.submit()";
+                                                    "End temporary deployment"
+                                                }
+                                            }
                                             label class="action-radio" {
                                                 input type="radio" name="action" value="undeploy" checked[action.is_undeploy()] onchange="this.form.submit()";
                                                 "Undeploy"

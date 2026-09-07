@@ -352,6 +352,7 @@ html! {
 **Value parameters, patches and autodeploy:**
 - `parameters:` in `.deploy/<name>.yaml` declares parameters: `{type: commit, owner, repo, branch}` or `{type: value, default}`. `artifactRepo` is sugar for a commit parameter named `SHA`. Every parameter is substituted for `$NAME` in manifests; a declared parameter without a deployed value refuses to render
 - Value parameters resolve to their pinned value or default at deploy time; set them from the Parameters panel or the `set_parameter` MCP tool
+- "End temporary deployment" (deploy page action, `end_temporary_deployment` MCP tool) clears every temporary selection and removes every temporary patch in one step, then deploys latest; standing overrides stay. `deploys::temporary_changes` computes what it would touch
 - `spec.patches` are JSON Patch operations applied to rendered manifests after substitution, targeted by kind, name and optionally file. A patch that no longer fits fails the render loudly. Manage them from the Patches panel or `add_patch` / `remove_patch`
 - Autodeploy (`src/webhooks/autodeploy.rs`): a successful check run on the branch a config's `SHA` parameter tracks deploys latest, unless the parameter is pinned, the config is a temporary deployment, or a blocker is active
 
