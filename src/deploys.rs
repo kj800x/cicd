@@ -13,7 +13,11 @@ use r2d2_sqlite::SqliteConnectionManager;
 
 use crate::{
     crab_ext::Octocrabs,
-    db::{blocker::Blocker, deploy_event::DeployEvent},
+    db::{
+        blocker::Blocker,
+        deploy_event::DeployEvent,
+        revision::{NewRevision, Revision},
+    },
     error::{AppError, AppResult},
     kubernetes::{deploy_handlers::DeployAction, repo::DeploymentState, DeployConfig},
     web::Action,
@@ -86,17 +90,21 @@ pub fn to_deploy_action(action: &Action, name: &str, state: DeploymentState) -> 
 }
 
 /// Run `action` against `config`. On success returns the [`DeployAction`]
-/// that was executed, so callers can label metrics and messages.
+/// that was executed, so callers can label metrics and messages. `actor`
+/// says where the action came from (`web`, `mcp`) and is recorded on the
+/// revision.
 ///
-/// The GitHub deployment mirror and the deploy event are bookkeeping: their
-/// failures are logged, not returned, because the cluster change has already
-/// happened by then and reporting it as a failure would mislead.
+/// The GitHub deployment mirror, the deploy event and the revision are
+/// bookkeeping: their failures are logged, not returned, because the cluster
+/// change has already happened by then and reporting it as a failure would
+/// mislead.
 pub async fn run_action(
     action: &Action,
     config: &DeployConfig,
     client: &Client,
     octocrabs: &Octocrabs,
     conn: &PooledConnection<SqliteConnectionManager>,
+    actor: &str,
 ) -> AppResult<DeployAction> {
     let name = kube::ResourceExt::name_any(config);
     check_blockers(conn, action, &name)?;
@@ -118,6 +126,13 @@ pub async fn run_action(
         }
         Ok(None) => {}
         Err(e) => log::error!("Failed to build deploy event for {}: {}", name, e),
+    }
+
+    if let Some(new) = NewRevision::from_deploy_action(&deploy_action, config, conn, actor) {
+        match Revision::record(conn, new) {
+            Ok(rev) => log::info!("Recorded revision {} for {} ({})", rev.id, name, rev.action),
+            Err(e) => log::error!("Failed to record revision for {}: {}", name, e),
+        }
     }
 
     Ok(deploy_action)

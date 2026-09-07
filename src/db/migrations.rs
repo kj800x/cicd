@@ -125,6 +125,39 @@ pub fn migrate(mut conn: PooledConnection<SqliteConnectionManager>) -> AppResult
           );
           CREATE INDEX IF NOT EXISTS idx_blocker_config_active ON blocker(config_name, cleared_at);
         "#}),
+        // Revisions: the immutable record of each deploy or undeploy, one row
+        // plus one revision_parameter row per parameter with the value that
+        // was deployed and the channel (branch) it was resolved from, NULL
+        // when pinned. `actor` is where the action came from ("web", "mcp")
+        // until the app has user identity. `reason` and `patches` are
+        // reserved for later changes (rollback notes, manifest patches) and
+        // are NULL for now. deploy_event keeps being written alongside; the
+        // history page moves to revisions in a later change.
+        M::up(indoc! { r#"
+          CREATE TABLE revision (
+              id INTEGER PRIMARY KEY NOT NULL,
+              config_name TEXT NOT NULL,
+              created_at INTEGER NOT NULL,
+              actor TEXT NOT NULL,
+              action TEXT NOT NULL,
+              reason TEXT,
+              config_sha TEXT,
+              config_branch TEXT,
+              config_version_hash TEXT,
+              patches TEXT
+          );
+          CREATE INDEX IF NOT EXISTS idx_revision_config_created ON revision(config_name, created_at);
+
+          CREATE TABLE revision_parameter (
+              revision_id INTEGER NOT NULL,
+              name TEXT NOT NULL,
+              type TEXT NOT NULL,
+              value TEXT NOT NULL,
+              branch TEXT,
+              PRIMARY KEY(revision_id, name),
+              FOREIGN KEY(revision_id) REFERENCES revision(id)
+          );
+        "#}),
     ]);
 
     conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))?;

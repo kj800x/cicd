@@ -580,7 +580,7 @@ async fn execute_deploy_action(
         Err(e) => return ToolCallResult::error(format!("Database error: {}", e)),
     };
 
-    match crate::deploys::run_action(action, config, client, octocrabs, &conn).await {
+    match crate::deploys::run_action(action, config, client, octocrabs, &conn, "mcp").await {
         Ok(_) => {}
         Err(crate::error::AppError::Blocked(message)) => {
             return ToolCallResult::error(format!(
