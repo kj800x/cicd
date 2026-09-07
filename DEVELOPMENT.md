@@ -489,7 +489,8 @@ webhooks is most of what the controller does, so the dev instance sees the
 same pushes production sees.
 
 ```bash
-kubectl apply -f kubernetes/test-crd/test-deploy-config-crd.yaml   # once
+kubernetes/test-crd/regenerate.sh                                  # after any CRD change
+kubectl apply -f kubernetes/test-crd/test-deploy-config-crd.yaml   # once, and after regenerating
 DATABASE_PATH=./dev.db ENABLE_K8S_CONTROLLER=true \
   WEBSOCKET_URL=... CLIENT_SECRET=... \
   cargo run --features test-crd
