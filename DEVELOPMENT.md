@@ -337,6 +337,13 @@ html! {
 - YAML manifest in `kubernetes/deploy-config-crd.yaml` (applied by hand; the Rust side has schema validation disabled)
 - Controller watches for changes and reconciles
 
+**Parameters:**
+- `spec.parameters` is a map of named parameter sources, each tagged with `type` (currently only `commit`: owner/repo/branch)
+- `status.parameters` is the deployed value per parameter (`type: commit` → `value` is the SHA, plus optional `branch`)
+- The `SHA` parameter is the legacy artifact repo; its value is substituted for `$SHA` in resource specs. `artifact_repository()` and `deployment_state()` read that key.
+- On-disk `.deploy/<name>.yaml` files still use `artifactRepo`; `config_sync` maps it to `parameters.SHA`
+- Types live in `src/kubernetes/parameters.rs`; see `kubernetes/example-deployconfig.yaml`
+
 **Controller pattern:**
 ```rust
 async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<Context>) -> Result<Action> {

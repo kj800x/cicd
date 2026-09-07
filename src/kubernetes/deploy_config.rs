@@ -21,11 +21,6 @@ pub const DEPLOY_CONFIG_KIND: &str = if cfg!(feature = "test-crd") {
 /// DeployConfig status information
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct DeployConfigStatus {
-    /// Legacy: the deployed artifact. No longer read or written except by
-    /// the migration backfill; removed once the CRD drops it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub artifact: Option<ShaMaybeBranch>,
-
     /// The value currently deployed for each named parameter.
     /// The legacy artifact lives under [`SHA_PARAMETER`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -54,11 +49,6 @@ pub struct DeployConfigSpecFields {
     /// Typed as a string to allow for future flexibility.
     /// Right now valid values are "service", "worker", "job", "meta", etc.
     pub kind: String,
-
-    /// Legacy: the artifact repository. No longer read or written except by
-    /// the migration backfill; removed once the CRD drops it. Serialized as
-    /// `null` so config sync's merge patch clears it from migrated objects.
-    pub artifact: Option<RepositoryBranch>,
 
     /// Named parameters. The legacy artifact repo lives under
     /// [`SHA_PARAMETER`], whose value is substituted for `$SHA` in specs.
@@ -91,10 +81,10 @@ pub struct DeployConfigSpecFields {
     status = "DeployConfigStatus",
     printcolumn = r#"{"name":"Team", "jsonPath":".spec.team", "type": "string"}"#,
     printcolumn = r#"{"name":"Kind", "jsonPath":".spec.kind", "type": "string"}"#,
-    printcolumn = r#"{"name":"Artifact Repo", "jsonPath":".spec.artifact.repo", "type":"string"}"#,
+    printcolumn = r#"{"name":"Artifact Repo", "jsonPath":".spec.parameters.SHA.repo", "type":"string"}"#,
     printcolumn = r#"{"name":"Config Repo", "jsonPath":".spec.config.repo", "type":"string"}"#,
     printcolumn = r#"{"name":"Config SHA", "jsonPath":".status.config.sha", "type":"string"}"#,
-    printcolumn = r#"{"name":"Artifact SHA", "jsonPath":".status.artifact.sha", "type":"string"}"#,
+    printcolumn = r#"{"name":"Artifact SHA", "jsonPath":".status.parameters.SHA.value", "type":"string"}"#,
     printcolumn = r#"{"name":"Autodeploy", "jsonPath":".status.autodeploy", "type":"boolean"}"#,
     printcolumn = r#"{"name":"Age", "jsonPath":".metadata.creationTimestamp", "type":"date"}"#,
     printcolumn = r#"{"name":"Orphaned", "jsonPath":".status.orphaned", "type":"boolean"}"#
@@ -409,7 +399,6 @@ mod tests {
                 spec: DeployConfigSpecFields {
                     team: "test".to_string(),
                     kind: "service".to_string(),
-                    artifact: None,
                     parameters: ParameterSource::sha_map(
                         artifact_repo.map(|r| r.with_branch("master")),
                     ),
@@ -486,14 +475,6 @@ mod tests {
         json
     }
 
-    fn legacy_artifact() -> serde_json::Value {
-        serde_json::json!({"artifact": {"owner": "kj800x", "repo": "cicd", "branch": "master"}})
-    }
-
-    fn legacy_status(sha: &str) -> serde_json::Value {
-        serde_json::json!({"artifact": {"sha": sha, "branch": "master"}})
-    }
-
     fn param_source() -> serde_json::Value {
         serde_json::json!({"parameters": {"SHA": {"type": "commit", "owner": "kj800x", "repo": "cicd", "branch": "master"}}})
     }
@@ -510,21 +491,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_shape_is_no_longer_read() -> Result<(), serde_json::Error> {
-        // A legacy-only object is refused by the reconcile guard before any
-        // reader sees it; readers themselves ignore the legacy fields.
-        let dc: DeployConfig =
-            serde_json::from_value(dc_json(legacy_artifact(), legacy_status("old")))?;
-        assert!(dc.artifact_repository().is_none());
-        assert_eq!(deployed_sha(&dc), None);
-        assert!(
-            dc.spec.spec.artifact.is_some(),
-            "legacy field still deserializes"
-        );
-        Ok(())
-    }
-
-    #[test]
     fn parameters_shape_reads() -> Result<(), serde_json::Error> {
         let dc: DeployConfig = serde_json::from_value(dc_json(param_source(), param_value("new")))?;
         assert_eq!(
@@ -533,17 +499,6 @@ mod tests {
         );
         assert_eq!(deployed_sha(&dc), Some("new".into()));
         assert!(!dc.is_non_latest_deploy());
-        Ok(())
-    }
-
-    #[test]
-    fn parameters_win_over_legacy_when_both_present() -> Result<(), serde_json::Error> {
-        let mut spec = legacy_artifact();
-        spec["parameters"] = param_source()["parameters"].clone();
-        let mut status = legacy_status("old");
-        status["parameters"] = param_value("new")["parameters"].clone();
-        let dc: DeployConfig = serde_json::from_value(dc_json(spec, status))?;
-        assert_eq!(deployed_sha(&dc), Some("new".into()));
         Ok(())
     }
 
@@ -562,7 +517,7 @@ mod tests {
     #[test]
     fn empty_maps_are_not_serialized() -> Result<(), serde_json::Error> {
         let dc: DeployConfig =
-            serde_json::from_value(dc_json(legacy_artifact(), legacy_status("old")))?;
+            serde_json::from_value(dc_json(serde_json::json!({}), serde_json::json!({})))?;
         let out = serde_json::to_value(&dc)?;
         assert!(out["spec"].get("parameters").is_none());
         assert!(out["status"].get("parameters").is_none());

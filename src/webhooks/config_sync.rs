@@ -518,9 +518,6 @@ pub async fn fetch_deploy_configs_by_sha(
             spec: DeployConfigSpec {
                 spec: DeployConfigSpecFields {
                     // The on-disk `artifactRepo` becomes the `SHA` parameter.
-                    // The legacy field is sent as null so it is cleared from
-                    // objects that still carry it.
-                    artifact: None,
                     parameters: ParameterSource::sha_map(artifact),
                     config: Repository {
                         owner: owner.clone(),

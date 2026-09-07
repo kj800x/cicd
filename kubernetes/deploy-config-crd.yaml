@@ -25,22 +25,9 @@ spec:
                       type: string
                     repo:
                       type: string
-                artifact:
-                  type: object
-                  required:
-                    - owner
-                    - repo
-                    - branch
-                  properties:
-                    owner:
-                      type: string
-                    repo:
-                      type: string
-                    branch:
-                      type: string
                 parameters:
                   type: object
-                  description: "Named parameter sources. The legacy artifact repo is the SHA parameter."
+                  description: "Named parameter sources. The SHA parameter is substituted for $SHA in specs."
                   additionalProperties:
                     type: object
                     required:
@@ -82,13 +69,6 @@ spec:
                   type: boolean
                 autodeploy:
                   type: boolean
-                artifact:
-                  type: object
-                  properties:
-                    sha:
-                      type: string
-                    branch:
-                      type: string
                 parameters:
                   type: object
                   description: "Deployed value per named parameter."
@@ -121,7 +101,7 @@ spec:
           jsonPath: .spec.kind
           type: string
         - name: Artifact Repo
-          jsonPath: .spec.artifact.repo
+          jsonPath: .spec.parameters.SHA.repo
           type: string
         - name: Config Repo
           jsonPath: .spec.config.repo
@@ -130,7 +110,7 @@ spec:
           jsonPath: .status.config.sha
           type: string
         - name: Artifact SHA
-          jsonPath: .status.artifact.sha
+          jsonPath: .status.parameters.SHA.value
           type: string
         - name: Autodeploy
           jsonPath: .status.autodeploy

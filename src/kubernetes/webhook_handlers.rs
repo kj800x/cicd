@@ -326,7 +326,6 @@ mod tests {
                 spec: DeployConfigSpecFields {
                     team: "t".into(),
                     kind: "service".into(),
-                    artifact: None,
                     parameters,
                     config: Repository {
                         owner: "o".into(),

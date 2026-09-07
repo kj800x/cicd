@@ -1,0 +1,30 @@
+# Example DeployConfig in the current schema. config_sync generates these from
+# `.deploy/<name>.yaml` files in config repos; this file is for reference only.
+apiVersion: cicd.coolkev.com/v1
+kind: DeployConfig
+metadata:
+  name: cicd
+  namespace: cicd
+spec:
+  parameters:
+    SHA:
+      type: commit
+      owner: kj800x
+      repo: cicd
+      branch: master
+  config:
+    owner: kj800x
+    repo: cicd
+  kind: service
+  team: cluster-infra
+  specs: []
+status:
+  parameters:
+    SHA:
+      type: commit
+      value: daeb2bc524463839fabab584d040c04b67b33582
+      branch: master
+  config:
+    sha: daeb2bc524463839fabab584d040c04b67b33582
+    branch: master
+  orphaned: false

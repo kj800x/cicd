@@ -8,10 +8,6 @@ metadata:
 spec:
   replicas: 1
   revisionHistoryLimit: 1
-  # Recreate for the duration of the parameters migration so two controller
-  # versions never reconcile at once. Remove once the migration is complete.
-  strategy:
-    type: Recreate
   selector:
     matchLabels:
       app: cicd
@@ -27,10 +23,6 @@ spec:
             - name: WEBSOCKET_URL
               value: ws://apps.coolkev.com.:8080/ws
             - name: ENABLE_K8S_CONTROLLER
-              value: 'true'
-            # Safety valve for the parameters migration: log stale resources
-            # instead of deleting them. Remove once the migration is complete.
-            - name: CICD_DISABLE_PRUNE
               value: 'true'
             - name: TEMPLATE_NAMESPACE
               value: 'template-namespace'
