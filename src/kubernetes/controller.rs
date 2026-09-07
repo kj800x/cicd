@@ -2,8 +2,6 @@ use super::DeployConfig;
 use crate::error::format_error_chain;
 use crate::kubernetes::api::ListMode;
 use crate::kubernetes::repo::DeploymentState;
-use crate::kubernetes::spec_editing::WithInjectedEnv;
-use crate::kubernetes::test_mode;
 use crate::kubernetes::{
     apply, delete_dynamic_object, ensure_namespace_exists, list_namespace_objects,
 };
@@ -42,9 +40,6 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> AppRes
         // Continue anyway - namespace might already exist
     }
 
-    // CICD_* env vars describing this deploy, injected into every container.
-    let deploy_env_vars = dc.deploy_env_vars();
-
     // Undeployed means "run nothing": apply no manifests and let the prune
     // step below remove anything still owned. Manifest templates can be
     // present without a deployed version for a moment during a deploy (they
@@ -68,31 +63,7 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> AppRes
     };
 
     // Create or update resources as needed
-    for resource in &resources {
-        let mut obj: DynamicObject = serde_json::from_value(resource.clone()).map_err(|e| {
-            AppError::Internal(format!(
-                "JSON didn't look like a Kubernetes object (apiVersion/kind/metadata): {}",
-                e
-            ))
-        })?;
-
-        if let Some(kind) = obj.types.as_ref().map(|t| t.kind.as_str()) {
-            if test_mode::skips_kind(kind) {
-                log::debug!("Test mode: skipping {} {}", kind, obj.name_any());
-                continue;
-            }
-        }
-        if test_mode::ENABLED && obj.metadata.namespace.is_some() {
-            // Manifests name their production namespace; in test mode the
-            // DeployConfig lives in the prefixed one and children follow it.
-            obj.metadata.namespace = Some(ns.clone());
-        }
-
-        obj = obj.with_injected_env(&deploy_env_vars);
-
-        dc.ensure_owner_reference(&mut obj);
-        dc.ensure_labels(&mut obj);
-        dc.ensure_annotations(&mut obj);
+    for obj in dc.child_objects(resources)? {
         apply(client, &ns, obj).await?;
     }
 

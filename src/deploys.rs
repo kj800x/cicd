@@ -141,15 +141,38 @@ pub async fn change_patches(
     // values, so only check the patches themselves fit the templates.
     let mut effective = config.clone();
     effective.spec.spec.patches = patches.clone();
-    if config.status.as_ref().is_some_and(|s| s.config.is_some()) {
-        effective.render_manifests()?;
+    let rendered = if config.status.as_ref().is_some_and(|s| s.config.is_some()) {
+        effective.render_manifests()?
     } else {
         let templates = effective.resource_templates();
         let manifests = templates.iter().map(|t| t.manifest.clone()).collect();
-        crate::kubernetes::patches::apply_patches(&templates, manifests, &patches)?;
+        crate::kubernetes::patches::apply_patches(&templates, manifests, &patches)?
+    };
+
+    // A patch can fit the JSON and still produce a manifest Kubernetes will
+    // not take (an `add` on `/env` instead of `/env/-` turns the array into
+    // an object). Dry-run the exact objects a reconcile would apply so the
+    // API server's schema check happens now, with the error shown to the
+    // person, instead of failing quietly in the controller afterwards.
+    let ns = kube::ResourceExt::namespace(config).unwrap_or_else(|| "default".to_string());
+    for obj in effective.child_objects(rendered)? {
+        let kind = obj
+            .types
+            .as_ref()
+            .map(|t| t.kind.clone())
+            .unwrap_or_default();
+        let obj_name = kube::ResourceExt::name_any(&obj);
+        if let Err(e) = crate::kubernetes::api::apply_dry_run(client, &ns, obj).await {
+            let detail = match &e {
+                AppError::Kubernetes(kube::Error::Api(resp)) => resp.message.clone(),
+                other => other.to_string(),
+            };
+            return Err(AppError::InvalidInput(format!(
+                "Kubernetes rejected {kind}/{obj_name} with these patches: {detail}"
+            )));
+        }
     }
 
-    let ns = kube::ResourceExt::namespace(config).unwrap_or_else(|| "default".to_string());
     crate::kubernetes::api::set_deploy_config_patches(client, &ns, &name, &patches).await?;
 
     let conn = pool.get()?;

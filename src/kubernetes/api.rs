@@ -11,6 +11,27 @@ use kube::{
 };
 
 pub async fn apply(client: &Client, ns: &str, obj: DynamicObject) -> AppResult<DynamicObject> {
+    apply_with(client, ns, obj, false).await
+}
+
+/// The same server-side apply, but with `dryRun=All`: the API server runs
+/// admission and schema validation and returns what it would have stored,
+/// without persisting anything. Used to validate a patch change before it
+/// is written to the DeployConfig.
+pub async fn apply_dry_run(
+    client: &Client,
+    ns: &str,
+    obj: DynamicObject,
+) -> AppResult<DynamicObject> {
+    apply_with(client, ns, obj, true).await
+}
+
+async fn apply_with(
+    client: &Client,
+    ns: &str,
+    obj: DynamicObject,
+    dry_run: bool,
+) -> AppResult<DynamicObject> {
     // require name + type info
     let name = obj
         .metadata
@@ -24,7 +45,12 @@ pub async fn apply(client: &Client, ns: &str, obj: DynamicObject) -> AppResult<D
     )
     .map_err(|e| AppError::Internal(format!("failed parsing GVK: {}", e)))?;
 
-    log::debug!("Applying {}/{}", ns, name);
+    log::debug!(
+        "Applying {}/{}{}",
+        ns,
+        name,
+        if dry_run { " (dry run)" } else { "" }
+    );
 
     // resolve ApiResource and scope
     let (ar, caps) = pinned_kind(client, &gvk)
@@ -37,7 +63,10 @@ pub async fn apply(client: &Client, ns: &str, obj: DynamicObject) -> AppResult<D
     };
 
     // SSA upsert
-    let pp = PatchParams::apply("cicd-controller").force(); // drop .force() if you prefer conflicts to surface
+    let mut pp = PatchParams::apply("cicd-controller").force(); // drop .force() if you prefer conflicts to surface
+    if dry_run {
+        pp = pp.dry_run();
+    }
     let obj = api
         .patch(&name, &pp, &Patch::Apply(obj))
         .await
