@@ -169,16 +169,15 @@ impl TagEventPoller {
                     continue;
                 }
             };
-            match self
+            let unblocked = self
                 .pool
                 .get()
-                .and_then(|c| Ok(Blocker::active_for(&c, &name)))
-            {
-                Ok(Ok(active)) if active.is_empty() => {}
-                _ => {
-                    log::info!("Tag autodeploy: skipping {} ({:?})", name, Skip::Blocked);
-                    continue;
-                }
+                .ok()
+                .and_then(|c| Blocker::active_for(&c, &name).ok())
+                .is_some_and(|active| active.is_empty());
+            if !unblocked {
+                log::info!("Tag autodeploy: skipping {} ({:?})", name, Skip::Blocked);
+                continue;
             }
             log::info!(
                 "Tag autodeploy: {} tracks {} of {}; deploying after tag {} ({:?})",
