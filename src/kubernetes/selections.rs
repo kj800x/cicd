@@ -103,7 +103,9 @@ impl Selection {
         }
     }
 
-    /// Track a semver range (tag sources).
+    /// Track a semver range (tag sources). Nothing writes one yet: tag
+    /// overrides of the range are not offered in the UI or MCP.
+    #[allow(dead_code)]
     pub fn track_pattern(pattern: &str, durability: Durability) -> Self {
         Selection {
             track: Some(Track {
