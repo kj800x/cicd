@@ -8,6 +8,7 @@ pub mod patches;
 pub mod repo;
 pub mod selections;
 pub mod spec_editing;
+pub mod tags;
 pub mod test_mode;
 pub mod webhook_handlers;
 

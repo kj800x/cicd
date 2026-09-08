@@ -47,7 +47,7 @@ fn show(p: &RevisionParameter) -> String {
     };
     match &p.branch {
         Some(b) if !b.is_empty() => format!("{b}:{value}"),
-        _ if p.kind == "commit" => format!("pinned {value}"),
+        _ if p.kind == "commit" || p.kind == "tag" => format!("pinned {value}"),
         _ => value,
     }
 }

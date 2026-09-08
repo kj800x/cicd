@@ -33,11 +33,25 @@ impl Durability {
     }
 }
 
-/// Follow a channel other than the source's default. For commit sources
-/// the channel is a branch.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+/// Follow a channel other than the source's default. The field is named
+/// for the source type: a branch for commit sources, a semver range
+/// (`pattern`) for tag sources. Exactly one is set.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Track {
-    pub branch: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
+}
+
+impl Track {
+    /// The channel being followed, whichever kind it is.
+    pub fn channel(&self) -> &str {
+        self.branch
+            .as_deref()
+            .or(self.pattern.as_deref())
+            .unwrap_or_default()
+    }
 }
 
 /// Hold an exact value.
@@ -77,10 +91,24 @@ pub enum Mode<'a> {
 }
 
 impl Selection {
+    /// Track a branch (commit sources).
     pub fn track(branch: &str, durability: Durability) -> Self {
         Selection {
             track: Some(Track {
-                branch: branch.to_string(),
+                branch: Some(branch.to_string()),
+                pattern: None,
+            }),
+            durability,
+            ..Default::default()
+        }
+    }
+
+    /// Track a semver range (tag sources).
+    pub fn track_pattern(pattern: &str, durability: Durability) -> Self {
+        Selection {
+            track: Some(Track {
+                branch: None,
+                pattern: Some(pattern.to_string()),
             }),
             durability,
             ..Default::default()
@@ -116,7 +144,7 @@ impl Selection {
         if let Some(pin) = &self.pin {
             Mode::Pin(&pin.value)
         } else if let Some(track) = &self.track {
-            Mode::Track(&track.branch)
+            Mode::Track(track.channel())
         } else {
             Mode::Default
         }

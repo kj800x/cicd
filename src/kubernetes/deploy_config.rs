@@ -238,29 +238,38 @@ impl DeployConfig {
     /// `spec.selections`, or one derived from what is deployed.
     ///
     /// The derivation is the rule the code always used implicitly: a
-    /// deployed value with no branch is a pin, a branch other than the
-    /// source's default is an override, the default branch is the default.
-    /// Derived overrides default to temporary for branches and standing for
-    /// pins, matching what the UI proposes when making them explicit.
+    /// deployed feed value with no channel is a pin, a channel other than
+    /// the source's default is an override, the default channel is the
+    /// default. Derived overrides default to temporary for channels and
+    /// standing for pins, matching what the UI proposes when making them
+    /// explicit. Static values have no channel and derive nothing.
     pub fn selection(&self, parameter: &str) -> Selection {
         if let Some(explicit) = self.spec.spec.selections.get(parameter) {
             return explicit.clone();
         }
-        if parameter != SHA_PARAMETER {
+        let Some(source) = self.spec.spec.parameters.get(parameter) else {
             return Selection::default();
-        }
-        let default_branch = self.artifact_repository().map(|r| r.branch);
-        match self.sha_value() {
-            Some(ShaMaybeBranch { sha, branch: None }) => {
-                Selection::pin(&sha, Durability::Standing)
-            }
-            Some(ShaMaybeBranch {
-                branch: Some(branch),
-                ..
-            }) if Some(branch.as_str()) != default_branch.as_deref() => {
-                Selection::track(&branch, Durability::Temporary)
-            }
-            _ => Selection::default(),
+        };
+        let Some(default_channel) = source.default_channel() else {
+            return Selection::default();
+        };
+        let deployed = self
+            .status
+            .as_ref()
+            .and_then(|s| s.parameters.get(parameter));
+        match deployed {
+            None => Selection::default(),
+            Some(value) => match value.channel() {
+                None => Selection::pin(&value.rendered(), Durability::Standing),
+                Some(channel) if channel != default_channel => {
+                    if source.is_tag() {
+                        Selection::track_pattern(channel, Durability::Temporary)
+                    } else {
+                        Selection::track(channel, Durability::Temporary)
+                    }
+                }
+                Some(_) => Selection::default(),
+            },
         }
     }
 
@@ -326,7 +335,7 @@ impl DeployConfig {
             let (mode, channel) = match selection.mode() {
                 Mode::Pin(_) => ("pin", None),
                 Mode::Track(branch) => ("override", Some(branch.to_string())),
-                Mode::Default => ("track", value.branch().map(String::from)),
+                Mode::Default => ("track", value.channel().map(String::from)),
             };
             vars.push((format!("CICD_PARAM_{key}"), value.rendered()));
             vars.push((format!("CICD_PARAM_{key}_MODE"), mode.to_string()));
