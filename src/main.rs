@@ -38,6 +38,7 @@ mod github_deployments;
 mod kubernetes;
 mod mcp;
 mod metrics;
+mod watchtower;
 mod web;
 mod webhooks;
 use crate::crab_ext::{initialize_octocrabs, Octocrabs};

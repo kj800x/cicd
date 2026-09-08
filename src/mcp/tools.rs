@@ -71,7 +71,8 @@ pub fn tool_definitions() -> Vec<Tool> {
                     "sha": { "type": "string", "description": "Only when the person asked to pin an exact commit: records a standing pin. The full 40-character sha; an abbreviated sha (7+ characters) is expanded if it names exactly one known commit, otherwise refused." },
                     "durability": { "type": "string", "enum": ["temporary", "standing"], "description": "How long the override is meant to last. Temporary marks the config as a temporary deployment. Defaults: temporary for a branch, standing for a sha." },
                     "note": { "type": "string", "description": "Why this override exists" },
-                    "by": { "type": "string", "description": "Who is making it" }
+                    "by": { "type": "string", "description": "Who is making it" },
+                    "values": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Only when a deploy was refused because watchtower is unreachable: the tag to use for each tracked tag parameter, for this deploy only. Recorded on the revision; the selection is not changed." }
                 },
                 "required": ["name"]
             }),
@@ -692,6 +693,15 @@ async fn handle_deploy(
             .get("by")
             .and_then(|v| v.as_str())
             .map(String::from),
+        values: arguments
+            .get("values")
+            .and_then(|v| v.as_object())
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default(),
     };
     execute_deploy_action_with(&action, name, &config, client, pool, octocrabs, &intent).await
 }
@@ -816,6 +826,7 @@ async fn handle_set_parameter(
             .get("by")
             .and_then(|v| v.as_str())
             .map(String::from),
+        values: Default::default(),
     };
     execute_deploy_action_with(&action, name, &config, client, pool, octocrabs, &intent).await
 }
@@ -1058,6 +1069,11 @@ async fn execute_deploy_action_with(
         }
         Err(crate::error::AppError::InvalidInput(message)) => {
             return ToolCallResult::error(message);
+        }
+        Err(crate::error::AppError::Unavailable(message)) => {
+            return ToolCallResult::error(format!(
+                "Deploy refused: {message} (pass `values` to deploy a typed tag this once)"
+            ));
         }
         Err(e) => return ToolCallResult::error(format!("Failed to execute action: {}", e)),
     }

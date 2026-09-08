@@ -11,7 +11,7 @@ use kube::Client;
 use r2d2::{Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::{
     crab_ext::Octocrabs,
@@ -28,9 +28,10 @@ use crate::{
         parameters::{ParameterValue, ParameterValues, SHA_PARAMETER},
         patches::ManifestPatch,
         repo::DeploymentState,
-        selections::{Durability, Selection},
+        selections::{Durability, Mode, Selection},
         DeployConfig,
     },
+    watchtower::Watchtower,
     web::Action,
 };
 
@@ -42,21 +43,123 @@ pub struct SelectionIntent {
     pub durability: Option<Durability>,
     pub note: Option<String>,
     pub by: Option<String>,
+    /// Values typed for this one deploy, keyed by parameter name. Used for
+    /// tag parameters when watchtower is unreachable: the value is deployed
+    /// and recorded under the tracked channel, and the selection is left
+    /// alone, so the next "latest" resolves through watchtower again.
+    pub values: BTreeMap<String, String>,
 }
 
 impl SelectionIntent {
+    /// From a form: `durability`, `note`, `by`, and `value_<PARAM>` fields.
     pub fn from_form(form: &HashMap<String, String>) -> Self {
         let durability = match form.get("durability").map(|d| d.trim()) {
             Some("temporary") => Some(Durability::Temporary),
             Some("standing") => Some(Durability::Standing),
             _ => None,
         };
+        let values = form
+            .iter()
+            .filter_map(|(k, v)| {
+                let name = k.strip_prefix("value_")?;
+                let v = v.trim();
+                (!name.is_empty() && !v.is_empty()).then(|| (name.to_string(), v.to_string()))
+            })
+            .collect();
         SelectionIntent {
             durability,
             note: form.get("note").cloned(),
             by: form.get("by").cloned(),
+            values,
         }
     }
+}
+
+/// Resolve every tag parameter of `config` for this deploy: a pin is
+/// itself, a typed one-shot value is used as is under the tracked channel,
+/// and anything tracked is the highest tag watchtower knows that matches
+/// the channel's range. Fails closed when watchtower is unreachable and a
+/// tracked parameter has no typed value.
+pub async fn resolve_tag_parameters(
+    watchtower: &Watchtower,
+    config: &DeployConfig,
+    typed: &BTreeMap<String, String>,
+) -> AppResult<ParameterValues> {
+    let name = kube::ResourceExt::name_any(config);
+    let mut values = ParameterValues::new();
+    for (pname, source) in &config.spec.spec.parameters {
+        let (Some(image), Some(default_pattern)) = (source.image_ref(), source.default_channel())
+        else {
+            continue;
+        };
+        let selection = config.selection(pname);
+        let pattern = match selection.mode() {
+            Mode::Pin(value) => {
+                values.insert(
+                    pname.clone(),
+                    ParameterValue::Tag {
+                        value: value.to_string(),
+                        pattern: None,
+                        digest: None,
+                    },
+                );
+                continue;
+            }
+            Mode::Track(pattern) => pattern.to_string(),
+            Mode::Default => default_pattern.to_string(),
+        };
+        if let Some(value) = typed.get(pname) {
+            values.insert(
+                pname.clone(),
+                ParameterValue::Tag {
+                    value: value.clone(),
+                    pattern: Some(pattern),
+                    digest: None,
+                },
+            );
+            continue;
+        }
+        let image_name = format!("{}/{}", image.registry, image.name);
+        let repo = match watchtower.lookup(&image).await {
+            Ok(Some(repo)) => repo,
+            Ok(None) => {
+                // Register now so the next attempt can succeed.
+                watchtower.register(&image).await?;
+                return Err(AppError::InvalidInput(format!(
+                    "watchtower had not been told about {image_name} for {name}.{pname}; it is registered now, try again in a minute"
+                )));
+            }
+            Err(AppError::Unavailable(message)) => {
+                return Err(AppError::Unavailable(format!(
+                    "{message}. {name} cannot resolve {pname} ({image_name}, {pattern}); type the tag to deploy for this once, or pin it"
+                )));
+            }
+            Err(e) => return Err(e),
+        };
+        let candidates = repo.tag.iter().filter(|t| t.active).map(|t| t.tag.as_str());
+        let chosen = crate::kubernetes::tags::highest_matching(candidates, &pattern)
+            .map_err(AppError::InvalidInput)?
+            .ok_or_else(|| {
+                AppError::InvalidInput(format!(
+                    "no tag of {image_name} matches {pattern} (for {name}.{pname})"
+                ))
+            })?;
+        let digest = repo
+            .tag
+            .iter()
+            .find(|t| t.tag == chosen)
+            .and_then(|t| t.digest())
+            .map(String::from);
+        values.insert(
+            pname.clone(),
+            ParameterValue::Tag {
+                value: chosen,
+                pattern: Some(pattern),
+                digest,
+            },
+        );
+    }
+    Ok(values)
 }
 
 /// The selection change an action implies: which parameter, and either
@@ -524,12 +627,27 @@ pub async fn run_action(
     }
 
     let state = DeploymentState::from_action(action, &effective, &conn)?;
-    let values = match action {
+    let mut values = match action {
         Action::Rollback { revision } => values_from_revision(&conn, *revision)?,
         _ => effective.resolve_value_parameters(),
     };
-    let deploy_action = to_deploy_action(action, &name, state, values);
     drop(conn);
+    // Tag parameters resolve through watchtower, after the connection is
+    // released (the lookup is an await). A rollback already carries them.
+    let deploys = !matches!(
+        action,
+        Action::Rollback { .. }
+            | Action::Undeploy
+            | Action::Bounce
+            | Action::ExecuteJob
+            | Action::ToggleAutodeploy
+    );
+    if deploys && effective.spec.spec.parameters.values().any(|s| s.is_tag()) {
+        values.extend(
+            resolve_tag_parameters(Watchtower::global(), &effective, &intent.values).await?,
+        );
+    }
+    let deploy_action = to_deploy_action(action, &name, state, values);
 
     deploy_action
         .execute(client, octocrabs, config.config_repository())
@@ -723,6 +841,7 @@ mod tests {
             durability: Some(Durability::Temporary),
             note: Some("testing".into()),
             by: Some("kevin".into()),
+            values: Default::default(),
         };
         match selection_change(&pin, Some("master"), &noted) {
             Some((_, Some(s))) => {

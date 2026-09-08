@@ -1370,6 +1370,16 @@ pub async fn deploy_configs(
                                         input type="hidden" name="durability" value=(query.get("durability").unwrap_or(&"".to_string()));
                                         input type="hidden" name="note" value=(query.get("note").unwrap_or(&"".to_string()));
                                         input type="hidden" name="by" value=(query.get("by").unwrap_or(&"".to_string()));
+                                        // One-shot values for tracked tag parameters, for when
+                                        // watchtower cannot resolve them. Left empty, latest resolves.
+                                        @for (pname, source) in &selected_config.spec.spec.parameters {
+                                            @if source.is_tag() && !selected_config.selection(pname).is_override() {
+                                                div class="action-input" {
+                                                    label for=(format!("value_{pname}")) { "$" (pname) " for this deploy only (leave empty to resolve latest)" }
+                                                    input id=(format!("value_{pname}")) type="text" name=(format!("value_{pname}")) placeholder="e.g. 1.27.3, only if watchtower is down";
+                                                }
+                                            }
+                                        }
                                         @let is_orphaned = selected_config.is_orphaned();
                                         button.primary-action-button.danger-button[action.is_undeploy()] type="submit" disabled[is_orphaned && !action.is_undeploy()] {
                                             @match action {
@@ -1560,6 +1570,11 @@ pub async fn deploy_config(
         }
         Err(AppError::InvalidInput(message)) => {
             return HttpResponse::BadRequest()
+                .content_type("text/html; charset=utf-8")
+                .body(message);
+        }
+        Err(AppError::Unavailable(message)) => {
+            return HttpResponse::ServiceUnavailable()
                 .content_type("text/html; charset=utf-8")
                 .body(message);
         }
