@@ -338,7 +338,7 @@ html! {
 - Controller watches for changes and reconciles
 
 **Parameters:**
-- `spec.parameters` is a map of named parameter sources, each tagged with `type` (currently only `commit`: owner/repo/branch)
+- `spec.parameters` is a map of named parameter sources, each tagged with `type`: `commit` (owner/repo/branch), `tag` (image/pattern), or `value` (default)
 - `status.parameters` is the deployed value per parameter (`type: commit` → `value` is the SHA, plus optional `branch`)
 - The `SHA` parameter is the legacy artifact repo; its value is substituted for `$SHA` in resource specs. `artifact_repository()` and `deployment_state()` read that key.
 - On-disk `.deploy/<name>.yaml` files still use `artifactRepo`; `config_sync` maps it to `parameters.SHA`
@@ -355,6 +355,13 @@ html! {
 - "End temporary deployment" (deploy page action, `end_temporary_deployment` MCP tool) clears every temporary selection and removes every temporary patch in one step, then deploys latest; standing overrides stay. `deploys::temporary_changes` computes what it would touch
 - `spec.patches` are JSON Patch operations applied to rendered manifests after substitution, targeted by kind, name and optionally file. A patch that no longer fits fails the render loudly. Manage them from the Patches panel or `add_patch` / `remove_patch`
 - Autodeploy (`src/webhooks/autodeploy.rs`): a successful check run on the branch a config's `SHA` parameter tracks deploys latest, unless the parameter is pinned, the config is a temporary deployment, or a blocker is active
+
+**Tag parameters and watchtower:**
+- `{type: tag, image: docker.io/library/nginx, pattern: "1.27.*"}` declares a parameter whose candidates are the image's tags as [watchtower](https://watchtower.home.coolkev.com/) sees them. The pattern is a semver range with Cargo's rules (`^1.27` admits 1.28; `~1.27` or `1.27.*` stay on 1.27); only complete versions qualify (`1.27.3`, `v1.27.3`), never floating tags, and a suffixed tag (`1.27.3-alpine`) is a prerelease a range never picks: pin it. `src/kubernetes/tags.rs` holds the pure resolution
+- Selections: `track: {pattern}` beside `track: {branch}`; pins are a tag. Status: `{type: tag, value, pattern?, digest?}`; the digest is informational
+- `src/watchtower.rs` is the only client (`WATCHTOWER_URL`, default `http://watchtower.cicd.svc`). A deploy resolves tracked tag parameters through it after the static ones; pins, rollbacks, undeploys and every commit or value parameter never call it. Unreachable means the deploy fails closed with a 503 naming the parameter; the person types the tag for that one deploy (`value_<PARAM>` under the deploy form, `values` on the MCP deploy tool). The typed value is recorded under the tracked channel and the selection is not changed
+- Registration: after every config sync, 15 s after start, and hourly, cicd reconciles watchtower's repo list to the images every config's tag parameters name (register, re-activate, and by default deactivate the rest). `CICD_WATCHTOWER_RECONCILE=full|activate-only|off`
+- Events: `src/webhooks/tag_events.rs` polls `GET /api/events?after=<cursor>` every 30 s (cursor in the `watchtower_cursor` table; a first run starts from now) and runs the autodeploy gates for each added or moved tag
 
 **Writers to the DeployConfig (server-side apply):**
 - Every write to the custom resource goes through `src/kubernetes/cr_writers.rs` as a server-side apply under the manager that owns those keys: `cicd-config-sync` (parameters, config, kind, team; `status.orphaned`), `cicd-deploy` (`spec.specs`; `status.parameters`, `status.config`), `cicd-selections` (the whole selection map), `cicd-patches` (the patch list), `cicd-autodeploy` (`status.autodeploy`)
