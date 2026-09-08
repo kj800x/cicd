@@ -145,7 +145,6 @@ impl Watchtower {
         Ok(Some(repo))
     }
 
-    #[allow(dead_code)] // registration reconcile, next change
     pub async fn list_repos(&self) -> AppResult<Vec<Repo>> {
         self.http
             .get(format!("{}/api/repo", self.base))
@@ -183,7 +182,6 @@ impl Watchtower {
         Ok(repo)
     }
 
-    #[allow(dead_code)] // registration reconcile, next change
     pub async fn set_active(&self, id: u64, active: bool) -> AppResult<()> {
         self.http
             .post(format!("{}/api/repo/{id}/active", self.base))
@@ -209,5 +207,172 @@ impl Watchtower {
             .json()
             .await
             .map_err(|e| self.unavailable(e))
+    }
+}
+
+/// How far cicd manages watchtower's repo list. `CICD_WATCHTOWER_RECONCILE`:
+/// `full` (default) registers referenced images and deactivates the rest,
+/// `activate-only` never deactivates, `off` leaves watchtower alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReconcileMode {
+    Full,
+    ActivateOnly,
+    Off,
+}
+
+impl ReconcileMode {
+    pub fn from_env() -> Self {
+        match std::env::var("CICD_WATCHTOWER_RECONCILE")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "off" => ReconcileMode::Off,
+            "activate-only" | "activate_only" => ReconcileMode::ActivateOnly,
+            _ => ReconcileMode::Full,
+        }
+    }
+}
+
+/// What a reconcile would do, computed from the referenced images and
+/// watchtower's current list.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReconcilePlan {
+    pub register: Vec<ImageRef>,
+    pub activate: Vec<Repo>,
+    pub deactivate: Vec<Repo>,
+}
+
+impl ReconcilePlan {
+    pub fn is_empty(&self) -> bool {
+        self.register.is_empty() && self.activate.is_empty() && self.deactivate.is_empty()
+    }
+}
+
+pub fn plan_reconcile(
+    referenced: &std::collections::BTreeSet<ImageRef>,
+    repos: &[Repo],
+    mode: ReconcileMode,
+) -> ReconcilePlan {
+    let mut plan = ReconcilePlan::default();
+    if mode == ReconcileMode::Off {
+        return plan;
+    }
+    for image in referenced {
+        match repos
+            .iter()
+            .find(|r| r.registry == image.registry && r.name == image.name)
+        {
+            None => plan.register.push(image.clone()),
+            Some(repo) if !repo.active => plan.activate.push(repo.clone()),
+            Some(_) => {}
+        }
+    }
+    if mode == ReconcileMode::Full {
+        for repo in repos.iter().filter(|r| r.active) {
+            let referenced = referenced
+                .iter()
+                .any(|i| i.registry == repo.registry && i.name == repo.name);
+            if !referenced {
+                plan.deactivate.push(repo.clone());
+            }
+        }
+    }
+    plan
+}
+
+/// The images every DeployConfig's tag parameters name.
+pub fn referenced_images(
+    configs: &[crate::kubernetes::DeployConfig],
+) -> std::collections::BTreeSet<ImageRef> {
+    configs
+        .iter()
+        .flat_map(|c| c.spec.spec.parameters.values())
+        .filter_map(|s| s.image_ref())
+        .collect()
+}
+
+/// Make watchtower's repo list match the tag parameters across all
+/// configs. Every step is logged; failures are returned but callers treat
+/// them as advisory, since the next sync or the periodic pass retries.
+pub async fn reconcile_registrations(
+    watchtower: &Watchtower,
+    client: &kube::Client,
+) -> AppResult<ReconcilePlan> {
+    let mode = ReconcileMode::from_env();
+    if mode == ReconcileMode::Off {
+        return Ok(ReconcilePlan::default());
+    }
+    let configs = crate::kubernetes::api::get_all_deploy_configs(client).await?;
+    let referenced = referenced_images(&configs);
+    let repos = watchtower.list_repos().await?;
+    let plan = plan_reconcile(&referenced, &repos, mode);
+    for image in &plan.register {
+        let repo = watchtower.register(image).await?;
+        log::info!(
+            "watchtower: registered {}/{} (id {})",
+            repo.registry,
+            repo.name,
+            repo.id
+        );
+    }
+    for repo in &plan.activate {
+        watchtower.set_active(repo.id, true).await?;
+        log::info!("watchtower: re-activated {}/{}", repo.registry, repo.name);
+    }
+    for repo in &plan.deactivate {
+        watchtower.set_active(repo.id, false).await?;
+        log::info!(
+            "watchtower: deactivated {}/{}; no tag parameter references it",
+            repo.registry,
+            repo.name
+        );
+    }
+    Ok(plan)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    fn repo(id: u64, name: &str, active: bool) -> Repo {
+        Repo {
+            id,
+            registry: "docker.io".into(),
+            name: name.into(),
+            active,
+        }
+    }
+
+    #[test]
+    fn reconcile_registers_activates_and_deactivates_by_mode() {
+        let referenced: BTreeSet<ImageRef> = ["docker.io/library/nginx", "library/redis"]
+            .into_iter()
+            .map(ImageRef::parse)
+            .collect();
+        let repos = vec![
+            repo(1, "library/redis", false),
+            repo(2, "library/postgres", true),
+            repo(3, "library/busybox", false),
+        ];
+        let full = plan_reconcile(&referenced, &repos, ReconcileMode::Full);
+        assert_eq!(
+            full.register,
+            vec![ImageRef::parse("docker.io/library/nginx")]
+        );
+        assert_eq!(
+            full.activate.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert_eq!(
+            full.deactivate.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![2],
+            "only active unreferenced repos are deactivated"
+        );
+        let activate_only = plan_reconcile(&referenced, &repos, ReconcileMode::ActivateOnly);
+        assert!(activate_only.deactivate.is_empty());
+        assert_eq!(activate_only.register.len(), 1);
+        assert!(plan_reconcile(&referenced, &repos, ReconcileMode::Off).is_empty());
     }
 }

@@ -170,6 +170,32 @@ async fn poll_github_rate_limits(octocrabs: Octocrabs) {
     }
 }
 
+/// Keep watchtower's repo list matching the tag parameters: once shortly
+/// after start, then hourly as a safety net behind the per-sync pass.
+async fn reconcile_watchtower_periodically(client: kube::Client) {
+    let watchtower = watchtower::Watchtower::global();
+    let mut first = true;
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(if first {
+            15
+        } else {
+            3600
+        }))
+        .await;
+        first = false;
+        match watchtower::reconcile_registrations(watchtower, &client).await {
+            Ok(plan) if plan.is_empty() => log::debug!("watchtower registrations already match"),
+            Ok(plan) => log::info!(
+                "watchtower registrations reconciled: {} registered, {} activated, {} deactivated",
+                plan.register.len(),
+                plan.activate.len(),
+                plan.deactivate.len()
+            ),
+            Err(e) => log::warn!("watchtower registration reconcile failed: {}", e),
+        }
+    }
+}
+
 async fn start_kubernetes_controller(
     pool: Pool<SqliteConnectionManager>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -264,6 +290,7 @@ async fn main() -> std::io::Result<()> {
             pool.clone()
         )) => {},
         _ = Box::pin(poll_github_rate_limits(octocrabs.clone())) => {},
+        _ = Box::pin(reconcile_watchtower_periodically(client.clone())) => {},
     };
 
     Ok(())
