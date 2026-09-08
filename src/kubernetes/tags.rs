@@ -10,9 +10,6 @@
 //! A suffixed tag is a prerelease and is never chosen by a range; pin it if
 //! it is what you want.
 
-// Consumed by the watchtower resolver in the next change.
-#![allow(dead_code)]
-
 use semver::{Version, VersionReq};
 
 /// The version a tag names, if it names one.
@@ -52,6 +49,7 @@ pub fn highest_matching<'a>(
 
 /// Whether one tag satisfies a pattern; `false` for anything that is not a
 /// complete version.
+#[allow(dead_code)] // the event poller's gate, later change
 pub fn matches(tag: &str, pattern: &str) -> bool {
     match (parse_version(tag), parse_pattern(pattern)) {
         (Some(v), Ok(req)) => req.matches(&v),

@@ -48,7 +48,6 @@ pub enum ParameterSource {
 }
 
 /// A container image split the way watchtower keys it.
-#[allow(dead_code)] // consumed by the watchtower client in the next change
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImageRef {
     pub registry: String,
@@ -124,7 +123,6 @@ impl ParameterSource {
     }
 
     /// The image a tag source watches.
-    #[allow(dead_code)] // consumed by the watchtower client in the next change
     pub fn image_ref(&self) -> Option<ImageRef> {
         match self {
             ParameterSource::Tag { image, .. } => Some(ImageRef::parse(image)),

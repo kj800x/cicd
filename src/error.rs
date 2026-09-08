@@ -132,6 +132,10 @@ pub enum AppError {
     /// The action is refused because a blocker is active on the config.
     #[error("Blocked: {0}")]
     Blocked(String),
+
+    /// A service this action depends on (watchtower) cannot be reached.
+    #[error("Unavailable: {0}")]
+    Unavailable(String),
 }
 
 /// Convenience type alias for Results using AppError
@@ -180,6 +184,7 @@ impl ResponseError for AppError {
             AppError::InvalidInput(_) | AppError::Parse(_) => StatusCode::BAD_REQUEST,
 
             AppError::Blocked(_) => StatusCode::CONFLICT,
+            AppError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
 
             AppError::Webhook(_) | AppError::Http(_) => StatusCode::BAD_GATEWAY,
         }

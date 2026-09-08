@@ -169,6 +169,9 @@ pub async fn set_parameter(
         Ok(_) => {}
         Err(AppError::InvalidInput(message)) => return HttpResponse::BadRequest().body(message),
         Err(AppError::Blocked(message)) => return HttpResponse::Conflict().body(message),
+        Err(AppError::Unavailable(message)) => {
+            return HttpResponse::ServiceUnavailable().body(message)
+        }
         Err(e) => {
             log::error!("Setting {} on {} failed: {}", parameter, name, e);
             return HttpResponse::InternalServerError().body(format!("Failed: {e}"));
