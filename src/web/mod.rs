@@ -16,7 +16,6 @@ pub mod rollback;
 pub mod selections;
 mod settings;
 pub mod team_prefs;
-pub mod ui_mode;
 mod watchdog;
 mod webhook_debug;
 
