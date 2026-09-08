@@ -23,7 +23,8 @@ pub struct RevisionParameter {
     /// Parameter source type, e.g. `commit`.
     pub kind: String,
     pub value: String,
-    /// The channel the value was resolved from (a branch for commits).
+    /// The channel the value was resolved from: a branch for commits, a
+    /// semver range for tags (stored in the `branch` column either way).
     /// `None` means the value was pinned rather than tracked.
     pub branch: Option<String>,
 }
@@ -83,7 +84,7 @@ impl NewRevision {
                         name: name.clone(),
                         kind: value.type_name().to_string(),
                         value: value.rendered(),
-                        branch: value.branch().map(String::from),
+                        branch: value.channel().map(String::from),
                     })
                     .collect()
             })
@@ -140,7 +141,7 @@ impl NewRevision {
                         name: pname.clone(),
                         kind: value.type_name().to_string(),
                         value: value.rendered(),
-                        branch: value.branch().map(String::from),
+                        branch: value.channel().map(String::from),
                     });
                 }
                 Some(NewRevision {

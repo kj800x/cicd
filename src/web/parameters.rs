@@ -42,6 +42,33 @@ pub fn render_parameters_panel(config: &DeployConfig, return_url: &str) -> Marku
                         }
                     }
                     @match source {
+                        ParameterSource::Tag { image, pattern } => {
+                            @let current = deployed.get(pname).cloned();
+                            div.parameter-value {
+                                "Deployed: " strong { (current.clone().unwrap_or_else(|| "-".into())) }
+                                " " span.muted { (image) }
+                                @match selection.mode() {
+                                    Mode::Pin(v) => { " " span.muted { "(pinned to " (v) ", range " (pattern) ")" } }
+                                    Mode::Track(p) => { " " span.muted { "(tracking " (p) ", default " (pattern) ")" } }
+                                    Mode::Default => { " " span.muted { "(latest matching " (pattern) ")" } }
+                                }
+                                @if let Some(note) = &selection.note { " " span.muted { "· " (note) } }
+                            }
+                            form action=(format!("/api/parameters/{}/{}", name, pname)) method="post" class="parameter-set" {
+                                input type="hidden" name="return_url" value=(return_url);
+                                input type="text" name="value" placeholder="pin to an exact tag" aria-label="Tag";
+                                select name="durability" aria-label="How long" {
+                                    option value="standing" { "standing" }
+                                    option value="temporary" { "temporary" }
+                                }
+                                input type="text" name="note" placeholder="why" aria-label="Why";
+                                input type="text" name="by" placeholder="who" aria-label="Who";
+                                button type="submit" class="secondary-button" { "Pin and deploy" }
+                                @if selection.is_override() {
+                                    button type="submit" name="reset" value="1" class="secondary-button" { "Back to latest matching" }
+                                }
+                            }
+                        }
                         ParameterSource::Commit { .. } => {
                             div.parameter-value {
                                 "Deployed: " strong { (deployed.get(pname).map(|v| crate::web::formatting::format_short_sha(v).to_string()).unwrap_or_else(|| "-".into())) }

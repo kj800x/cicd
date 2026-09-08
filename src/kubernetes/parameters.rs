@@ -34,9 +34,50 @@ pub enum ParameterSource {
         /// Default Git branch to track
         branch: String,
     },
+    /// Tags of a container image, as watchtower sees them in the registry.
+    /// The channel is a semver range; the default is `pattern`.
+    Tag {
+        /// `registry/name`, e.g. `docker.io/library/nginx` or
+        /// `ghcr.io/kj800x/nginx`. A bare name means Docker Hub.
+        image: String,
+        pattern: String,
+    },
     /// A static value with no feed. Its only channel is the default; a
     /// selection can pin it to something else.
     Value { default: String },
+}
+
+/// A container image split the way watchtower keys it.
+#[allow(dead_code)] // consumed by the watchtower client in the next change
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImageRef {
+    pub registry: String,
+    pub name: String,
+}
+
+impl ImageRef {
+    /// `docker.io/library/nginx` -> docker.io + library/nginx;
+    /// `ghcr.io/kj800x/nginx` -> ghcr.io + kj800x/nginx; `nginx` ->
+    /// docker.io + library/nginx; `kj800x/nginx` -> docker.io + kj800x/nginx.
+    /// The first segment is a registry when it contains a dot or a colon
+    /// or is `localhost`, as the Docker CLI decides.
+    pub fn parse(image: &str) -> Self {
+        let image = image.trim().trim_end_matches('/');
+        let (registry, name) = match image.split_once('/') {
+            Some((first, rest))
+                if first.contains('.') || first.contains(':') || first == "localhost" =>
+            {
+                (first.to_string(), rest.to_string())
+            }
+            _ => ("docker.io".to_string(), image.to_string()),
+        };
+        let name = if registry == "docker.io" && !name.contains('/') {
+            format!("library/{name}")
+        } else {
+            name
+        };
+        ImageRef { registry, name }
+    }
 }
 
 /// The value currently deployed for a parameter (`status.parameters.<key>`).
@@ -48,6 +89,15 @@ pub enum ParameterValue {
         value: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<String>,
+    },
+    /// An image tag, with the range it was resolved from (absent for a
+    /// pin) and the digest it pointed at when deployed, if known.
+    Tag {
+        value: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pattern: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        digest: Option<String>,
     },
     /// The deployed value of a static parameter.
     Value { value: String },
@@ -69,7 +119,16 @@ impl ParameterSource {
                 repo: repo.clone(),
                 branch: branch.clone(),
             }),
-            ParameterSource::Value { .. } => None,
+            ParameterSource::Tag { .. } | ParameterSource::Value { .. } => None,
+        }
+    }
+
+    /// The image a tag source watches.
+    #[allow(dead_code)] // consumed by the watchtower client in the next change
+    pub fn image_ref(&self) -> Option<ImageRef> {
+        match self {
+            ParameterSource::Tag { image, .. } => Some(ImageRef::parse(image)),
+            _ => None,
         }
     }
 
@@ -77,13 +136,28 @@ impl ParameterSource {
     pub fn default_value(&self) -> Option<&str> {
         match self {
             ParameterSource::Value { default } => Some(default),
-            ParameterSource::Commit { .. } => None,
+            ParameterSource::Commit { .. } | ParameterSource::Tag { .. } => None,
         }
+    }
+
+    /// The default channel of a feed: a branch for commits, a semver range
+    /// for tags. `None` for static values, whose only channel is the default.
+    pub fn default_channel(&self) -> Option<&str> {
+        match self {
+            ParameterSource::Commit { branch, .. } => Some(branch),
+            ParameterSource::Tag { pattern, .. } => Some(pattern),
+            ParameterSource::Value { .. } => None,
+        }
+    }
+
+    pub fn is_tag(&self) -> bool {
+        matches!(self, ParameterSource::Tag { .. })
     }
 
     pub fn type_name(&self) -> &'static str {
         match self {
             ParameterSource::Commit { .. } => "commit",
+            ParameterSource::Tag { .. } => "tag",
             ParameterSource::Value { .. } => "value",
         }
     }
@@ -113,22 +187,35 @@ impl ParameterValue {
     /// The string substituted for `$NAME` in manifests.
     pub fn rendered(&self) -> String {
         match self {
-            ParameterValue::Commit { value, .. } | ParameterValue::Value { value } => value.clone(),
+            ParameterValue::Commit { value, .. }
+            | ParameterValue::Tag { value, .. }
+            | ParameterValue::Value { value } => value.clone(),
         }
     }
 
     pub fn type_name(&self) -> &'static str {
         match self {
             ParameterValue::Commit { .. } => "commit",
+            ParameterValue::Tag { .. } => "tag",
             ParameterValue::Value { .. } => "value",
         }
     }
 
-    /// The branch a commit value was resolved from, if any.
-    pub fn branch(&self) -> Option<&str> {
+    /// The channel the value was resolved from: a branch for commits, a
+    /// range for tags. `None` means it was pinned (or is a static value).
+    pub fn channel(&self) -> Option<&str> {
         match self {
             ParameterValue::Commit { branch, .. } => branch.as_deref(),
+            ParameterValue::Tag { pattern, .. } => pattern.as_deref(),
             ParameterValue::Value { .. } => None,
+        }
+    }
+
+    #[allow(dead_code)] // shown on the deploy page in the next change
+    pub fn digest(&self) -> Option<&str> {
+        match self {
+            ParameterValue::Tag { digest, .. } => digest.as_deref(),
+            _ => None,
         }
     }
 
@@ -139,7 +226,7 @@ impl ParameterValue {
                 sha: value.clone(),
                 branch: branch.clone(),
             }),
-            ParameterValue::Value { .. } => None,
+            ParameterValue::Tag { .. } | ParameterValue::Value { .. } => None,
         }
     }
 }
@@ -206,18 +293,64 @@ mod tests {
         let val: ParameterValue = serde_json::from_value(json!({"type": "value", "value": "5"}))?;
         assert_eq!(val.rendered(), "5");
         assert!(val.as_sha_maybe_branch().is_none());
-        assert_eq!(val.branch(), None);
+        assert_eq!(val.channel(), None);
         Ok(())
     }
 
     #[test]
     fn unknown_type_is_rejected() {
         let res: Result<ParameterSource, _> =
-            serde_json::from_value(json!({"type": "tag", "owner": "a", "repo": "b"}));
+            serde_json::from_value(json!({"type": "digest", "image": "a"}));
         assert!(res.is_err());
         let res: Result<ParameterValue, _> =
-            serde_json::from_value(json!({"type": "tag", "value": "v1"}));
+            serde_json::from_value(json!({"type": "digest", "value": "v1"}));
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn tag_parameters_round_trip() -> Result<(), serde_json::Error> {
+        let src: ParameterSource = serde_json::from_value(
+            json!({"type": "tag", "image": "docker.io/library/nginx", "pattern": "^1.27"}),
+        )?;
+        assert_eq!(src.default_channel(), Some("^1.27"));
+        assert!(src.default_value().is_none());
+        assert_eq!(
+            src.image_ref(),
+            Some(ImageRef {
+                registry: "docker.io".into(),
+                name: "library/nginx".into()
+            })
+        );
+        let tracked: ParameterValue = serde_json::from_value(
+            json!({"type": "tag", "value": "1.27.3", "pattern": "^1.27", "digest": "sha256:ab"}),
+        )?;
+        assert_eq!(tracked.rendered(), "1.27.3");
+        assert_eq!(tracked.channel(), Some("^1.27"));
+        assert_eq!(tracked.digest(), Some("sha256:ab"));
+        let pinned: ParameterValue =
+            serde_json::from_value(json!({"type": "tag", "value": "1.26.0"}))?;
+        assert_eq!(pinned.channel(), None);
+        assert_eq!(
+            serde_json::to_value(&pinned)?,
+            json!({"type": "tag", "value": "1.26.0"})
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn image_refs_split_like_the_docker_cli() {
+        let r = |s: &str| ImageRef::parse(s);
+        assert_eq!(r("nginx").name, "library/nginx");
+        assert_eq!(r("nginx").registry, "docker.io");
+        assert_eq!(r("kj800x/nginx").name, "kj800x/nginx");
+        assert_eq!(r("docker.io/library/nginx").name, "library/nginx");
+        assert_eq!(r("ghcr.io/kj800x/nginx").registry, "ghcr.io");
+        assert_eq!(r("ghcr.io/kj800x/nginx").name, "kj800x/nginx");
+        assert_eq!(r("localhost:5000/x").registry, "localhost:5000");
+        assert_eq!(
+            r("registry.k8s.io/external-dns/external-dns").name,
+            "external-dns/external-dns"
+        );
     }
 
     #[test]

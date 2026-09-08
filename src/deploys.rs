@@ -335,8 +335,19 @@ fn values_from_revision(
     Ok(rev
         .parameters
         .into_iter()
-        .filter(|p| p.kind == "value")
-        .map(|p| (p.name, ParameterValue::Value { value: p.value }))
+        .filter_map(|p| match p.kind.as_str() {
+            "value" => Some((p.name, ParameterValue::Value { value: p.value })),
+            // A replayed tag is exactly that tag, whatever the range was.
+            "tag" => Some((
+                p.name,
+                ParameterValue::Tag {
+                    value: p.value,
+                    pattern: None,
+                    digest: None,
+                },
+            )),
+            _ => None,
+        })
         .collect())
 }
 
@@ -458,15 +469,15 @@ pub async fn run_action(
         other => other,
     };
     if let Action::SetParameter { parameter, .. } = action {
-        let is_static = config
+        let settable = config
             .spec
             .spec
             .parameters
             .get(parameter)
-            .is_some_and(|s| s.default_value().is_some());
-        if !is_static {
+            .is_some_and(|s| s.default_value().is_some() || s.is_tag());
+        if !settable {
             return Err(AppError::InvalidInput(format!(
-                "{parameter} is not a value parameter of {name}; only value parameters can be set"
+                "{parameter} is not a value or tag parameter of {name}; commit parameters are set with the deploy form"
             )));
         }
     }
@@ -690,7 +701,7 @@ mod tests {
         };
         match selection_change(&branch, Some("master"), &intent) {
             Some((_, Some(s))) => {
-                assert_eq!(s.track.as_ref().map(|t| t.branch.as_str()), Some("feature"));
+                assert_eq!(s.track.as_ref().map(|t| t.channel()), Some("feature"));
                 assert_eq!(
                     s.durability,
                     Durability::Temporary,

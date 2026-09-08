@@ -37,12 +37,17 @@ spec:
                         type: string
                         enum:
                           - commit
+                          - tag
                           - value
                       owner:
                         type: string
                       repo:
                         type: string
                       branch:
+                        type: string
+                      image:
+                        type: string
+                      pattern:
                         type: string
                       default:
                         type: string
@@ -51,6 +56,8 @@ spec:
                         message: "commit sources require owner, repo and branch"
                       - rule: "self.type != 'value' || has(self.default)"
                         message: "value sources require a default"
+                      - rule: "self.type != 'tag' || (has(self.image) && has(self.pattern))"
+                        message: "tag sources require image and pattern"
                 selections:
                   type: object
                   description: "Per-parameter intent: track an override branch or pin a value, with a durability. Absent means track the default channel. Written by the deploy handler."
@@ -59,11 +66,14 @@ spec:
                     properties:
                       track:
                         type: object
-                        required:
-                          - branch
                         properties:
                           branch:
                             type: string
+                          pattern:
+                            type: string
+                        x-kubernetes-validations:
+                          - rule: "has(self.branch) != has(self.pattern)"
+                            message: "track names exactly one of branch or pattern"
                       pin:
                         type: object
                         required:
@@ -162,10 +172,15 @@ spec:
                         type: string
                         enum:
                           - commit
+                          - tag
                           - value
                       value:
                         type: string
                       branch:
+                        type: string
+                      pattern:
+                        type: string
+                      digest:
                         type: string
                 config:
                   type: object

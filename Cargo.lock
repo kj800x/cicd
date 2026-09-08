@@ -796,6 +796,7 @@ dependencies = [
  "rusqlite",
  "rusqlite_migration",
  "schemars",
+ "semver",
  "serde",
  "serde_json",
  "serde_variant",
