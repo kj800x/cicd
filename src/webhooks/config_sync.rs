@@ -180,6 +180,16 @@ pub async fn sync_deploy_configs_for_commit(
     )
     .await?;
 
+    // Watchtower follows the tag parameters declared across all configs.
+    // Advisory: the startup and periodic passes retry, and a sync must not
+    // fail because the tag feed is down.
+    if let Err(e) =
+        crate::watchtower::reconcile_registrations(crate::watchtower::Watchtower::global(), client)
+            .await
+    {
+        log::warn!("watchtower registration reconcile after sync failed: {}", e);
+    }
+
     Ok(())
 }
 
