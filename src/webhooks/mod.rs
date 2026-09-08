@@ -13,6 +13,7 @@ pub mod manager;
 pub mod metrics;
 pub mod models;
 pub mod recent;
+pub mod tag_events;
 pub mod util;
 
 #[async_trait]

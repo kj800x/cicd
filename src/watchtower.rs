@@ -68,7 +68,6 @@ pub struct HydratedRepo {
 }
 
 /// What happened to a tag, as watchtower's feed names it.
-#[allow(dead_code)] // consumed by the event poller in a later change
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum EventKind {
     #[serde(rename = "tag_added")]
@@ -79,7 +78,6 @@ pub enum EventKind {
     Removed,
 }
 
-#[allow(dead_code)] // consumed by the event poller in a later change
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Event {
     pub id: u64,
@@ -91,7 +89,6 @@ pub struct Event {
     pub previous_digest: Option<String>,
 }
 
-#[allow(dead_code)] // consumed by the event poller in a later change
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct EventsPage {
     pub events: Vec<Event>,
@@ -194,7 +191,6 @@ impl Watchtower {
         Ok(())
     }
 
-    #[allow(dead_code)] // event poller, later change
     pub async fn events(&self, after: u64, limit: usize) -> AppResult<EventsPage> {
         self.http
             .get(format!("{}/api/events", self.base))

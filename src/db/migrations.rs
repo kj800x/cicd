@@ -181,6 +181,13 @@ pub fn migrations() -> Migrations<'static> {
           JOIN revision r ON r.config_name = de.name AND r.created_at = de.timestamp AND r.actor = 'user'
           WHERE de.artifact_sha IS NOT NULL;
         "#}),
+        // Where cicd is in watchtower's event feed. See db/watchtower_cursor.rs.
+        M::up(indoc! { r#"
+          CREATE TABLE watchtower_cursor (
+              id INTEGER PRIMARY KEY NOT NULL CHECK (id = 1),
+              after INTEGER NOT NULL
+          );
+        "#}),
     ])
 }
 

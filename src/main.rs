@@ -291,6 +291,11 @@ async fn main() -> std::io::Result<()> {
         )) => {},
         _ = Box::pin(poll_github_rate_limits(octocrabs.clone())) => {},
         _ = Box::pin(reconcile_watchtower_periodically(client.clone())) => {},
+        _ = Box::pin(webhooks::tag_events::TagEventPoller::new(
+            pool.clone(),
+            client.clone(),
+            octocrabs.clone(),
+        ).run()) => {},
     };
 
     Ok(())

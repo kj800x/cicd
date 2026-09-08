@@ -15,6 +15,7 @@ pub mod revision;
 pub mod revision_diff;
 #[cfg(test)]
 pub mod test_support;
+pub mod watchtower_cursor;
 
 pub struct ExistenceResult {
     id: u64,
