@@ -183,9 +183,13 @@ fn render_revision_row(rev: &Revision, prev: Option<&Revision>, repos: &ConfigRe
             }
             (render_artifact_cell(rev, prev, repos))
             (render_config_cell(rev, prev, repos))
-            (render_changes_cell(rev, prev))
+            @if !crate::web::ui_mode::classic() {
+                (render_changes_cell(rev, prev))
+            }
             td class="time-cell" { (format_et_time(rev.created_at)) }
-            td class="actions-cell" { (render_row_actions(rev)) }
+            @if !crate::web::ui_mode::classic() {
+                td class="actions-cell" { (render_row_actions(rev)) }
+            }
         }
     }
 }
@@ -235,9 +239,9 @@ fn render_table(
                     th { "Action" }
                     th { "Artifact" }
                     th { "Config" }
-                    th { "Changes" }
+                    @if !crate::web::ui_mode::classic() { th { "Changes" } }
                     th { "Time" }
-                    th { "" }
+                    @if !crate::web::ui_mode::classic() { th { "" } }
                 }
             }
             tbody id="history-tbody"
