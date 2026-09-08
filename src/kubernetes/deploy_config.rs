@@ -235,41 +235,36 @@ impl DeployConfig {
     }
 
     /// The effective selection for a parameter: the explicit one under
-    /// `spec.selections`, or one derived from what is deployed.
+    /// `spec.selections`, or, for the `SHA` parameter only, one derived
+    /// from what is deployed.
     ///
-    /// The derivation is the rule the code always used implicitly: a
-    /// deployed feed value with no channel is a pin, a channel other than
-    /// the source's default is an override, the default channel is the
-    /// default. Derived overrides default to temporary for channels and
-    /// standing for pins, matching what the UI proposes when making them
-    /// explicit. Static values have no channel and derive nothing.
+    /// The derivation is the rule the code always used implicitly before
+    /// selections were written: a deployed value with no branch is a pin,
+    /// a branch other than the source's default is an override, the
+    /// default branch is the default. It exists for objects deployed
+    /// before selections existed. Every other parameter's selection has
+    /// always been written explicitly, so for them an absent selection
+    /// means the default channel; deriving a pin from a pinned status
+    /// would make "latest" stick after the pin was cleared.
     pub fn selection(&self, parameter: &str) -> Selection {
         if let Some(explicit) = self.spec.spec.selections.get(parameter) {
             return explicit.clone();
         }
-        let Some(source) = self.spec.spec.parameters.get(parameter) else {
+        if parameter != SHA_PARAMETER {
             return Selection::default();
-        };
-        let Some(default_channel) = source.default_channel() else {
-            return Selection::default();
-        };
-        let deployed = self
-            .status
-            .as_ref()
-            .and_then(|s| s.parameters.get(parameter));
-        match deployed {
-            None => Selection::default(),
-            Some(value) => match value.channel() {
-                None => Selection::pin(&value.rendered(), Durability::Standing),
-                Some(channel) if channel != default_channel => {
-                    if source.is_tag() {
-                        Selection::track_pattern(channel, Durability::Temporary)
-                    } else {
-                        Selection::track(channel, Durability::Temporary)
-                    }
-                }
-                Some(_) => Selection::default(),
-            },
+        }
+        let default_branch = self.artifact_repository().map(|r| r.branch);
+        match self.sha_value() {
+            Some(ShaMaybeBranch { sha, branch: None }) => {
+                Selection::pin(&sha, Durability::Standing)
+            }
+            Some(ShaMaybeBranch {
+                branch: Some(branch),
+                ..
+            }) if Some(branch.as_str()) != default_branch.as_deref() => {
+                Selection::track(&branch, Durability::Temporary)
+            }
+            _ => Selection::default(),
         }
     }
 
@@ -947,5 +942,34 @@ mod tests {
         assert!(out["spec"].get("parameters").is_none());
         assert!(out["status"].get("parameters").is_none());
         Ok(())
+    }
+    #[test]
+    fn only_sha_derives_a_selection_from_status() {
+        use crate::kubernetes::parameters::{ParameterSource, ParameterValue};
+        use crate::kubernetes::selections::Mode;
+        let mut dc = config(repo("o", "c"), Some(repo("o", "r")));
+        dc.spec.spec.parameters.insert(
+            "NGINX".into(),
+            ParameterSource::Tag {
+                image: "nginx".into(),
+                pattern: "1.27.*".into(),
+            },
+        );
+        let mut dc = with_status(dc, "abc", None);
+        if let Some(status) = dc.status.as_mut() {
+            status.parameters.insert(
+                "NGINX".into(),
+                ParameterValue::Tag {
+                    value: "1.27.0".into(),
+                    pattern: None,
+                    digest: None,
+                },
+            );
+        }
+        // SHA with no branch: the legacy rule says pinned.
+        assert_eq!(dc.selection(SHA_PARAMETER).mode(), Mode::Pin("abc"));
+        // A tag deployed as a pin, with the explicit pin since cleared,
+        // tracks its default range again.
+        assert_eq!(dc.selection("NGINX").mode(), Mode::Default);
     }
 }
