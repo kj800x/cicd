@@ -534,7 +534,7 @@ async fn generate_status_header(
 
                 }
             }
-            @if config.artifact_repository().is_some() {
+            @if config.artifact_repository().is_some() && !crate::web::ui_mode::classic() {
                 div class="status-item" {
                     "Selection: "
                     (crate::web::selections::render_selection_summary(config))
@@ -872,14 +872,15 @@ pub async fn render_preview_content(
     for alert in build_status(action, selected_config, conn).await {
         alerts.push(alert);
     }
+    let classic = crate::web::ui_mode::classic();
     match Blocker::active_for(conn, &selected_config.name_any()) {
-        Ok(blockers) if !blockers.is_empty() => {
+        Ok(blockers) if !blockers.is_empty() && !classic => {
             alerts.push(crate::web::blockers::render_blocker_alert(&blockers))
         }
         Ok(_) => {}
         Err(e) => log::warn!("Failed to load blockers for preview: {}", e),
     }
-    if selected_config.is_temporary_deployment() {
+    if selected_config.is_temporary_deployment() && !classic {
         alerts.push(crate::web::selections::render_temporary_alert(
             selected_config,
         ));
@@ -1186,30 +1187,37 @@ pub async fn deploy_configs(
         vec![]
     };
 
-    let temporary_strip = crate::web::selections::render_temporary_strip(&deploy_configs);
+    // CICD_UI_CLASSIC hides everything the parameters redesign added.
+    let classic = crate::web::ui_mode::classic();
+    let temporary_strip = if classic {
+        html! {}
+    } else {
+        crate::web::selections::render_temporary_strip(&deploy_configs)
+    };
     let held_strip = match Blocker::all_active(&conn) {
-        Ok(blockers) => crate::web::blockers::render_held_strip(&blockers),
+        Ok(blockers) if !classic => crate::web::blockers::render_held_strip(&blockers),
+        Ok(_) => html! {},
         Err(e) => {
             log::warn!("Failed to load active blockers: {}", e);
             html! {}
         }
     };
     let patches_panel = match selected_config {
-        Some(config) => {
+        Some(config) if !classic => {
             let return_url = format!("/deploy?selected={}", config.name_any());
             crate::web::patches::render_patches_panel(config, &return_url)
         }
-        None => html! {},
+        _ => html! {},
     };
     let parameters_panel = match selected_config {
-        Some(config) => {
+        Some(config) if !classic => {
             let return_url = format!("/deploy?selected={}", config.name_any());
             crate::web::parameters::render_parameters_panel(config, &return_url)
         }
-        None => html! {},
+        _ => html! {},
     };
     let blocker_panel = match selected_config {
-        Some(config) => {
+        Some(config) if !classic => {
             let name = config.name_any();
             let blockers = Blocker::active_for(&conn, &name).unwrap_or_default();
             let return_url = format!(
@@ -1219,7 +1227,7 @@ pub async fn deploy_configs(
             );
             crate::web::blockers::render_blocker_panel(&blockers, &name, &return_url)
         }
-        None => html! {},
+        _ => html! {},
     };
 
     // Render the HTML template using Maud
@@ -1311,13 +1319,13 @@ pub async fn deploy_configs(
                                                     "Execute job"
                                                 }
                                             }
-                                            @if selected_config.selection(SHA_PARAMETER).is_override() && !is_orphaned {
+                                            @if selected_config.selection(SHA_PARAMETER).is_override() && !is_orphaned && !classic {
                                                 label class="action-radio" {
                                                     input type="radio" name="action" value="clear-selection" checked[action.is_clear_selection()] onchange="this.form.submit()";
                                                     "Back to default branch"
                                                 }
                                             }
-                                            @if selected_config.is_temporary_deployment() && !is_orphaned {
+                                            @if selected_config.is_temporary_deployment() && !is_orphaned && !classic {
                                                 label class="action-radio" {
                                                     input type="radio" name="action" value="end-temporary" checked[action.is_end_temporary()] onchange="this.form.submit()";
                                                     "End temporary deployment"
@@ -1338,7 +1346,7 @@ pub async fn deploy_configs(
                                                 label for="sha" { "SHA override" }
                                                 input id="sha" type="text" name="sha" placeholder="Enter commit SHA" pattern="[0-9a-fA-F]{5,40}" value=(query.get("sha").unwrap_or(&"".to_string())) onblur="this.form.submit()";
                                             }
-                                            @if !action.is_deploy() || matches!(action, Action::DeployBranch { .. } | Action::DeployCommit { .. }) {
+                                            @if !classic && (!action.is_deploy() || matches!(action, Action::DeployBranch { .. } | Action::DeployCommit { .. })) {
                                                 @let default_durability = if matches!(action, Action::DeployCommit { .. }) { "standing" } else { "temporary" };
                                                 @let durability = query.get("durability").map(String::as_str).unwrap_or(default_durability);
                                                 div class="action-input" {
@@ -1373,7 +1381,7 @@ pub async fn deploy_configs(
                                         // One-shot values for tracked tag parameters, for when
                                         // watchtower cannot resolve them. Left empty, latest resolves.
                                         @for (pname, source) in &selected_config.spec.spec.parameters {
-                                            @if source.is_tag() && !selected_config.selection(pname).is_override() {
+                                            @if source.is_tag() && !selected_config.selection(pname).is_override() && !classic {
                                                 div class="action-input" {
                                                     label for=(format!("value_{pname}")) { "$" (pname) " for this deploy only (leave empty to resolve latest)" }
                                                     input id=(format!("value_{pname}")) type="text" name=(format!("value_{pname}")) placeholder="e.g. 1.27.3, only if watchtower is down";
