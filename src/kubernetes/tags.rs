@@ -49,7 +49,6 @@ pub fn highest_matching<'a>(
 
 /// Whether one tag satisfies a pattern; `false` for anything that is not a
 /// complete version.
-#[allow(dead_code)] // the event poller's gate, later change
 pub fn matches(tag: &str, pattern: &str) -> bool {
     match (parse_version(tag), parse_pattern(pattern)) {
         (Some(v), Ok(req)) => req.matches(&v),
