@@ -755,7 +755,7 @@ pub fn render_home(data: &HomeData, strips: Markup, cluster_reachable: bool) -> 
                             }))
                         }
                         @if !data.upgrades.is_empty() {
-                            (section(html! { "Newer than the pattern" }, Some(html! { span.muted { "needs a config change" } }), false, html! {
+                            (section(html! { "Available upgrades" }, Some(html! { span.muted { "needs a config change" } }), false, html! {
                                 @for u in &data.upgrades {
                                     div.nag-row.nag-row--top {
                                         a.nag-row__config href=(format!("/deploy?selected={}", u.name)) { (u.name) }
