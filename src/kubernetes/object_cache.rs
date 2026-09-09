@@ -16,13 +16,13 @@
 //! a prune that saw yesterday's annotations would delete today's object.
 
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use futures_util::StreamExt;
 use kube::api::{DynamicObject, TypeMeta};
 use kube::core::discovery::ApiResource;
-use kube::runtime::{reflector, watcher, WatchStreamExt};
+use kube::runtime::{watcher, WatchStreamExt};
 use kube::{Api, Client};
 
 use crate::kubernetes::api::ListMode;
@@ -32,14 +32,20 @@ const KIND_REFRESH: Duration = Duration::from_secs(600);
 const MANAGED_BY: &str = "app.kubernetes.io/managed-by";
 const MANAGER: &str = "cicd-controller";
 
-struct KindStore {
-    types: TypeMeta,
-    reader: reflector::Store<DynamicObject>,
+/// Objects of one kind, indexed by namespace then name, so a read touches
+/// only the namespace it asks for. Watch events update it in place; a
+/// watch restart rebuilds it from a fresh initial list.
+#[derive(Default)]
+struct KindIndex {
+    types: Option<TypeMeta>,
+    by_namespace: HashMap<String, HashMap<String, Arc<DynamicObject>>>,
+    /// The initial list of a (re)started watch, swapped in when complete.
+    pending: Option<HashMap<String, HashMap<String, Arc<DynamicObject>>>>,
 }
 
 #[derive(Default)]
 struct Registry {
-    kinds: HashMap<String, KindStore>,
+    kinds: HashMap<String, KindIndex>,
 }
 
 static REGISTRY: RwLock<Option<Registry>> = RwLock::new(None);
@@ -52,30 +58,33 @@ fn skip(ar: &ApiResource) -> bool {
     ar.kind == "Event" && (ar.group.is_empty() || ar.group == "events.k8s.io")
 }
 
+fn is_owned(obj: &DynamicObject) -> bool {
+    obj.metadata
+        .labels
+        .as_ref()
+        .and_then(|l| l.get(MANAGED_BY))
+        .map(String::as_str)
+        == Some(MANAGER)
+}
+
 /// Every object in `ns` the cache knows, or `None` while the cache has not
 /// started yet (callers fall back to a live list).
 pub fn list(ns: &str, mode: &ListMode) -> Option<Vec<DynamicObject>> {
     let guard = REGISTRY.read().ok()?;
     let registry = guard.as_ref()?;
     let mut out = Vec::new();
-    for store in registry.kinds.values() {
-        for obj in store.reader.state() {
-            if obj.metadata.namespace.as_deref() != Some(ns) {
+    for index in registry.kinds.values() {
+        let Some(objects) = index.by_namespace.get(ns) else {
+            continue;
+        };
+        for obj in objects.values() {
+            if matches!(mode, ListMode::Owned) && !is_owned(obj) {
                 continue;
             }
-            if matches!(mode, ListMode::Owned)
-                && obj
-                    .metadata
-                    .labels
-                    .as_ref()
-                    .and_then(|l| l.get(MANAGED_BY))
-                    .map(String::as_str)
-                    != Some(MANAGER)
-            {
-                continue;
+            let mut obj = (**obj).clone();
+            if obj.types.is_none() {
+                obj.types = index.types.clone();
             }
-            let mut obj = (*obj).clone();
-            obj.types = obj.types.or(Some(store.types.clone()));
             out.push(obj);
         }
     }
@@ -116,32 +125,55 @@ fn already_watched(ar: &ApiResource) -> bool {
         .is_some_and(|g| g.as_ref().is_some_and(|r| r.kinds.contains_key(&key(ar))))
 }
 
+fn with_index<R>(label: &str, f: impl FnOnce(&mut KindIndex) -> R) -> Option<R> {
+    let mut guard = REGISTRY.write().ok()?;
+    let registry = guard.get_or_insert_with(Registry::default);
+    Some(f(registry.kinds.entry(label.to_string()).or_default()))
+}
+
 fn start_watch(client: &Client, ar: ApiResource) {
     let api: Api<DynamicObject> = Api::all_with(client.clone(), &ar);
-    let writer = reflector::store::Writer::<DynamicObject>::new(ar.clone());
-    let reader = writer.as_reader();
     let types = TypeMeta {
         api_version: ar.api_version.clone(),
         kind: ar.kind.clone(),
     };
-    if let Ok(mut guard) = REGISTRY.write() {
-        guard
-            .get_or_insert_with(Registry::default)
-            .kinds
-            .insert(key(&ar), KindStore { types, reader });
-    }
     let label = key(&ar);
+    with_index(&label, |index| index.types = Some(types));
     tokio::spawn(async move {
-        let stream = reflector(
-            writer,
-            watcher(api, watcher::Config::default().page_size(500)),
-        )
-        .default_backoff()
-        .touched_objects();
+        let stream = watcher(api, watcher::Config::default().page_size(500)).default_backoff();
         futures_util::pin_mut!(stream);
         while let Some(item) = stream.next().await {
-            if let Err(e) = item {
-                log::debug!("object cache: watch of {} hiccup: {}", label, e);
+            match item {
+                Ok(watcher::Event::Init) => {
+                    with_index(&label, |index| index.pending = Some(HashMap::new()));
+                }
+                Ok(watcher::Event::InitApply(obj)) => {
+                    with_index(&label, |index| {
+                        if let Some(pending) = index.pending.as_mut() {
+                            insert(pending, obj);
+                        }
+                    });
+                }
+                Ok(watcher::Event::InitDone) => {
+                    with_index(&label, |index| {
+                        if let Some(pending) = index.pending.take() {
+                            index.by_namespace = pending;
+                        }
+                    });
+                }
+                Ok(watcher::Event::Apply(obj)) => {
+                    with_index(&label, |index| insert(&mut index.by_namespace, obj));
+                }
+                Ok(watcher::Event::Delete(obj)) => {
+                    with_index(&label, |index| {
+                        let ns = obj.metadata.namespace.clone().unwrap_or_default();
+                        let name = obj.metadata.name.clone().unwrap_or_default();
+                        if let Some(objects) = index.by_namespace.get_mut(&ns) {
+                            objects.remove(&name);
+                        }
+                    });
+                }
+                Err(e) => log::debug!("object cache: watch of {} hiccup: {}", label, e),
             }
         }
         log::warn!("object cache: watch of {} ended", label);
@@ -151,4 +183,10 @@ fn start_watch(client: &Client, ar: ApiResource) {
             }
         }
     });
+}
+
+fn insert(map: &mut HashMap<String, HashMap<String, Arc<DynamicObject>>>, obj: DynamicObject) {
+    let ns = obj.metadata.namespace.clone().unwrap_or_default();
+    let name = obj.metadata.name.clone().unwrap_or_default();
+    map.entry(ns).or_default().insert(name, Arc::new(obj));
 }
