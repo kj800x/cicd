@@ -126,11 +126,13 @@ pub async fn list_namespace_objects(
     client: &Client,
     ns: &str,
     mode: ListMode,
-) -> AppResult<Vec<DynamicObject>> {
+) -> AppResult<std::sync::Arc<Vec<DynamicObject>>> {
     if let Some(objects) = crate::kubernetes::object_cache::list(ns, &mode) {
         return Ok(objects);
     }
-    list_namespace_objects_live(client, ns, mode).await
+    Ok(std::sync::Arc::new(
+        list_namespace_objects_live(client, ns, mode).await?,
+    ))
 }
 
 /// Every DynamicObject in `ns`, straight from the API server: one list per
@@ -289,7 +291,7 @@ pub async fn copy_namespace_resources(
     let mut copied_count = 0;
     let mut skipped_count = 0;
 
-    for mut resource in template_resources {
+    for mut resource in template_resources.iter().cloned() {
         let resource_name = resource.name_any();
         let gvk = GroupVersionKind::try_from(
             resource

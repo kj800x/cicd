@@ -46,6 +46,10 @@ struct KindIndex {
 #[derive(Default)]
 struct Registry {
     kinds: HashMap<String, KindIndex>,
+    /// A materialized view per namespace, shared with every reader and
+    /// rebuilt only after that namespace changed. Twenty configs in one
+    /// namespace read one snapshot instead of cloning it twenty times.
+    snapshots: HashMap<String, Arc<Vec<DynamicObject>>>,
 }
 
 static REGISTRY: RwLock<Option<Registry>> = RwLock::new(None);
@@ -67,11 +71,7 @@ fn is_owned(obj: &DynamicObject) -> bool {
         == Some(MANAGER)
 }
 
-/// Every object in `ns` the cache knows, or `None` while the cache has not
-/// started yet (callers fall back to a live list).
-pub fn list(ns: &str, mode: &ListMode) -> Option<Vec<DynamicObject>> {
-    let guard = REGISTRY.read().ok()?;
-    let registry = guard.as_ref()?;
+fn materialize(registry: &Registry, ns: &str, mode: &ListMode) -> Vec<DynamicObject> {
     let mut out = Vec::new();
     for index in registry.kinds.values() {
         let Some(objects) = index.by_namespace.get(ns) else {
@@ -88,7 +88,36 @@ pub fn list(ns: &str, mode: &ListMode) -> Option<Vec<DynamicObject>> {
             out.push(obj);
         }
     }
-    Some(out)
+    out
+}
+
+/// Every object in `ns` the cache knows, or `None` while the cache has not
+/// started yet (callers fall back to a live list). The `All` view is a
+/// shared snapshot; `Owned` is built on the spot (only the controller
+/// asks for it, and it uses live lists anyway).
+pub fn list(ns: &str, mode: &ListMode) -> Option<Arc<Vec<DynamicObject>>> {
+    {
+        let guard = REGISTRY.read().ok()?;
+        let registry = guard.as_ref()?;
+        if matches!(mode, ListMode::Owned) {
+            return Some(Arc::new(materialize(registry, ns, mode)));
+        }
+        if let Some(snapshot) = registry.snapshots.get(ns) {
+            return Some(snapshot.clone());
+        }
+    }
+    let mut guard = REGISTRY.write().ok()?;
+    let registry = guard.as_mut()?;
+    if let Some(snapshot) = registry.snapshots.get(ns) {
+        return Some(snapshot.clone());
+    }
+    let snapshot = Arc::new(materialize(registry, ns, mode));
+    registry.snapshots.insert(ns.to_string(), snapshot.clone());
+    Some(snapshot)
+}
+
+fn invalidate(registry: &mut Registry, ns: &str) {
+    registry.snapshots.remove(ns);
 }
 
 /// Start watches for every namespaced kind and keep the set current as
@@ -131,6 +160,19 @@ fn with_index<R>(label: &str, f: impl FnOnce(&mut KindIndex) -> R) -> Option<R> 
     Some(f(registry.kinds.entry(label.to_string()).or_default()))
 }
 
+/// Apply a change to one kind's index and drop the snapshots it affects.
+fn update(label: &str, ns: Option<&str>, f: impl FnOnce(&mut KindIndex)) {
+    let Ok(mut guard) = REGISTRY.write() else {
+        return;
+    };
+    let registry = guard.get_or_insert_with(Registry::default);
+    f(registry.kinds.entry(label.to_string()).or_default());
+    match ns {
+        Some(ns) => invalidate(registry, ns),
+        None => registry.snapshots.clear(),
+    }
+}
+
 fn start_watch(client: &Client, ar: ApiResource) {
     let api: Api<DynamicObject> = Api::all_with(client.clone(), &ar);
     let types = TypeMeta {
@@ -155,19 +197,22 @@ fn start_watch(client: &Client, ar: ApiResource) {
                     });
                 }
                 Ok(watcher::Event::InitDone) => {
-                    with_index(&label, |index| {
+                    update(&label, None, |index| {
                         if let Some(pending) = index.pending.take() {
                             index.by_namespace = pending;
                         }
                     });
                 }
                 Ok(watcher::Event::Apply(obj)) => {
-                    with_index(&label, |index| insert(&mut index.by_namespace, obj));
+                    let ns = obj.metadata.namespace.clone().unwrap_or_default();
+                    update(&label, Some(&ns), |index| {
+                        insert(&mut index.by_namespace, obj)
+                    });
                 }
                 Ok(watcher::Event::Delete(obj)) => {
-                    with_index(&label, |index| {
-                        let ns = obj.metadata.namespace.clone().unwrap_or_default();
-                        let name = obj.metadata.name.clone().unwrap_or_default();
+                    let ns = obj.metadata.namespace.clone().unwrap_or_default();
+                    let name = obj.metadata.name.clone().unwrap_or_default();
+                    update(&label, Some(&ns), |index| {
                         if let Some(objects) = index.by_namespace.get_mut(&ns) {
                             objects.remove(&name);
                         }

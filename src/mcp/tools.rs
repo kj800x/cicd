@@ -518,7 +518,7 @@ async fn handle_get_deploy_config(
         Ok(objs) => objs,
         Err(e) => {
             log::warn!("Failed to list namespace objects for {}: {}", namespace, e);
-            vec![]
+            std::sync::Arc::new(vec![])
         }
     };
     let resources = config.format_resources_json(&namespaced_objs);
