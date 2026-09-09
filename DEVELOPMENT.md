@@ -387,10 +387,8 @@ html! {
 - `cargo test --features test-crd -- --ignored live_writers` rehearses every writer against the cluster on a TestDeployConfig and asserts ownership and removal
 
 **Environment variables injected into every container:**
-- `CICD_DEPLOY_CONFIG`, `CICD_TEAM`
-- `CICD_TEMPORARY_DEPLOY`: `true` while a temporary override is active. Apps refuse dangerous work (schema migrations) on it; a standing pin does not trip it
-- `CICD_PARAM_<NAME>`, `CICD_PARAM_<NAME>_MODE` (`track`, `override`, `pin`), `CICD_PARAM_<NAME>_CHANNEL` (absent when pinned)
-- `CICD_CONFIG_SHA`, `CICD_CONFIG_BRANCH`
+- `CICD_DEPLOY_CONFIG`, `CICD_TEAM`, and `CICD_TEMPORARY_DEPLOY` (`true` while any temporary override or patch is active; the signal for refusing dangerous work such as schema migrations)
+- Deliberately nothing that changes with every deploy: the parameter values and the config commit used to be injected too, which rolled every Deployment on every deploy, including deploys that only touched an Ingress or a Secret. A workload's image tag already carries its version
 
 **Controller pattern:**
 ```rust

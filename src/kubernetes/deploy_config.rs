@@ -6,7 +6,7 @@ use crate::kubernetes::{
     },
     patches::{apply_patches, ManifestPatch},
     repo::{DeploymentState, RepositoryBranch, ShaMaybeBranch},
-    selections::{Durability, Mode, Selection, Selections},
+    selections::{Durability, Selection, Selections},
     Repository,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
@@ -325,58 +325,27 @@ impl DeployConfig {
         selections.chain(patches).min()
     }
 
-    /// The `CICD_*` environment variables to inject into every container of the
-    /// deployed workloads. Describes the deploy so apps can report their version
-    /// and make deploy-aware decisions.
+    /// The `CICD_*` environment variables injected into every container of
+    /// the deployed workloads: only what identifies the deployment and its
+    /// temporary state, deliberately nothing that changes with every deploy.
+    /// A value that changed on each deploy (the SHA, the config commit)
+    /// would roll every Deployment on every deploy, including one that only
+    /// touched an Ingress or a Secret; a workload's own image tag already
+    /// carries its version.
     ///
     /// - `CICD_DEPLOY_CONFIG`, `CICD_TEAM`
     /// - `CICD_TEMPORARY_DEPLOY`: `true` while any temporary override is
     ///   active. The signal for refusing dangerous work such as schema
     ///   migrations; a standing pin does not trip it.
-    /// - `CICD_PARAM_<NAME>`: each parameter's deployed value, plus
-    ///   `CICD_PARAM_<NAME>_MODE` (`track`, `override`, `pin`) and, unless
-    ///   pinned, `CICD_PARAM_<NAME>_CHANNEL` (the branch being followed).
-    /// - `CICD_CONFIG_SHA`, `CICD_CONFIG_BRANCH`
     pub fn deploy_env_vars(&self) -> Vec<(String, String)> {
-        let mut vars: Vec<(String, String)> = vec![
+        vec![
             ("CICD_DEPLOY_CONFIG".to_string(), self.name_any()),
             ("CICD_TEAM".to_string(), self.team().to_string()),
             (
                 "CICD_TEMPORARY_DEPLOY".to_string(),
                 self.is_temporary_deployment().to_string(),
             ),
-        ];
-
-        let Some(status) = self.status.as_ref() else {
-            return vars;
-        };
-
-        for (name, value) in &status.parameters {
-            let key = name
-                .to_ascii_uppercase()
-                .replace(|c: char| !c.is_ascii_alphanumeric(), "_");
-            let selection = self.selection(name);
-            let (mode, channel) = match selection.mode() {
-                Mode::Pin(_) => ("pin", None),
-                Mode::Track(branch) => ("override", Some(branch.to_string())),
-                Mode::Default => ("track", value.channel().map(String::from)),
-            };
-            vars.push((format!("CICD_PARAM_{key}"), value.rendered()));
-            vars.push((format!("CICD_PARAM_{key}_MODE"), mode.to_string()));
-            if let Some(channel) = channel {
-                vars.push((format!("CICD_PARAM_{key}_CHANNEL"), channel));
-            }
-        }
-
-        if let Some(config) = &status.config {
-            vars.push(("CICD_CONFIG_SHA".to_string(), config.sha.clone()));
-            vars.push((
-                "CICD_CONFIG_BRANCH".to_string(),
-                config.branch.clone().unwrap_or_default(),
-            ));
-        }
-
-        vars
+        ]
     }
 
     /// Returns the owner reference to be applied to child resources
@@ -859,11 +828,11 @@ mod tests {
             ParameterValue::Value { value: "5".into() },
         );
         dc.status = Some(status);
-        let env: std::collections::BTreeMap<String, String> =
-            dc.deploy_env_vars().into_iter().collect();
-        assert_eq!(env["CICD_PARAM_REPLICAS"], "5");
-        assert_eq!(env["CICD_PARAM_REPLICAS_MODE"], "pin");
-        assert!(!env.contains_key("CICD_PARAM_REPLICAS_CHANNEL"));
+        // Parameter values are not injected as env vars (see deploy_env_vars).
+        assert!(dc
+            .deploy_env_vars()
+            .iter()
+            .all(|(k, _)| !k.starts_with("CICD_PARAM_")));
     }
 
     #[test]
@@ -896,37 +865,36 @@ mod tests {
     }
 
     #[test]
-    fn env_vars_describe_each_parameter_and_temporariness() {
+    fn env_vars_carry_only_identity_and_temporariness() {
         let base = config(repo("kj800x", "app"), Some(repo("kj800x", "app")));
         let env = |dc: &DeployConfig| -> std::collections::BTreeMap<String, String> {
             dc.deploy_env_vars().into_iter().collect()
         };
 
         let tracking = env(&with_status(base.clone(), "abc", Some("master")));
-        assert_eq!(tracking["CICD_PARAM_SHA"], "abc");
-        assert_eq!(tracking["CICD_PARAM_SHA_MODE"], "track");
-        assert_eq!(tracking["CICD_PARAM_SHA_CHANNEL"], "master");
+        assert_eq!(tracking["CICD_DEPLOY_CONFIG"], "test");
+        assert_eq!(tracking["CICD_TEAM"], "test");
         assert_eq!(tracking["CICD_TEMPORARY_DEPLOY"], "false");
-        assert_eq!(tracking["CICD_CONFIG_SHA"], "cfg");
-        assert!(
-            !tracking.contains_key("CICD_ARTIFACT_SHA"),
-            "old names are gone"
-        );
-        assert!(!tracking.contains_key("CICD_NON_LATEST_DEPLOY"));
+        // Nothing that changes with every deploy: it would roll every
+        // Deployment on deploys that touch only an Ingress or a Secret.
+        for gone in [
+            "CICD_PARAM_SHA",
+            "CICD_PARAM_SHA_MODE",
+            "CICD_PARAM_SHA_CHANNEL",
+            "CICD_CONFIG_SHA",
+            "CICD_CONFIG_BRANCH",
+            "CICD_ARTIFACT_SHA",
+            "CICD_NON_LATEST_DEPLOY",
+        ] {
+            assert!(!tracking.contains_key(gone), "{gone} must not be injected");
+        }
+        assert_eq!(tracking.len(), 3);
 
         let branch = env(&with_status(base.clone(), "abc", Some("feature")));
-        assert_eq!(branch["CICD_PARAM_SHA_MODE"], "override");
-        assert_eq!(branch["CICD_PARAM_SHA_CHANNEL"], "feature");
         assert_eq!(branch["CICD_TEMPORARY_DEPLOY"], "true");
-
-        let pinned = env(&with_status(base.clone(), "abc", None));
-        assert_eq!(pinned["CICD_PARAM_SHA_MODE"], "pin");
-        assert!(!pinned.contains_key("CICD_PARAM_SHA_CHANNEL"));
-        assert_eq!(pinned["CICD_TEMPORARY_DEPLOY"], "false");
 
         let undeployed = env(&base);
         assert_eq!(undeployed["CICD_TEMPORARY_DEPLOY"], "false");
-        assert!(!undeployed.contains_key("CICD_PARAM_SHA"));
     }
 
     #[test]
