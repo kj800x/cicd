@@ -6,7 +6,7 @@ use crate::kubernetes::{
     },
     patches::{apply_patches, ManifestPatch},
     repo::{DeploymentState, RepositoryBranch, ShaMaybeBranch},
-    selections::{Durability, Mode, Selection, Selections},
+    selections::{Durability, Selection, Selections},
     Repository,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
