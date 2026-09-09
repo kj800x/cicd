@@ -1,10 +1,9 @@
 use super::DeployConfig;
 use crate::error::format_error_chain;
+use crate::kubernetes::api::list_namespace_objects_live;
 use crate::kubernetes::api::ListMode;
 use crate::kubernetes::repo::DeploymentState;
-use crate::kubernetes::{
-    apply, delete_dynamic_object, ensure_namespace_exists, list_namespace_objects,
-};
+use crate::kubernetes::{apply, delete_dynamic_object, ensure_namespace_exists};
 use crate::prelude::*;
 use futures_util::StreamExt;
 use kube::{
@@ -72,7 +71,8 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> AppRes
 
     // Prune stale resources
     log::debug!("Pruning stale resources...");
-    let objects = list_namespace_objects(client, &ns, ListMode::Owned).await?;
+    // Live, never from the cache: this list decides what gets deleted.
+    let objects = list_namespace_objects_live(client, &ns, ListMode::Owned).await?;
     log::debug!("Got objects in namespace {}/{}", ns, name);
     log::trace!("Objects: {objects:#?}");
     let stale_objects: Vec<DynamicObject> = objects

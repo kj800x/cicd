@@ -118,9 +118,24 @@ pub enum ListMode {
     Owned,
 }
 
-/// Return all DynamicObjects in `ns`: one list per namespaced kind the
-/// cluster serves (discovery is cached, see `discovery_cache`).
+/// Every DynamicObject in `ns`, for reads: from the watch-fed object cache
+/// when it is running, otherwise a live list. Pages, previews and health
+/// checks use this. Anything that deletes based on the result must use
+/// [`list_namespace_objects_live`].
 pub async fn list_namespace_objects(
+    client: &Client,
+    ns: &str,
+    mode: ListMode,
+) -> AppResult<Vec<DynamicObject>> {
+    if let Some(objects) = crate::kubernetes::object_cache::list(ns, &mode) {
+        return Ok(objects);
+    }
+    list_namespace_objects_live(client, ns, mode).await
+}
+
+/// Every DynamicObject in `ns`, straight from the API server: one list per
+/// namespaced kind the cluster serves (discovery is cached).
+pub async fn list_namespace_objects_live(
     client: &Client,
     ns: &str,
     mode: ListMode,

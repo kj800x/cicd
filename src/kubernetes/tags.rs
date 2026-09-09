@@ -57,6 +57,7 @@ pub fn matches(tag: &str, pattern: &str) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
