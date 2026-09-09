@@ -2,7 +2,8 @@
 //!
 //! Each section renders only when it has rows, so the page is the size of
 //! the problem: blocked configs, temporary deployments, unhealthy deploys,
-//! configs that have drifted from latest, then the recent activity and the
+//! configs that have drifted from latest, configs whose tag pattern is
+//! behind what the image publishes, then the recent activity and the
 //! standing overrides as a reminder. When the first three are empty the
 //! heading says so in green and a four-fact band gives the shape of the
 //! fleet.
@@ -73,6 +74,24 @@ pub enum DriftLine {
     Config { from: String, to: String },
 }
 
+/// A config whose declared pattern excludes the newest tag its image
+/// publishes: an upgrade that only a config change can take, so it is
+/// told apart from drift, which a deploy of latest clears.
+pub struct Upgrade {
+    pub name: String,
+    pub lines: Vec<UpgradeLine>,
+    /// The declaration on GitHub, where the pattern lives.
+    pub config_url: String,
+}
+
+/// `NGINX 1.27.6 → 1.29.1 (outside 1.27.*)`
+pub struct UpgradeLine {
+    pub name: String,
+    pub current: String,
+    pub newest: String,
+    pub channel: String,
+}
+
 /// A standing override, for the quietest section.
 pub struct Standing {
     pub name: String,
@@ -87,6 +106,7 @@ pub struct HomeData {
     pub unhealthy: Vec<Unhealthy>,
     pub healthy_count: usize,
     pub drift: Vec<Drift>,
+    pub upgrades: Vec<Upgrade>,
     pub activity: Vec<feed::Item>,
     pub standing: Vec<Standing>,
     pub last_deploy: Option<i64>,
@@ -110,12 +130,46 @@ impl HomeData {
 /// A tag channel: the range and the variant followed.
 type Channel = (String, Option<String>);
 
+/// The best tag of each image per channel, from [`latest_tags`].
+type Latest = HashMap<(ImageRef, Channel), String>;
+
+/// The range that admits every version: its best is the newest tag the
+/// image publishes, or the newest of the variant followed.
+const ANY: &str = "*";
+
+/// Every channel a tag parameter follows, plus [`ANY`] beside each, so one
+/// watchtower round trip per image answers both drift and upgrades.
+fn wanted_channels(configs: &[DeployConfig]) -> BTreeMap<ImageRef, Vec<Channel>> {
+    let mut wanted: BTreeMap<ImageRef, Vec<Channel>> = BTreeMap::new();
+    for config in configs {
+        for (pname, source) in &config.spec.spec.parameters {
+            let (Some(image), Some(default)) = (source.image_ref(), source.default_channel())
+            else {
+                continue;
+            };
+            let variant = source.variant().map(String::from);
+            let mut channels = vec![
+                (default.to_string(), variant.clone()),
+                (ANY.to_string(), variant.clone()),
+            ];
+            if let Mode::Track(p) = config.selection(pname).mode() {
+                channels.push((p.to_string(), variant));
+            }
+            let entry = wanted.entry(image).or_default();
+            for channel in channels {
+                if !entry.contains(&channel) {
+                    entry.push(channel);
+                }
+            }
+        }
+    }
+    wanted
+}
+
 /// The highest tag of each image that matches each channel asked for, from
 /// one watchtower lookup per image. Images watchtower cannot answer for
 /// are absent.
-async fn latest_tags(
-    wanted: &BTreeMap<ImageRef, Vec<Channel>>,
-) -> HashMap<(ImageRef, Channel), String> {
+async fn latest_tags(wanted: &BTreeMap<ImageRef, Vec<Channel>>) -> Latest {
     let lookups = wanted
         .keys()
         .map(|image| async move { (image.clone(), Watchtower::for_preview().lookup(image).await) });
@@ -173,39 +227,43 @@ fn latest_on(
     commit.map(|c| c.sha)
 }
 
+/// The branch the deployed config came from; `master` until known.
+fn config_branch(config: &DeployConfig) -> String {
+    config
+        .status
+        .as_ref()
+        .and_then(|s| s.config.as_ref())
+        .and_then(|c| c.branch.clone())
+        .unwrap_or_else(|| "master".to_string())
+}
+
+/// The declaration on GitHub, at the branch the deployed config came from.
+fn config_file_url(config: &DeployConfig) -> String {
+    let repo = config.config_repository();
+    format!(
+        "https://github.com/{}/{}/blob/{}/.deploy/{}.yaml",
+        repo.owner,
+        repo.repo,
+        config_branch(config),
+        config.name_any()
+    )
+}
+
+/// Whether a config is one the home page speaks for: on the cluster and
+/// deployed.
+fn is_live(config: &DeployConfig) -> bool {
+    !config.is_orphaned() && !matches!(config.deployment_state(), DeploymentState::Undeployed)
+}
+
 /// What a deploy of latest would change on each deployed config.
-async fn drift_of(
+fn drift_of(
     conn: &PooledConnection<SqliteConnectionManager>,
     configs: &[DeployConfig],
+    latest: &Latest,
 ) -> Vec<Drift> {
-    // One watchtower round trip per image, whatever the number of configs.
-    let mut wanted: BTreeMap<ImageRef, Vec<Channel>> = BTreeMap::new();
-    for config in configs {
-        for (pname, source) in &config.spec.spec.parameters {
-            let (Some(image), Some(default)) = (source.image_ref(), source.default_channel())
-            else {
-                continue;
-            };
-            let pattern = match config.selection(pname).mode() {
-                Mode::Track(p) => p.to_string(),
-                _ => default.to_string(),
-            };
-            let channel = (pattern, source.variant().map(String::from));
-            let channels = wanted.entry(image).or_default();
-            if !channels.contains(&channel) {
-                channels.push(channel);
-            }
-        }
-    }
-    let latest = latest_tags(&wanted).await;
-
     let mut out = Vec::new();
     for config in configs {
-        if config.is_orphaned() {
-            continue;
-        }
-        let state = config.deployment_state();
-        if matches!(state, DeploymentState::Undeployed) {
+        if !is_live(config) {
             continue;
         }
         let deployed = config.parameter_values();
@@ -302,15 +360,9 @@ async fn drift_of(
             .as_ref()
             .and_then(|s| s.config.as_ref())
             .map(|c| c.sha.clone());
-        let branch = config
-            .status
-            .as_ref()
-            .and_then(|s| s.config.as_ref())
-            .and_then(|c| c.branch.clone())
-            .unwrap_or_else(|| "master".to_string());
         if let (Some(from), Some(to)) = (
             deployed_cfg,
-            latest_on(conn, &cfg.owner, &cfg.repo, &branch, false),
+            latest_on(conn, &cfg.owner, &cfg.repo, &config_branch(config), false),
         ) {
             if from != to {
                 lines.push(DriftLine::Config {
@@ -326,6 +378,56 @@ async fn drift_of(
                 autodeploy: config.autodeploy(),
                 temporary: config.is_temporary_deployment(),
                 pinned,
+            });
+        }
+    }
+    out
+}
+
+/// Deployed configs whose declared pattern excludes the newest tag the
+/// image publishes. The test is the pattern itself: the newest tag of the
+/// image (of the variant followed, if one is) is not the best the pattern
+/// admits, so following it means editing the declaration, whatever the
+/// size of the jump. Overrides are ignored: the declaration is what the
+/// change edits.
+fn upgrades_of(configs: &[DeployConfig], latest: &Latest) -> Vec<Upgrade> {
+    let mut out = Vec::new();
+    for config in configs {
+        if !is_live(config) {
+            continue;
+        }
+        let deployed = config.parameter_values();
+        let mut lines = Vec::new();
+        for (pname, source) in &config.spec.spec.parameters {
+            let ParameterSource::Tag {
+                image,
+                pattern,
+                variant,
+            } = source
+            else {
+                continue;
+            };
+            let image = ImageRef::parse(image);
+            let Some(newest) = latest.get(&(image.clone(), (ANY.to_string(), variant.clone())))
+            else {
+                continue;
+            };
+            let in_range = latest.get(&(image, (pattern.clone(), variant.clone())));
+            if in_range == Some(newest) {
+                continue;
+            }
+            lines.push(UpgradeLine {
+                name: pname.clone(),
+                current: deployed.get(pname).cloned().unwrap_or_default(),
+                newest: newest.clone(),
+                channel: ParameterSource::channel_label(pattern, variant.as_deref()),
+            });
+        }
+        if !lines.is_empty() {
+            out.push(Upgrade {
+                name: config.name_any(),
+                lines,
+                config_url: config_file_url(config),
             });
         }
     }
@@ -426,8 +528,12 @@ pub async fn gather(
         t.elapsed()
     );
     let t = std::time::Instant::now();
-    let drift = drift_of(conn, &configs).await;
-    log::debug!("home: drift (watchtower + builds) in {:?}", t.elapsed());
+    let latest = latest_tags(&wanted_channels(&configs)).await;
+    log::debug!("home: watchtower in {:?}", t.elapsed());
+    let t = std::time::Instant::now();
+    let drift = drift_of(conn, &configs, &latest);
+    let upgrades = upgrades_of(&configs, &latest);
+    log::debug!("home: drift and upgrades in {:?}", t.elapsed());
     let t = std::time::Instant::now();
     let revisions = revisions_for_teams(conn, &scope_teams).unwrap_or_default();
     log::debug!("home: {} revisions in {:?}", revisions.len(), t.elapsed());
@@ -445,6 +551,7 @@ pub async fn gather(
         unhealthy,
         healthy_count,
         drift,
+        upgrades,
         activity,
         standing,
         last_deploy,
@@ -647,6 +754,22 @@ pub fn render_home(data: &HomeData, strips: Markup, cluster_reachable: bool) -> 
                                 }
                             }))
                         }
+                        @if !data.upgrades.is_empty() {
+                            (section(html! { "Available upgrades" }, Some(html! { span.muted { "needs a config change" } }), false, html! {
+                                @for u in &data.upgrades {
+                                    div.nag-row.nag-row--top {
+                                        a.nag-row__config href=(format!("/deploy?selected={}", u.name)) { (u.name) }
+                                        div.nag-row__lines {
+                                            @for line in &u.lines {
+                                                div { (line.name) " " (line.current) " → " (line.newest) " " span.muted { "(outside " (line.channel) ")" } }
+                                            }
+                                        }
+                                        span.nag-row__meta {}
+                                        div.nag-row__action { a href=(u.config_url) { "Edit config" } }
+                                    }
+                                }
+                            }))
+                        }
                         (section(html! { "Recent activity" }, Some(html! { a href="/deploy-history" { "Deploy history" } }), false, html! {
                             @if data.activity.is_empty() {
                                 div.nag-empty { "None" }
@@ -719,9 +842,12 @@ pub async fn home(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kubernetes::deploy_config::{DeployConfigSpec, DeployConfigSpecFields};
+    use crate::kubernetes::deploy_config::{
+        DeployConfigSpec, DeployConfigSpecFields, DeployConfigStatus,
+    };
+    use crate::kubernetes::parameters::ParameterValue;
     use crate::kubernetes::patches::{ManifestPatch, PatchOp, PatchTarget};
-    use crate::kubernetes::repo::Repository;
+    use crate::kubernetes::repo::{Repository, ShaMaybeBranch};
     use crate::kubernetes::selections::{Durability, Selection};
 
     fn config(name: &str) -> DeployConfig {
@@ -774,5 +900,156 @@ mod tests {
         assert_eq!(standing[0].what, "NGINX pinned 1.27.0");
         assert_eq!(render_temporary_summary(&dc), "SHA tracking fix/x, 1 patch");
         assert_eq!(temporary_by(&dc).as_deref(), Some("kevin"));
+    }
+
+    fn tag(image: &str, pattern: &str, variant: Option<&str>) -> ParameterSource {
+        ParameterSource::Tag {
+            image: image.into(),
+            pattern: pattern.into(),
+            variant: variant.map(String::from),
+        }
+    }
+
+    fn deployed(mut dc: DeployConfig, values: &[(&str, &str)]) -> DeployConfig {
+        let mut status = DeployConfigStatus {
+            config: Some(ShaMaybeBranch {
+                sha: "abc".into(),
+                branch: Some("main".into()),
+            }),
+            ..Default::default()
+        };
+        for (name, value) in values {
+            status.parameters.insert(
+                (*name).into(),
+                ParameterValue::Tag {
+                    value: (*value).into(),
+                    pattern: None,
+                    digest: None,
+                },
+            );
+        }
+        dc.status = Some(status);
+        dc
+    }
+
+    fn best(
+        image: &str,
+        pattern: &str,
+        variant: Option<&str>,
+        tag: &str,
+    ) -> ((ImageRef, Channel), String) {
+        (
+            (
+                ImageRef::parse(image),
+                (pattern.into(), variant.map(String::from)),
+            ),
+            tag.into(),
+        )
+    }
+
+    #[test]
+    fn every_channel_is_asked_for_beside_the_one_that_admits_everything() {
+        let mut dc = config("web");
+        dc.spec
+            .spec
+            .parameters
+            .insert("NGINX".into(), tag("nginx", "1.27.*", None));
+        dc.spec.spec.parameters.insert(
+            "MQTT".into(),
+            tag("eclipse-mosquitto", "^2.1", Some("alpine")),
+        );
+        dc.spec.spec.selections.insert(
+            "NGINX".into(),
+            Selection::track_pattern("^1.28", Durability::Standing),
+        );
+        let wanted = wanted_channels(std::slice::from_ref(&dc));
+        assert_eq!(
+            wanted[&ImageRef::parse("nginx")],
+            vec![
+                ("1.27.*".to_string(), None),
+                ("*".to_string(), None),
+                ("^1.28".to_string(), None)
+            ]
+        );
+        assert_eq!(
+            wanted[&ImageRef::parse("eclipse-mosquitto")],
+            vec![
+                ("^2.1".to_string(), Some("alpine".into())),
+                ("*".to_string(), Some("alpine".into()))
+            ]
+        );
+    }
+
+    #[test]
+    fn upgrades_are_the_tags_the_declared_pattern_excludes() {
+        let mut dc = config("web");
+        dc.spec
+            .spec
+            .parameters
+            .insert("NGINX".into(), tag("nginx", "1.27.*", None));
+        dc.spec.spec.parameters.insert(
+            "MQTT".into(),
+            tag("eclipse-mosquitto", "^2.1", Some("alpine")),
+        );
+        dc.spec
+            .spec
+            .parameters
+            .insert("PG".into(), tag("postgres", "^15.11", None));
+        let dc = deployed(
+            dc,
+            &[
+                ("NGINX", "1.27.4"),
+                ("MQTT", "2.1.2-alpine"),
+                ("PG", "15.19"),
+            ],
+        );
+        let latest: Latest = [
+            // Newest is outside the range: an upgrade, whatever the jump.
+            best("nginx", "1.27.*", None, "1.27.6"),
+            best("nginx", "*", None, "1.29.1"),
+            // The variant's newest is what the range admits: nothing to say,
+            // even though the bare image has moved on.
+            best("eclipse-mosquitto", "^2.1", Some("alpine"), "2.1.3-alpine"),
+            best("eclipse-mosquitto", "*", Some("alpine"), "2.1.3-alpine"),
+            // A two-part version: the range admits nothing at all.
+            best("postgres", "*", None, "18.1"),
+        ]
+        .into_iter()
+        .collect();
+        let upgrades = upgrades_of(std::slice::from_ref(&dc), &latest);
+        assert_eq!(upgrades.len(), 1);
+        let up = &upgrades[0];
+        assert_eq!(up.name, "web");
+        assert_eq!(
+            up.config_url,
+            "https://github.com/o/c/blob/main/.deploy/web.yaml"
+        );
+        let lines: Vec<(&str, &str, &str, &str)> = up
+            .lines
+            .iter()
+            .map(|l| {
+                (
+                    l.name.as_str(),
+                    l.current.as_str(),
+                    l.newest.as_str(),
+                    l.channel.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                ("NGINX", "1.27.4", "1.29.1", "1.27.*"),
+                ("PG", "15.19", "18.1", "^15.11"),
+            ]
+        );
+        // An undeployed config has nothing to upgrade yet.
+        let mut fresh = config("fresh");
+        fresh
+            .spec
+            .spec
+            .parameters
+            .insert("NGINX".into(), tag("nginx", "1.27.*", None));
+        assert!(upgrades_of(std::slice::from_ref(&fresh), &latest).is_empty());
     }
 }
