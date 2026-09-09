@@ -20,6 +20,51 @@ pub fn format_relative_time(timestamp: i64) -> String {
     }
 }
 
+/// A compact relative time for strips and meta lines: `just now`,
+/// `12m ago`, `2h ago`, `6d ago`.
+pub fn format_ago_short(timestamp_ms: i64) -> String {
+    let now = chrono::Utc::now().timestamp_millis();
+    let elapsed = now.saturating_sub(timestamp_ms);
+    if elapsed < 60_000 {
+        "just now".to_string()
+    } else {
+        format!("{} ago", format_duration_short(elapsed))
+    }
+}
+
+/// A duration in one unit: `35m`, `4h`, `2d`.
+pub fn format_duration_short(ms: i64) -> String {
+    let secs = ms.max(0) / 1000;
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86_400)
+    }
+}
+
+/// `2026-09-07`, in Eastern time like the rest of the site.
+pub fn format_date(timestamp_ms: i64) -> String {
+    match chrono::Utc.timestamp_millis_opt(timestamp_ms).single() {
+        Some(t) => t
+            .with_timezone(&chrono_tz::America::New_York)
+            .format("%Y-%m-%d")
+            .to_string(),
+        None => "invalid".to_string(),
+    }
+}
+
+/// Milliseconds since the epoch for an RFC 3339 timestamp, as selections
+/// and patches record their `since`.
+pub fn rfc3339_to_ms(value: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|t| t.timestamp_millis())
+}
+
 /// Format a git sha as a short version (7 chars)
 pub fn format_short_sha(sha: &str) -> &str {
     if sha.len() > 7 {
@@ -51,5 +96,33 @@ pub fn truncate_message(message: &str, max_length: usize) -> String {
         message.to_string()
     } else {
         format!("{}...", &message[0..max_length])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_durations_use_one_unit() {
+        assert_eq!(format_duration_short(5_000), "5s");
+        assert_eq!(format_duration_short(35 * 60_000), "35m");
+        assert_eq!(format_duration_short(4 * 3_600_000 + 20 * 60_000), "4h");
+        assert_eq!(format_duration_short(2 * 86_400_000), "2d");
+        assert_eq!(format_duration_short(-5), "0s");
+    }
+
+    #[test]
+    fn ago_is_relative_to_now() {
+        let now = chrono::Utc::now().timestamp_millis();
+        assert_eq!(format_ago_short(now), "just now");
+        assert_eq!(format_ago_short(now - 2 * 3_600_000), "2h ago");
+    }
+
+    #[test]
+    fn rfc3339_parses() {
+        assert_eq!(rfc3339_to_ms("1970-01-01T00:00:01+00:00"), Some(1_000));
+        assert_eq!(rfc3339_to_ms("yesterday"), None);
+        assert_eq!(format_date(0), "1969-12-31");
     }
 }

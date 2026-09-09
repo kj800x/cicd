@@ -28,7 +28,7 @@ use crate::{
         parameters::{ParameterValue, ParameterValues, SHA_PARAMETER},
         patches::ManifestPatch,
         repo::DeploymentState,
-        selections::{Durability, Mode, Selection},
+        selections::{Choice, Durability, Mode, Selection},
         DeployConfig,
     },
     watchtower::Watchtower,
@@ -75,89 +75,101 @@ impl SelectionIntent {
     }
 }
 
-/// Resolve every tag parameter of `config` for this deploy: a pin is
+/// Resolve one tag parameter of `config` for this deploy: a pin is
 /// itself, a typed one-shot value is used as is under the tracked channel,
 /// and anything tracked is the highest tag watchtower knows that matches
-/// the channel's range. Fails closed when watchtower is unreachable and a
-/// tracked parameter has no typed value.
+/// the channel's range. Fails closed when watchtower is unreachable and
+/// there is no typed value. `None` when `pname` is not a tag parameter.
+pub async fn resolve_tag_parameter(
+    watchtower: &Watchtower,
+    config: &DeployConfig,
+    pname: &str,
+    typed: Option<&str>,
+) -> AppResult<Option<ParameterValue>> {
+    let name = kube::ResourceExt::name_any(config);
+    let Some(source) = config.spec.spec.parameters.get(pname) else {
+        return Ok(None);
+    };
+    let (Some(image), Some(default_pattern)) = (source.image_ref(), source.default_channel())
+    else {
+        return Ok(None);
+    };
+    let selection = config.selection(pname);
+    let pattern = match selection.mode() {
+        Mode::Pin(value) => {
+            return Ok(Some(ParameterValue::Tag {
+                value: value.to_string(),
+                pattern: None,
+                digest: None,
+            }));
+        }
+        Mode::Track(pattern) => pattern.to_string(),
+        Mode::Default => default_pattern.to_string(),
+    };
+    if let Some(value) = typed.map(str::trim).filter(|v| !v.is_empty()) {
+        return Ok(Some(ParameterValue::Tag {
+            value: value.to_string(),
+            pattern: Some(pattern),
+            digest: None,
+        }));
+    }
+    let image_name = format!("{}/{}", image.registry, image.name);
+    let repo = match watchtower.lookup(&image).await {
+        Ok(Some(repo)) => repo,
+        Ok(None) => {
+            // Register now so the next attempt can succeed.
+            watchtower.register(&image).await?;
+            return Err(AppError::InvalidInput(format!(
+                "watchtower had not been told about {image_name} for {name}.{pname}; it is registered now, try again in a minute"
+            )));
+        }
+        Err(AppError::Unavailable(message)) => {
+            return Err(AppError::Unavailable(format!(
+                "{message}. {name} cannot resolve {pname} ({image_name}, {pattern}); type the tag to deploy for this once, or pin it"
+            )));
+        }
+        Err(e) => return Err(e),
+    };
+    let candidates = repo.tag.iter().filter(|t| t.active).map(|t| t.tag.as_str());
+    let chosen = crate::kubernetes::tags::highest_matching(candidates, &pattern)
+        .map_err(AppError::InvalidInput)?
+        .ok_or_else(|| {
+            AppError::InvalidInput(format!(
+                "no tag of {image_name} matches {pattern} (for {name}.{pname})"
+            ))
+        })?;
+    let digest = repo
+        .tag
+        .iter()
+        .find(|t| t.tag == chosen)
+        .and_then(|t| t.digest())
+        .map(String::from);
+    Ok(Some(ParameterValue::Tag {
+        value: chosen,
+        pattern: Some(pattern),
+        digest,
+    }))
+}
+
+/// Resolve every tag parameter of `config` for this deploy (see
+/// [`resolve_tag_parameter`]). The first failure is the deploy's failure.
 pub async fn resolve_tag_parameters(
     watchtower: &Watchtower,
     config: &DeployConfig,
     typed: &BTreeMap<String, String>,
 ) -> AppResult<ParameterValues> {
-    let name = kube::ResourceExt::name_any(config);
     let mut values = ParameterValues::new();
-    for (pname, source) in &config.spec.spec.parameters {
-        let (Some(image), Some(default_pattern)) = (source.image_ref(), source.default_channel())
-        else {
-            continue;
-        };
-        let selection = config.selection(pname);
-        let pattern = match selection.mode() {
-            Mode::Pin(value) => {
-                values.insert(
-                    pname.clone(),
-                    ParameterValue::Tag {
-                        value: value.to_string(),
-                        pattern: None,
-                        digest: None,
-                    },
-                );
-                continue;
-            }
-            Mode::Track(pattern) => pattern.to_string(),
-            Mode::Default => default_pattern.to_string(),
-        };
-        if let Some(value) = typed.get(pname) {
-            values.insert(
-                pname.clone(),
-                ParameterValue::Tag {
-                    value: value.clone(),
-                    pattern: Some(pattern),
-                    digest: None,
-                },
-            );
-            continue;
+    for pname in config.spec.spec.parameters.keys() {
+        if let Some(value) = resolve_tag_parameter(
+            watchtower,
+            config,
+            pname,
+            typed.get(pname).map(String::as_str),
+        )
+        .await?
+        {
+            values.insert(pname.clone(), value);
         }
-        let image_name = format!("{}/{}", image.registry, image.name);
-        let repo = match watchtower.lookup(&image).await {
-            Ok(Some(repo)) => repo,
-            Ok(None) => {
-                // Register now so the next attempt can succeed.
-                watchtower.register(&image).await?;
-                return Err(AppError::InvalidInput(format!(
-                    "watchtower had not been told about {image_name} for {name}.{pname}; it is registered now, try again in a minute"
-                )));
-            }
-            Err(AppError::Unavailable(message)) => {
-                return Err(AppError::Unavailable(format!(
-                    "{message}. {name} cannot resolve {pname} ({image_name}, {pattern}); type the tag to deploy for this once, or pin it"
-                )));
-            }
-            Err(e) => return Err(e),
-        };
-        let candidates = repo.tag.iter().filter(|t| t.active).map(|t| t.tag.as_str());
-        let chosen = crate::kubernetes::tags::highest_matching(candidates, &pattern)
-            .map_err(AppError::InvalidInput)?
-            .ok_or_else(|| {
-                AppError::InvalidInput(format!(
-                    "no tag of {image_name} matches {pattern} (for {name}.{pname})"
-                ))
-            })?;
-        let digest = repo
-            .tag
-            .iter()
-            .find(|t| t.tag == chosen)
-            .and_then(|t| t.digest())
-            .map(String::from);
-        values.insert(
-            pname.clone(),
-            ParameterValue::Tag {
-                value: chosen,
-                pattern: Some(pattern),
-                digest,
-            },
-        );
     }
     Ok(values)
 }
@@ -195,12 +207,125 @@ pub fn selection_change(
         // changes from the config (see [`temporary_changes`]); the rest do
         // not touch versions at all.
         Action::DeployLatest
+        | Action::DeployAdvanced { .. }
         | Action::EndTemporary
         | Action::Rollback { .. }
         | Action::Undeploy
         | Action::Bounce
         | Action::ExecuteJob
         | Action::ToggleAutodeploy => None,
+    }
+}
+
+/// Every selection change an action implies. Single-parameter actions
+/// delegate to [`selection_change`]; an advanced deploy carries one choice
+/// per parameter it showed, and only the choices that differ from the
+/// parameter's current selection are recorded. That keeps a standing pin
+/// that was merely re-submitted from being rewritten with this deploy's
+/// durability. Choosing the default channel for `SHA` writes an explicit
+/// empty selection when the current one is derived from what is deployed,
+/// since removing a key that was never there would leave the derivation
+/// in place.
+pub fn selection_changes(
+    action: &Action,
+    config: &DeployConfig,
+    intent: &SelectionIntent,
+) -> Vec<(String, Option<Selection>)> {
+    let Action::DeployAdvanced {
+        choices,
+        durability,
+        ..
+    } = action
+    else {
+        let default_branch = config.artifact_repository().map(|r| r.branch);
+        return selection_change(action, default_branch.as_deref(), intent)
+            .into_iter()
+            .collect();
+    };
+    let mut changes = Vec::new();
+    for (name, choice) in choices {
+        let Some(source) = config.spec.spec.parameters.get(name) else {
+            continue;
+        };
+        let current = config.selection(name);
+        let explicit = config.spec.spec.selections.contains_key(name);
+        let noted = |s: Selection| s.with_note(intent.note.as_deref(), intent.by.as_deref());
+        let change = match choice {
+            Choice::Default => {
+                if !current.is_override() {
+                    None
+                } else if !explicit && name == SHA_PARAMETER {
+                    Some(Some(Selection::default()))
+                } else {
+                    Some(None)
+                }
+            }
+            Choice::Track(channel) => {
+                let channel = channel.trim();
+                if channel.is_empty() || source.default_value().is_some() {
+                    None
+                } else if Some(channel) == source.default_channel() {
+                    if current.is_override() {
+                        Some(None)
+                    } else {
+                        None
+                    }
+                } else if current.mode() == Mode::Track(channel) {
+                    None
+                } else if source.is_tag() {
+                    Some(Some(noted(Selection::track_pattern(channel, *durability))))
+                } else {
+                    Some(Some(noted(Selection::track(channel, *durability))))
+                }
+            }
+            Choice::Pin(value) => {
+                let value = value.trim();
+                if value.is_empty() || current.mode() == Mode::Pin(value) {
+                    None
+                } else {
+                    Some(Some(noted(Selection::pin(value, *durability))))
+                }
+            }
+        };
+        if let Some(change) = change {
+            changes.push((name.clone(), change));
+        }
+    }
+    changes
+}
+
+/// The action with any abbreviated commit sha expanded to the full one:
+/// a `DeployCommit`, or the `SHA` pin of an advanced deploy. Every other
+/// action is returned as is. Both the deploy and its preview go through
+/// here so they agree on what is being deployed.
+pub fn normalize_action(
+    conn: &PooledConnection<SqliteConnectionManager>,
+    config: &DeployConfig,
+    action: &Action,
+) -> AppResult<Action> {
+    match action {
+        Action::DeployCommit { sha } => Ok(Action::DeployCommit {
+            sha: full_commit_sha(conn, config, sha)?,
+        }),
+        Action::DeployAdvanced {
+            choices,
+            durability,
+            patches,
+        } => {
+            let mut choices = choices.clone();
+            if let Some(Choice::Pin(sha)) = choices.get(SHA_PARAMETER) {
+                if !sha.trim().is_empty() {
+                    let full = full_commit_sha(conn, config, sha)?;
+                    choices.insert(SHA_PARAMETER.to_string(), Choice::Pin(full));
+                }
+            }
+            Ok(Action::DeployAdvanced {
+                choices,
+                durability: *durability,
+                patches: patches.clone(),
+            })
+        }
+        other => Ok(other.clone()),
     }
 }
 
@@ -219,23 +344,6 @@ pub struct TemporaryChanges {
 impl TemporaryChanges {
     pub fn is_empty(&self) -> bool {
         self.selections.is_empty() && self.patches.is_none()
-    }
-
-    /// What ending would do, in the present tense, such as
-    /// `clear SHA, GREETING; remove 2 patches`. Shown before the action.
-    pub fn summary(&self) -> String {
-        let mut parts = Vec::new();
-        if !self.selections.is_empty() {
-            parts.push(format!("clear {}", self.selections.join(", ")));
-        }
-        if self.removed_patches > 0 {
-            parts.push(format!(
-                "remove {} patch{}",
-                self.removed_patches,
-                if self.removed_patches == 1 { "" } else { "es" }
-            ));
-        }
-        parts.join("; ")
     }
 
     /// A one-line summary for the revision, such as
@@ -381,25 +489,37 @@ pub async fn change_patches(
         }
     };
 
-    // Validate against what is deployed now. An undeployed config has no
-    // values, so only check the patches themselves fit the templates.
     let mut effective = config.clone();
     effective.spec.spec.patches = patches.clone();
-    let rendered = if config.status.as_ref().is_some_and(|s| s.config.is_some()) {
-        effective.render_manifests()?
-    } else {
-        let templates = effective.resource_templates();
-        let manifests = templates.iter().map(|t| t.manifest.clone()).collect();
-        crate::kubernetes::patches::apply_patches(&templates, manifests, &patches)?
-    };
+    validate_patches(&effective, client).await?;
 
-    // A patch can fit the JSON and still produce a manifest Kubernetes will
-    // not take (an `add` on `/env` instead of `/env/-` turns the array into
-    // an object). Dry-run the exact objects a reconcile would apply so the
-    // API server's schema check happens now, with the error shown to the
-    // person, instead of failing quietly in the controller afterwards.
     let ns = kube::ResourceExt::namespace(config).unwrap_or_else(|| "default".to_string());
-    for obj in effective.child_objects(rendered)? {
+    cr_writers::set_patches(client, &ns, &name, &patches).await?;
+
+    let conn = pool.get()?;
+    match Revision::record(&conn, NewRevision::patch_change(&effective, actor, &reason)) {
+        Ok(rev) => log::info!("Recorded revision {} for {} ({})", rev.id, name, reason),
+        Err(e) => log::error!("Failed to record patch revision for {}: {}", name, e),
+    }
+    Ok(())
+}
+
+/// Check that a config's patch list fits: render (or, for an undeployed
+/// config, apply the patches to the bare templates) and dry-run the exact
+/// objects a reconcile would apply, so the API server's schema check
+/// happens now with the error shown to the person, instead of failing
+/// quietly in the controller afterwards.
+pub async fn validate_patches(config: &DeployConfig, client: &Client) -> AppResult<()> {
+    let patches = &config.spec.spec.patches;
+    let rendered = if config.status.as_ref().is_some_and(|s| s.config.is_some()) {
+        config.render_manifests()?
+    } else {
+        let templates = config.resource_templates();
+        let manifests = templates.iter().map(|t| t.manifest.clone()).collect();
+        crate::kubernetes::patches::apply_patches(&templates, manifests, patches)?
+    };
+    let ns = kube::ResourceExt::namespace(config).unwrap_or_else(|| "default".to_string());
+    for obj in config.child_objects(rendered)? {
         let kind = obj
             .types
             .as_ref()
@@ -415,14 +535,6 @@ pub async fn change_patches(
                 "Kubernetes rejected {kind}/{obj_name} with these patches: {detail}"
             )));
         }
-    }
-
-    cr_writers::set_patches(client, &ns, &name, &patches).await?;
-
-    let conn = pool.get()?;
-    match Revision::record(&conn, NewRevision::patch_change(&effective, actor, &reason)) {
-        Ok(rev) => log::info!("Recorded revision {} for {} ({})", rev.id, name, reason),
-        Err(e) => log::error!("Failed to record patch revision for {}: {}", name, e),
     }
     Ok(())
 }
@@ -505,6 +617,7 @@ pub fn to_deploy_action(
         Action::DeployLatest
         | Action::DeployBranch { .. }
         | Action::DeployCommit { .. }
+        | Action::DeployAdvanced { .. }
         | Action::Rollback { .. }
         | Action::ClearSelection
         | Action::SetParameter { .. }
@@ -561,16 +674,22 @@ pub async fn run_action(
     let conn = pool.get()?;
     check_blockers(&conn, action, &name)?;
     // An abbreviated sha is expanded before anything is recorded or applied.
-    let normalized;
-    let action = match action {
-        Action::DeployCommit { sha } => {
-            normalized = Action::DeployCommit {
-                sha: full_commit_sha(&conn, config, sha)?,
-            };
-            &normalized
+    let normalized = normalize_action(&conn, config, action)?;
+    let action = &normalized;
+    if let Action::DeployAdvanced { choices, .. } = action {
+        for (parameter, choice) in choices {
+            if choice.typed().is_some_and(|v| v.trim().is_empty()) {
+                return Err(AppError::InvalidInput(format!(
+                    "type a {} for ${parameter}, or choose its default",
+                    if choice.kind() == "pin" {
+                        "value"
+                    } else {
+                        "channel"
+                    }
+                )));
+            }
         }
-        other => other,
-    };
+    }
     if let Action::SetParameter { parameter, .. } = action {
         let settable = config
             .spec
@@ -590,7 +709,6 @@ pub async fn run_action(
     // are persisted after the deploy succeeds. Ending a temporary deployment
     // is the one action that changes several selections and the patch list
     // at once.
-    let default_branch = config.artifact_repository().map(|r| r.branch);
     let mut changes: Vec<(String, Option<Selection>)> = Vec::new();
     let mut new_patches: Option<Vec<ManifestPatch>> = None;
     let mut reason: Option<String> = None;
@@ -604,8 +722,18 @@ pub async fn run_action(
         reason = Some(temporary.describe());
         changes.extend(temporary.selections.iter().map(|p| (p.clone(), None)));
         new_patches = temporary.patches;
-    } else if let Some(change) = selection_change(action, default_branch.as_deref(), intent) {
-        changes.push(change);
+    } else {
+        changes.extend(selection_changes(action, config, intent));
+        if let Action::DeployAdvanced {
+            patches,
+            durability,
+            ..
+        } = action
+        {
+            if !patches.is_empty() {
+                new_patches = Some(patches.apply_to(&config.spec.spec.patches, *durability));
+            }
+        }
     }
     let mut effective = config.clone();
     for (parameter, selection) in &changes {
@@ -624,6 +752,11 @@ pub async fn run_action(
     }
     if let Some(patches) = &new_patches {
         effective.spec.spec.patches = patches.clone();
+    }
+    // Patches this deploy adds are checked against the cluster before
+    // anything is written, as an add through the patch tools would be.
+    if action.is_deploy_advanced() && new_patches.is_some() {
+        validate_patches(&effective, client).await?;
     }
 
     let state = DeploymentState::from_action(action, &effective, &conn)?;
@@ -1044,6 +1177,116 @@ mod tests {
         .is_none());
         Ok(())
     }
+    #[test]
+    fn advanced_deploy_records_only_what_changed() {
+        use crate::kubernetes::parameters::ParameterSource;
+        let mut config = bare_config();
+        config.spec.spec.parameters.insert(
+            "NGINX".into(),
+            ParameterSource::Tag {
+                image: "nginx".into(),
+                pattern: "1.27.*".into(),
+            },
+        );
+        config.spec.spec.parameters.insert(
+            "REPLICAS".into(),
+            ParameterSource::Value {
+                default: "2".into(),
+            },
+        );
+        config.spec.spec.selections.insert(
+            "NGINX".into(),
+            Selection::pin("1.27.4", Durability::Standing),
+        );
+        let intent = SelectionIntent {
+            note: Some("advanced deploy".into()),
+            by: Some("web".into()),
+            ..Default::default()
+        };
+        let advanced = |pairs: &[(&str, Choice)]| Action::DeployAdvanced {
+            choices: pairs
+                .iter()
+                .map(|(n, c)| (n.to_string(), c.clone()))
+                .collect(),
+            durability: Durability::Temporary,
+            patches: Default::default(),
+        };
+
+        // Re-submitting the standing pin leaves it alone; the durability of
+        // this deploy does not rewrite it.
+        let same = advanced(&[
+            ("NGINX", Choice::Pin("1.27.4".into())),
+            ("REPLICAS", Choice::Default),
+            (SHA_PARAMETER, Choice::Default),
+        ]);
+        assert!(selection_changes(&same, &config, &intent).is_empty());
+
+        let changed = advanced(&[
+            (SHA_PARAMETER, Choice::Track("fix/upload".into())),
+            ("NGINX", Choice::Default),
+            ("REPLICAS", Choice::Pin("3".into())),
+        ]);
+        let changes = selection_changes(&changed, &config, &intent);
+        assert_eq!(changes.len(), 3);
+        let by_name: BTreeMap<String, Option<Selection>> = changes.into_iter().collect();
+        let sha = by_name[SHA_PARAMETER].clone().unwrap_or_default();
+        assert_eq!(sha.mode(), Mode::Track("fix/upload"));
+        assert_eq!(sha.durability, Durability::Temporary);
+        assert_eq!(sha.note.as_deref(), Some("advanced deploy"));
+        assert_eq!(by_name["NGINX"], None, "back to the default range");
+        assert_eq!(
+            by_name["REPLICAS"].clone().unwrap_or_default().mode(),
+            Mode::Pin("3")
+        );
+
+        // The default branch typed as a channel is the default, not a track.
+        let default_branch = advanced(&[(SHA_PARAMETER, Choice::Track("master".into()))]);
+        assert!(selection_changes(&default_branch, &config, &intent).is_empty());
+        // Tag ranges are tracked as patterns.
+        let range = advanced(&[("NGINX", Choice::Track("1.28.*".into()))]);
+        let changes = selection_changes(&range, &config, &intent);
+        let sel = changes[0].1.clone().unwrap_or_default();
+        assert_eq!(
+            sel.track.as_ref().and_then(|t| t.pattern.as_deref()),
+            Some("1.28.*")
+        );
+        // Nothing typed yet is not a change.
+        let empty = advanced(&[(SHA_PARAMETER, Choice::Pin("  ".into()))]);
+        assert!(selection_changes(&empty, &config, &intent).is_empty());
+        // Unknown parameters are ignored.
+        let unknown = advanced(&[("NOPE", Choice::Pin("x".into()))]);
+        assert!(selection_changes(&unknown, &config, &intent).is_empty());
+    }
+
+    #[test]
+    fn advanced_default_overrides_a_derived_sha_pin() {
+        use crate::kubernetes::deploy_config::DeployConfigStatus;
+        use crate::kubernetes::parameters::ParameterValue;
+        let mut config = bare_config();
+        let mut status = DeployConfigStatus::default();
+        status.parameters.insert(
+            SHA_PARAMETER.into(),
+            ParameterValue::Commit {
+                value: "abc".into(),
+                branch: None,
+            },
+        );
+        config.status = Some(status);
+        assert_eq!(config.selection(SHA_PARAMETER).mode(), Mode::Pin("abc"));
+        let action = Action::DeployAdvanced {
+            choices: BTreeMap::from([(SHA_PARAMETER.to_string(), Choice::Default)]),
+            durability: Durability::Standing,
+            patches: Default::default(),
+        };
+        let changes = selection_changes(&action, &config, &SelectionIntent::default());
+        assert_eq!(changes.len(), 1);
+        let written = changes[0].1.clone();
+        assert!(
+            written.as_ref().is_some_and(|s| !s.is_override()),
+            "an explicit empty selection beats the derivation"
+        );
+    }
+
     #[test]
     fn sha_forms_are_classified() {
         assert_eq!(sha_form(&"a".repeat(40)), ShaForm::Full);

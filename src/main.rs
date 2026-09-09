@@ -53,10 +53,10 @@ use crate::webhooks::manager::WebhookManager;
 use crate::webhooks::metrics::MetricsHandler;
 use cicd::serve_static_file;
 use web::{
-    add_blocker, add_patch, all_recent_builds, bootstrap, clear_blocker, deploy_config,
-    deploy_history, deploy_history_index, index, remove_patch, resource_logs_download,
-    resource_logs_fragment, resource_logs_page, rollback, root, set_parameter, settings_fragment,
-    settings_index, toggle_repo, toggle_team,
+    add_blocker, all_recent_builds, bootstrap, clear_blocker, deploy_config, deploy_history,
+    deploy_history_index, index, resource_logs_download, resource_logs_fragment,
+    resource_logs_page, rollback, root, set_parameter, settings_fragment, settings_index,
+    toggle_repo, toggle_team,
 };
 
 async fn start_http(
@@ -94,8 +94,8 @@ async fn start_http(
                 .service(clear_blocker)
                 .service(rollback)
                 .service(set_parameter)
-                .service(add_patch)
-                .service(remove_patch)
+                .service(web::patch_flow)
+                .service(web::patch_flow_add)
                 .route("/mcp", actix_web::web::post().to(mcp::handle_mcp))
         }
 
@@ -115,6 +115,8 @@ async fn start_http(
             .wrap(middleware::Logger::default())
             .service(root)
             .service(deploy_configs)
+            .service(web::blockers_page)
+            .service(web::add_blocker_for)
             .service(index)
             .service(branch_grid_fragment)
             .service(build_grid_fragment)

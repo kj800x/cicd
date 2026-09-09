@@ -79,6 +79,35 @@ pub struct Selection {
 
 pub type Selections = BTreeMap<String, Selection>;
 
+/// What a person chose for one parameter on the advanced deploy form:
+/// follow the source's default channel, follow another channel (a branch
+/// or a semver range, typed), or hold an exact value (typed).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Choice {
+    Default,
+    Track(String),
+    Pin(String),
+}
+
+impl Choice {
+    /// `default`, `track` or `pin`: the form's radio value.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Choice::Default => "default",
+            Choice::Track(_) => "track",
+            Choice::Pin(_) => "pin",
+        }
+    }
+
+    /// The typed channel or value, if the choice carries one.
+    pub fn typed(&self) -> Option<&str> {
+        match self {
+            Choice::Default => None,
+            Choice::Track(v) | Choice::Pin(v) => Some(v.as_str()),
+        }
+    }
+}
+
 /// What a selection resolves to at deploy time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Mode<'a> {
@@ -103,9 +132,7 @@ impl Selection {
         }
     }
 
-    /// Track a semver range (tag sources). Nothing writes one yet: tag
-    /// overrides of the range are not offered in the UI or MCP.
-    #[allow(dead_code)]
+    /// Track a semver range (tag sources).
     pub fn track_pattern(pattern: &str, durability: Durability) -> Self {
         Selection {
             track: Some(Track {

@@ -1,39 +1,47 @@
+//! The deploy page: pick a config, pick an action, watch the preview.
+//!
+//! The left column is one form. In simple mode it holds the config picker,
+//! the action chooser and the button. "Deploy advanced" is an action like
+//! the others; choosing it unfolds one selector per parameter, the patch
+//! list and a durability toggle, and the button becomes "Deploy advanced".
+//! The right column previews what the chosen action would do, parameter by
+//! parameter, and polls the cluster for the resources it owns.
+//!
+//! Every choice lives in the query string, so the page is its own state:
+//! the GET form re-submits on change and the POST form mirrors the same
+//! fields as hidden inputs.
 #![allow(clippy::expect_used)]
 
 use crate::crab_ext::Octocrabs;
 use crate::db::blocker::Blocker;
-use crate::db::deploy_config_version::DeployConfigVersion;
 use crate::db::git_branch::GitBranch;
 use crate::db::git_commit::GitCommit;
 use crate::db::git_repo::GitRepo;
 use crate::db::revision::Revision;
-use crate::kubernetes::api::{
-    get_all_deploy_configs, get_deploy_config, get_namespace_uid, ListMode,
-};
+use crate::deploys::SelectionIntent;
+use crate::kubernetes::api::{get_all_deploy_configs, get_deploy_config, ListMode};
 use crate::kubernetes::parameters::SHA_PARAMETER;
+use crate::kubernetes::patches::PatchChanges;
 use crate::kubernetes::repo::{DeploymentState, ShaMaybeBranch};
-use crate::kubernetes::selections::{Mode, Selection};
+use crate::kubernetes::selections::{Choice, Durability, Mode, Selection};
 use crate::kubernetes::{list_namespace_objects, DeployConfig};
 use crate::prelude::*;
 use crate::web::team_prefs::TeamsCookie;
-use crate::web::{build_status, deploy_status, header, ResourceStatuses};
-use kube::api::DynamicObject;
+use crate::web::{deploy_form, header, preview};
 use kube::{Client, ResourceExt};
 use maud::{html, Markup, Render};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
-// FIXME: Make this configurable.
-const HEADLAMP_URL: &str = "https://headlamp.home.coolkev.com";
-
-struct PreviewArrow;
-
-impl Render for PreviewArrow {
-    fn render(&self) -> Markup {
-        html!(span.preview-arrow { "⇨" })
-    }
-}
-
-struct GitRef(String, String, String, bool, Option<String>);
+/// A commit sha (or branch name) linked to GitHub. The sha is shortened to
+/// seven characters unless `disable_prefixing` is set; `file_path` narrows
+/// the link to a path in the tree.
+pub struct GitRef(
+    pub String,
+    pub String,
+    pub String,
+    pub bool,
+    pub Option<String>,
+);
 
 impl Render for GitRef {
     fn render(&self) -> Markup {
@@ -51,7 +59,7 @@ impl Render for GitRef {
 
         html!(
             span {
-                a.git-ref href=(format!("https://github.com/{}/{}/tree/{}{}", owner, repo, sha, file_path.map(|path| format!("/{}", path)).unwrap_or_default())) target="_blank" {
+                a.git-ref href=(format!("https://github.com/{}/{}/tree/{}{}", owner, repo, sha, file_path.map(|path| format!("/{}", path)).unwrap_or_default())) target="_blank" title=(sha) {
                     (sha_prefix)
                 }
             }
@@ -74,25 +82,6 @@ impl Render for HumanTime {
             time datetime=(time.to_rfc3339()) {
                 (local.format("%B %d at %I:%M %p ET"))
             }
-        }
-    }
-}
-
-struct AutodeployStatus(bool);
-impl Render for AutodeployStatus {
-    fn render(&self) -> Markup {
-        if self.0 {
-            html!(
-                span.autodeploy-status.autodeploy-enabled {
-                    "Enabled"
-                }
-            )
-        } else {
-            html!(
-                span.autodeploy-status.autodeploy-disabled {
-                    "Disabled"
-                }
-            )
         }
     }
 }
@@ -143,6 +132,7 @@ impl ResolvedVersion {
 
         match action {
             Action::DeployLatest
+            | Action::DeployAdvanced { .. }
             | Action::SetParameter { .. }
             | Action::ClearSelection
             | Action::EndTemporary => {
@@ -324,258 +314,6 @@ impl ResolvedVersion {
     }
 }
 
-trait FormatStates {
-    fn format_config(&self, owner: &str, repo: &str, config_name: &str) -> Markup;
-    fn format_artifact(&self, owner: &str, repo: &str) -> Markup;
-}
-
-impl FormatStates for DeploymentState {
-    fn format_config(&self, owner: &str, repo: &str, config_name: &str) -> Markup {
-        match self {
-            DeploymentState::DeployedWithArtifact { config, .. }
-            | DeploymentState::DeployedOnlyConfig { config } => {
-                html! {
-                    (GitRef(config.sha.clone(), owner.to_string(), repo.to_string(), false, Some(format!(".deploy/{}", config_name))))
-                }
-            }
-            DeploymentState::Undeployed => html! { "Undeployed" },
-        }
-    }
-
-    fn format_artifact(&self, owner: &str, repo: &str) -> Markup {
-        match self {
-            DeploymentState::DeployedWithArtifact { artifact, .. } => {
-                html! {
-                    (GitRef(artifact.sha.clone(), owner.to_string(), repo.to_string(), false, None))
-                }
-            }
-            DeploymentState::DeployedOnlyConfig { .. } => {
-                html! {
-                    span { "No artifact" }
-                }
-            }
-            DeploymentState::Undeployed => html! { "Undeployed" },
-        }
-    }
-}
-
-impl FormatStates for AppResult<DeploymentState> {
-    fn format_config(&self, owner: &str, repo: &str, config_name: &str) -> Markup {
-        match self {
-            Ok(deployment_state) => deployment_state.format_config(owner, repo, config_name),
-            Err(_) => {
-                html! {
-                    span { "[resolution failed]" }
-                }
-            }
-        }
-    }
-
-    fn format_artifact(&self, owner: &str, repo: &str) -> Markup {
-        match self {
-            Ok(deployment_state) => deployment_state.format_artifact(owner, repo),
-            Err(_) => {
-                html! {
-                    span { "[resolution failed]" }
-                }
-            }
-        }
-    }
-}
-
-/// Represents a transition between two resolved versions
-struct DeployTransition {
-    from: DeploymentState,
-    to: AppResult<DeploymentState>,
-    current_config: DeployConfig,
-    /// Whether the kube manifests actually changed between from and to config SHAs.
-    /// None means we couldn't determine (e.g. hash not yet synced to DB).
-    config_manifest_changed: Option<bool>,
-}
-
-impl DeployTransition {
-    fn compare_url(&self, owner: &str, repo: &str) -> Option<String> {
-        match (&self.from, &self.to) {
-            (
-                DeploymentState::DeployedWithArtifact { artifact, .. },
-                Ok(DeploymentState::DeployedWithArtifact {
-                    artifact: other_artifact,
-                    ..
-                }),
-            ) => Some(format!(
-                "https://github.com/{}/{}/compare/{}...{}",
-                owner, repo, artifact.sha, other_artifact.sha
-            )),
-            _ => None,
-        }
-    }
-
-    /// Formats the transition for display
-    async fn format(&self, owner: &str, repo: &str) -> Markup {
-        let config_owner = self.current_config.config_repository().owner.clone();
-        let config_repo = self.current_config.config_repository().repo.clone();
-        if self.to == Ok(self.from.clone()) {
-            match self.from.clone() {
-                DeploymentState::Undeployed => {
-                    html! {
-                        div { "Already undeployed"}
-                    }
-                }
-                DeploymentState::DeployedWithArtifact { artifact, config } => {
-                    html! {
-                        div {
-                            .icon {
-                                span.deploy-config__icon.m-right-1 {}
-                            }
-                            (GitRef(config.sha.clone(), config_owner.clone(), config_repo.clone(), false, Some(format!(".deploy/{}", &self.current_config.name_any()))))
-                        }
-                        div {
-                            .icon {
-                                i.octicon.octicon-git-commit {}
-                            }
-                            (GitRef(artifact.sha.clone(), owner.to_string(), repo.to_string(), false, None))
-                        }
-                    }
-                }
-                DeploymentState::DeployedOnlyConfig { config } => {
-                    html! {
-                        div {
-                            .icon {
-                                span.deploy-config__icon.m-right-1 {}
-                            }
-                            (GitRef(config.sha.clone(), config_owner.clone(), config_repo.clone(), false, Some(format!(".deploy/{}", &self.current_config.name_any()))))
-                        }
-                    }
-                }
-            }
-        } else {
-            html! {
-                div {
-                    .icon {
-                        span.deploy-config__icon.m-right-1 {}
-                    }
-                    (self.from.format_config(&config_owner, &config_repo, &self.current_config.name_any()))
-                    ( PreviewArrow {} )
-                    (self.to.format_config(&config_owner, &config_repo, &self.current_config.name_any()))
-                    @if self.config_manifest_changed == Some(true) {
-                        " "
-                        span style="color: var(--warning-color); font-weight: 600;" { "[CONFIG CHANGED]" }
-                    }
-                }
-                div {
-                    .icon {
-                        i.octicon.octicon-git-commit {}
-                    }
-                    (self.from.format_artifact(owner, repo))
-                    ( PreviewArrow {} )
-                    (self.to.format_artifact(owner, repo))
-
-                    @if let Some(compare_url) = self.compare_url(owner, repo) {
-                        " "
-                        a.git-ref href=(compare_url) target="_blank" {
-                            "[compare]"
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Generate the status header showing current branch and autodeploy status
-async fn generate_status_header(
-    config: &DeployConfig,
-    owner: &str,
-    repo: &str,
-    client: &Client,
-    active_blockers: usize,
-) -> Markup {
-    let default_branch = config
-        .artifact_repository()
-        .unwrap_or_else(|| config.config_repository().with_branch("master"))
-        .branch;
-
-    // FIXME: What about artifactless configs?
-    let current_branch = match config.deployment_state() {
-        DeploymentState::DeployedWithArtifact { artifact, .. } => artifact.branch.clone(),
-        DeploymentState::DeployedOnlyConfig { config } => config.branch.clone(),
-        DeploymentState::Undeployed => None,
-    };
-
-    let namespace = config.namespace().unwrap_or("default".to_string());
-    let namespace_uid = get_namespace_uid(client, &namespace)
-        .await
-        .unwrap_or_default();
-
-    html! {
-        div class="status-header" {
-            div class="status-item" {
-                "Tracking branch: "
-                strong {
-                    @match current_branch {
-                        Some(branch) => {
-                            (GitRef(
-                                branch.to_string(),
-                                owner.to_string(),
-                                repo.to_string(),
-                                true,
-                                None,
-                            ))
-                            @if branch != default_branch {
-                                span class="warning-icon" title=(format!("Different from default branch ({})", default_branch)) {
-                                    i class="fa fa-exclamation-triangle" {}
-                                }
-                            }
-                        }
-                        None => {
-                            "None"
-                        }
-                    }
-
-                }
-            }
-            @if config.artifact_repository().is_some() {
-                div class="status-item" {
-                    "Selection: "
-                    (crate::web::selections::render_selection_summary(config))
-                }
-            }
-            div class="status-item" {
-                "Autodeploy: "
-                strong {
-                    @if config.autodeploy() {
-                        (AutodeployStatus(true))
-                    } @else {
-                        (AutodeployStatus(false))
-                    }
-                }
-            }
-            div class="status-item" {
-                "Held: "
-                strong {
-                    @if active_blockers == 0 {
-                        "No"
-                    } @else if active_blockers == 1 {
-                        "Yes, 1 blocker"
-                    } @else {
-                        (format!("Yes, {} blockers", active_blockers))
-                    }
-                }
-            }
-            div class="status-item" {
-                "Namespace: "
-                strong {
-                    a href=(format!("{}/c/main/map?group=namespace&node={}", HEADLAMP_URL, namespace_uid)) target="_blank" {
-                        (namespace)
-                    }
-                }
-            }
-        }
-    }
-}
-
-impl ShaMaybeBranch {}
-
 impl DeploymentState {
     pub fn from_action(
         action: &Action,
@@ -586,6 +324,7 @@ impl DeploymentState {
 
         match (action, artifact_repository) {
             (Action::DeployLatest, Some(artifact_repository))
+            | (Action::DeployAdvanced { .. }, Some(artifact_repository))
             | (Action::SetParameter { .. }, Some(artifact_repository))
             | (Action::ClearSelection, Some(artifact_repository))
             | (Action::EndTemporary, Some(artifact_repository)) => {
@@ -645,6 +384,7 @@ impl DeploymentState {
                 })
             }
             (Action::DeployLatest, None)
+            | (Action::DeployAdvanced { .. }, None)
             | (Action::SetParameter { .. }, None)
             | (Action::ClearSelection, None)
             | (Action::EndTemporary, None) => {
@@ -767,177 +507,7 @@ impl DeploymentState {
     }
 }
 
-pub async fn render_preview_content(
-    selected_config: &DeployConfig,
-    action: &Action,
-    conn: &PooledConnection<SqliteConnectionManager>,
-    namespaced_objs: &[DynamicObject],
-) -> Markup {
-    let owner = selected_config
-        .artifact_repository()
-        .unwrap_or_else(|| selected_config.config_repository().with_branch("master"))
-        .owner
-        .to_string();
-    let repo = selected_config
-        .artifact_repository()
-        .unwrap_or_else(|| selected_config.config_repository().with_branch("master"))
-        .repo
-        .to_string();
-
-    let from = selected_config.deployment_state();
-    let to = DeploymentState::from_action(action, selected_config, conn);
-
-    let config_manifest_changed = (|| -> Option<bool> {
-        let cfg_repo = selected_config.config_repository();
-        let repo_id = GitRepo::get_by_name(&cfg_repo.owner, &cfg_repo.repo, conn)
-            .ok()??
-            .id;
-        let name = selected_config.name_any();
-        let from_sha = match &from {
-            DeploymentState::DeployedWithArtifact { config, .. } => Some(config.sha.as_str()),
-            DeploymentState::DeployedOnlyConfig { config } => Some(config.sha.as_str()),
-            DeploymentState::Undeployed => None,
-        };
-        let to_sha = match to.as_ref().ok()? {
-            DeploymentState::DeployedWithArtifact { config, .. } => Some(config.sha.as_str()),
-            DeploymentState::DeployedOnlyConfig { config } => Some(config.sha.as_str()),
-            DeploymentState::Undeployed => None,
-        };
-        let from_hash = from_sha.and_then(|sha| {
-            DeployConfigVersion::get_hash(&name, repo_id, sha, conn)
-                .ok()
-                .flatten()
-        });
-        let to_hash = to_sha.and_then(|sha| {
-            DeployConfigVersion::get_hash(&name, repo_id, sha, conn)
-                .ok()
-                .flatten()
-        });
-        match (from_hash, to_hash) {
-            (Some(fh), Some(th)) => Some(fh != th),
-            _ => None,
-        }
-    })();
-
-    let deploy_transition = DeployTransition {
-        from,
-        to,
-        current_config: selected_config.clone(),
-        config_manifest_changed,
-    };
-
-    let preview_content = match action {
-        Action::DeployLatest
-        | Action::DeployBranch { .. }
-        | Action::DeployCommit { .. }
-        | Action::Rollback { .. }
-        | Action::ClearSelection
-        | Action::SetParameter { .. }
-        | Action::EndTemporary
-        | Action::Undeploy => deploy_transition.format(&owner, &repo).await,
-        Action::Bounce => {
-            html! {
-                // TODO:
-                "Bounce deployments in "
-                (selected_config.name_any())
-            }
-        }
-        Action::ExecuteJob => {
-            html! {
-                // TODO:
-                "Manual execution of "
-                (selected_config.name_any())
-            }
-        }
-        Action::ToggleAutodeploy => {
-            html! {
-                "Autodeploy "
-                @if selected_config.autodeploy() {
-                    (AutodeployStatus(true))
-                    ( PreviewArrow {} )
-                    (AutodeployStatus(false))
-                } @else {
-                    (AutodeployStatus(false))
-                    ( PreviewArrow {} )
-                    (AutodeployStatus(true))
-                }
-            }
-        }
-    };
-
-    let mut alerts: Vec<Markup> = vec![];
-    for alert in deploy_status(selected_config, namespaced_objs).await {
-        alerts.push(alert);
-    }
-    for alert in build_status(action, selected_config, conn).await {
-        alerts.push(alert);
-    }
-    match Blocker::active_for(conn, &selected_config.name_any()) {
-        Ok(blockers) if !blockers.is_empty() => {
-            alerts.push(crate::web::blockers::render_blocker_alert(&blockers))
-        }
-        Ok(_) => {}
-        Err(e) => log::warn!("Failed to load blockers for preview: {}", e),
-    }
-    if selected_config.is_temporary_deployment() {
-        alerts.push(crate::web::selections::render_temporary_alert(
-            selected_config,
-        ));
-    }
-
-    html! {
-        @for alert in alerts {
-            (alert)
-        }
-        div class="preview-transition" {
-            div class="deployable-item__content" {
-                (selected_config.name_any())
-                .deployable-item-info {
-                    (preview_content)
-                }
-            }
-            (selected_config.format_resources(namespaced_objs).await)
-        }
-    }
-}
-
-/// Generate the preview markup for a deploy config action
-async fn generate_preview(
-    selected_config: &DeployConfig,
-    action: &Action,
-    conn: &PooledConnection<SqliteConnectionManager>,
-    client: &Client,
-    namespaced_objs: &[DynamicObject],
-) -> Markup {
-    let owner = selected_config
-        .artifact_repository()
-        .unwrap_or_else(|| selected_config.config_repository().with_branch("master"))
-        .owner
-        .to_string();
-    let repo = selected_config
-        .artifact_repository()
-        .unwrap_or_else(|| selected_config.config_repository().with_branch("master"))
-        .repo
-        .to_string();
-
-    let active_blockers = Blocker::active_for(conn, &selected_config.name_any())
-        .map(|b| b.len())
-        .unwrap_or(0);
-
-    // Wrap the preview content in the container markup
-    html! {
-        div class="preview-container" {
-            div class="preview-content" {
-                (generate_status_header(selected_config, &owner, &repo, client, active_blockers).await)
-
-                div.preview-content-poll-wrapper hx-get=(format!("/fragments/deploy-preview/{}/{}?{}", selected_config.namespace().unwrap_or("default".to_string()), selected_config.name_any(), action.as_params())) hx-trigger="load, every 2s" hx-swap="morph:innerHTML" {
-                    (render_preview_content(selected_config, action, conn, namespaced_objs).await)
-                }
-            }
-        }
-    }
-}
-
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
     DeployLatest,
     DeployBranch {
@@ -945,6 +515,14 @@ pub enum Action {
     },
     DeployCommit {
         sha: String,
+    },
+    /// The advanced form: one choice per parameter it showed and the
+    /// pending patch edits, recorded together with one durability, then a
+    /// deploy of latest of the result.
+    DeployAdvanced {
+        choices: BTreeMap<String, Choice>,
+        durability: Durability,
+        patches: PatchChanges,
     },
     /// Replay an earlier revision's deployed values, then hold the config
     /// with a blocker.
@@ -970,6 +548,10 @@ pub enum Action {
     Undeploy,
 }
 
+fn url_encode(s: &str) -> String {
+    url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+}
+
 impl Action {
     pub fn from_query(query: &HashMap<String, String>) -> Self {
         match query
@@ -988,6 +570,7 @@ impl Action {
                     Action::DeployLatest
                 }
             }
+            "deploy-advanced" => Action::advanced_from_query(query),
             "rollback" => match query.get("revision").and_then(|r| r.parse::<i64>().ok()) {
                 Some(revision) => Action::Rollback { revision },
                 None => Action::DeployLatest,
@@ -1009,18 +592,80 @@ impl Action {
         }
     }
 
+    /// `sel_<P>=default|track|pin` with the channel in `track_<P>` and the
+    /// value in `pin_<P>`; `durability` applies to every override made;
+    /// `patches` is the pending patch edits as JSON. A parameter without a
+    /// `sel_` field is left as it is; unreadable patches are dropped.
+    fn advanced_from_query(query: &HashMap<String, String>) -> Self {
+        let mut choices = BTreeMap::new();
+        for (key, value) in query {
+            let Some(parameter) = key.strip_prefix("sel_") else {
+                continue;
+            };
+            if parameter.is_empty() {
+                continue;
+            }
+            let typed = |prefix: &str| {
+                query
+                    .get(&format!("{prefix}_{parameter}"))
+                    .map(|v| v.trim().to_string())
+                    .unwrap_or_default()
+            };
+            let choice = match value.trim() {
+                "track" => Choice::Track(typed("track")),
+                "pin" => Choice::Pin(typed("pin")),
+                _ => Choice::Default,
+            };
+            choices.insert(parameter.to_string(), choice);
+        }
+        let patches = query
+            .get("patches")
+            .map(|raw| PatchChanges::from_json(raw))
+            .unwrap_or_else(|| Ok(PatchChanges::default()))
+            .unwrap_or_else(|e| {
+                log::warn!("ignoring pending patches from the query string: {e}");
+                PatchChanges::default()
+            });
+        Action::DeployAdvanced {
+            choices,
+            durability: durability_from_query(query),
+            patches,
+        }
+    }
+
     pub fn as_params(&self) -> String {
         match self {
             Action::DeployLatest => "action=deploy".to_string(),
-            Action::DeployBranch { branch } => format!("action=deploy&branch={}", branch),
-            Action::DeployCommit { sha } => format!("action=deploy&sha={}", sha),
+            Action::DeployBranch { branch } => {
+                format!("action=deploy&branch={}", url_encode(branch))
+            }
+            Action::DeployCommit { sha } => format!("action=deploy&sha={}", url_encode(sha)),
+            Action::DeployAdvanced {
+                choices,
+                durability,
+                patches,
+            } => {
+                let mut params =
+                    format!("action=deploy-advanced&durability={}", durability.as_str());
+                for (parameter, choice) in choices {
+                    let p = url_encode(parameter);
+                    params.push_str(&format!("&sel_{p}={}", choice.kind()));
+                    if let Some(typed) = choice.typed() {
+                        params.push_str(&format!("&{}_{p}={}", choice.kind(), url_encode(typed)));
+                    }
+                }
+                if !patches.is_empty() {
+                    params.push_str(&format!("&patches={}", url_encode(&patches.to_json())));
+                }
+                params
+            }
             Action::Rollback { revision } => format!("action=rollback&revision={}", revision),
             Action::ClearSelection => "action=clear-selection".to_string(),
             Action::EndTemporary => "action=end-temporary".to_string(),
             Action::SetParameter { parameter, value } => format!(
                 "action=set-parameter&parameter={}&value={}",
-                parameter,
-                value.clone().unwrap_or_default()
+                url_encode(parameter),
+                url_encode(&value.clone().unwrap_or_default())
             ),
             Action::Bounce => "action=bounce".to_string(),
             Action::ExecuteJob => "action=execute-job".to_string(),
@@ -1029,11 +674,92 @@ impl Action {
         }
     }
 
+    /// The `action=` value the forms send for this action.
+    pub fn form_value(&self) -> &'static str {
+        match self {
+            Action::DeployLatest | Action::DeployBranch { .. } | Action::DeployCommit { .. } => {
+                "deploy"
+            }
+            Action::DeployAdvanced { .. } => "deploy-advanced",
+            Action::Rollback { .. } => "rollback",
+            Action::ClearSelection => "clear-selection",
+            Action::EndTemporary => "end-temporary",
+            Action::SetParameter { .. } => "set-parameter",
+            Action::Bounce => "bounce",
+            Action::ExecuteJob => "execute-job",
+            Action::ToggleAutodeploy => "toggle-autodeploy",
+            Action::Undeploy => "undeploy",
+        }
+    }
+
     pub fn is_deploy(&self) -> bool {
         matches!(
             self,
-            Action::DeployLatest | Action::DeployBranch { .. } | Action::DeployCommit { .. }
+            Action::DeployLatest
+                | Action::DeployBranch { .. }
+                | Action::DeployCommit { .. }
+                | Action::DeployAdvanced { .. }
         )
+    }
+
+    pub fn is_deploy_advanced(&self) -> bool {
+        matches!(self, Action::DeployAdvanced { .. })
+    }
+
+    /// The choices of an advanced deploy, empty for anything else.
+    pub fn choices(&self) -> Option<&BTreeMap<String, Choice>> {
+        match self {
+            Action::DeployAdvanced { choices, .. } => Some(choices),
+            _ => None,
+        }
+    }
+
+    pub fn durability(&self) -> Option<Durability> {
+        match self {
+            Action::DeployAdvanced { durability, .. } => Some(*durability),
+            _ => None,
+        }
+    }
+
+    /// The pending patch edits of an advanced deploy; empty for anything else.
+    pub fn patch_changes(&self) -> Option<&PatchChanges> {
+        match self {
+            Action::DeployAdvanced { patches, .. } => Some(patches),
+            _ => None,
+        }
+    }
+
+    /// This action with its pending patch edits replaced.
+    pub fn with_patch_changes(&self, patches: PatchChanges) -> Action {
+        match self {
+            Action::DeployAdvanced {
+                choices,
+                durability,
+                ..
+            } => Action::DeployAdvanced {
+                choices: choices.clone(),
+                durability: *durability,
+                patches,
+            },
+            other => other.clone(),
+        }
+    }
+
+    /// Actions that change what is deployed: the preview shows every
+    /// parameter's transition and the resources that will change.
+    pub fn changes_deployment(&self) -> bool {
+        !matches!(
+            self,
+            Action::Bounce | Action::ExecuteJob | Action::ToggleAutodeploy
+        )
+    }
+
+    /// Actions a blocker refuses: everything that deploys something new.
+    pub fn is_gated_by_blockers(&self) -> bool {
+        self.is_deploy()
+            || self.is_clear_selection()
+            || self.is_set_parameter()
+            || self.is_end_temporary()
     }
 
     /// Metrics label for the action as requested, before it is resolved
@@ -1044,6 +770,7 @@ impl Action {
             Action::DeployLatest | Action::DeployBranch { .. } | Action::DeployCommit { .. } => {
                 "deploy"
             }
+            Action::DeployAdvanced { .. } => "deploy_advanced",
             Action::Rollback { .. } => "rollback",
             Action::ClearSelection => "clear_selection",
             Action::EndTemporary => "end_temporary",
@@ -1067,11 +794,30 @@ impl Action {
         matches!(self, Action::EndTemporary)
     }
 
+    pub fn is_toggle_autodeploy(&self) -> bool {
+        matches!(self, Action::ToggleAutodeploy)
+    }
+
+    pub fn is_undeploy(&self) -> bool {
+        matches!(self, Action::Undeploy)
+    }
+
+    pub fn is_bounce(&self) -> bool {
+        matches!(self, Action::Bounce)
+    }
+
+    pub fn is_execute_job(&self) -> bool {
+        matches!(self, Action::ExecuteJob)
+    }
+
     /// Actions that resolve the SHA parameter through its current selection.
     pub fn deploys_latest(&self) -> bool {
         matches!(
             self,
-            Action::DeployLatest | Action::SetParameter { .. } | Action::EndTemporary
+            Action::DeployLatest
+                | Action::DeployAdvanced { .. }
+                | Action::SetParameter { .. }
+                | Action::EndTemporary
         )
     }
 
@@ -1087,21 +833,107 @@ impl Action {
         }
     }
 
-    fn is_toggle_autodeploy(&self) -> bool {
-        matches!(self, Action::ToggleAutodeploy)
+    /// The config as this action would leave its selections and patches,
+    /// before anything is deployed: what the preview resolves against. The
+    /// same changes [`crate::deploys::run_action`] persists after the deploy.
+    pub fn effective_config(&self, config: &DeployConfig) -> DeployConfig {
+        let mut effective = config.clone();
+        if self.is_end_temporary() {
+            let temporary = crate::deploys::temporary_changes(config);
+            for parameter in &temporary.selections {
+                effective.spec.spec.selections.remove(parameter);
+            }
+            if let Some(patches) = temporary.patches {
+                effective.spec.spec.patches = patches;
+            }
+            return effective;
+        }
+        for (parameter, selection) in
+            crate::deploys::selection_changes(self, config, &SelectionIntent::default())
+        {
+            match selection {
+                Some(s) => {
+                    effective.spec.spec.selections.insert(parameter, s);
+                }
+                None => {
+                    effective.spec.spec.selections.remove(&parameter);
+                }
+            }
+        }
+        if let Action::DeployAdvanced {
+            patches,
+            durability,
+            ..
+        } = self
+        {
+            if !patches.is_empty() {
+                effective.spec.spec.patches =
+                    patches.apply_to(&config.spec.spec.patches, *durability);
+            }
+        }
+        effective
     }
 
-    fn is_undeploy(&self) -> bool {
-        matches!(self, Action::Undeploy)
+    /// The preview heading, up to the config name.
+    pub fn title(&self) -> String {
+        match self {
+            Action::DeployLatest | Action::DeployAdvanced { .. } => "Deploy of ".to_string(),
+            Action::DeployBranch { .. } => "Branch deploy of ".to_string(),
+            Action::DeployCommit { .. } => "Commit deploy of ".to_string(),
+            Action::Bounce => "Bounce of ".to_string(),
+            Action::ExecuteJob => "Manual execution of ".to_string(),
+            Action::ToggleAutodeploy => "Option change for ".to_string(),
+            Action::Undeploy => "Undeploy of ".to_string(),
+            Action::Rollback { revision } => format!("Rollback to revision {} of ", revision),
+            Action::ClearSelection => "Back to the default branch for ".to_string(),
+            Action::EndTemporary => "End of the temporary deployment of ".to_string(),
+            Action::SetParameter { parameter, .. } => format!("Set ${} on ", parameter),
+        }
     }
 
-    fn is_bounce(&self) -> bool {
-        matches!(self, Action::Bounce)
+    /// The submit button's label.
+    pub fn button_label(&self, config: &DeployConfig) -> String {
+        match self {
+            Action::DeployLatest | Action::DeployBranch { .. } | Action::DeployCommit { .. } => {
+                "Deploy".to_string()
+            }
+            Action::DeployAdvanced { .. } => "Deploy advanced".to_string(),
+            Action::ToggleAutodeploy => {
+                if config.autodeploy() {
+                    "Disable autodeploy".to_string()
+                } else {
+                    "Enable autodeploy".to_string()
+                }
+            }
+            Action::Bounce => "Bounce".to_string(),
+            Action::ExecuteJob => "Execute job".to_string(),
+            Action::Undeploy => "Undeploy".to_string(),
+            Action::Rollback { .. } => "Roll back".to_string(),
+            Action::ClearSelection => "Clear and deploy latest".to_string(),
+            Action::EndTemporary => "End temporary deployment".to_string(),
+            Action::SetParameter { .. } => "Set and deploy".to_string(),
+        }
     }
+}
 
-    fn is_execute_job(&self) -> bool {
-        matches!(self, Action::ExecuteJob)
+/// The durability the form sent; temporary unless it said standing.
+pub fn durability_from_query(query: &HashMap<String, String>) -> Durability {
+    match query.get("durability").map(|d| d.trim()) {
+        Some("standing") => Durability::Standing,
+        _ => Durability::Temporary,
     }
+}
+
+/// `value_<P>` fields: tags typed for this one deploy.
+pub fn typed_values(query: &HashMap<String, String>) -> BTreeMap<String, String> {
+    query
+        .iter()
+        .filter_map(|(k, v)| {
+            let name = k.strip_prefix("value_")?;
+            let v = v.trim();
+            (!name.is_empty() && !v.is_empty()).then(|| (name.to_string(), v.to_string()))
+        })
+        .collect()
 }
 
 /// Handler for the deploy configs page
@@ -1110,6 +942,7 @@ pub async fn deploy_configs(
     req: actix_web::HttpRequest,
     pool: web::Data<Pool<SqliteConnectionManager>>,
     query: web::Query<std::collections::HashMap<String, String>>,
+    octocrabs: web::Data<Octocrabs>,
 ) -> impl Responder {
     let conn = match pool.get() {
         Ok(c) => c,
@@ -1145,6 +978,7 @@ pub async fn deploy_configs(
     let deploy_configs = teams_cookie.filter_configs(&deploy_configs);
 
     let action = Action::from_query(&query);
+    let typed = typed_values(&query);
 
     // Sort DeployConfigs by namespace and name for the dropdown
     let mut sorted_deploy_configs = deploy_configs.clone();
@@ -1194,33 +1028,33 @@ pub async fn deploy_configs(
             html! {}
         }
     };
-    let patches_panel = match selected_config {
-        Some(config) => {
-            let return_url = format!("/deploy?selected={}", config.name_any());
-            crate::web::patches::render_patches_panel(config, &return_url)
-        }
-        None => html! {},
-    };
-    let parameters_panel = match selected_config {
-        Some(config) => {
-            let return_url = format!("/deploy?selected={}", config.name_any());
-            crate::web::parameters::render_parameters_panel(config, &return_url)
-        }
-        None => html! {},
-    };
-    let blocker_panel = match selected_config {
-        Some(config) => {
-            let name = config.name_any();
-            let blockers = Blocker::active_for(&conn, &name).unwrap_or_default();
-            let return_url = format!(
-                "/deploy?selected={}&{}",
-                name,
-                Action::from_query(&query).as_params()
-            );
-            crate::web::blockers::render_blocker_panel(&blockers, &name, &return_url)
-        }
-        None => html! {},
-    };
+
+    let mut left_column = html! {};
+    let mut right_column = html! {};
+    if let Some(config) = selected_config {
+        let blockers = Blocker::active_for(&conn, &config.name_any()).unwrap_or_default();
+        let prepared = preview::prepare(&conn, config, &action);
+        let resolved = preview::resolve_tags(&prepared, &typed).await;
+        left_column = deploy_form::render(
+            config,
+            &sorted_deploy_configs,
+            &prepared,
+            &query,
+            !blockers.is_empty(),
+            &resolved,
+            &conn,
+        );
+        right_column = preview::render_page_preview(
+            &prepared,
+            &conn,
+            &client,
+            Some(&octocrabs),
+            &namespaced_objs,
+            &typed,
+            &resolved,
+        )
+        .await;
+    }
 
     // Render the HTML template using Maud
     let markup = html! {
@@ -1229,259 +1063,24 @@ pub async fn deploy_configs(
             head {
                 meta charset="UTF-8";
                 meta name="viewport" content="width=device-width, initial-scale=1.0";
-                title { "DeployConfig Dashboard" }
+                title { "Deploy" }
                 (header::stylesheet_link())
                 (header::scripts())
-                script {
-                    r#"
-                    function updateSelection() {
-                        const selectElement = document.getElementById('deployConfigSelect');
-                        const selectedValue = selectElement.value;
-                        window.location.href = '/deploy?selected=' + encodeURIComponent(selectedValue);
-                    }
-
-                    function submitActionForm() {
-                        document.getElementById('actionForm').submit();
-                    }
-                    "#
-                }
             }
             body.deploy-page hx-ext="morph" {
                 (header::render("deploy"))
-                div class="content" {
                 (held_strip)
                 (temporary_strip)
-                @if sorted_deploy_configs.is_empty() {
-                    div style="text-align:center; margin-top:40px;" {
-                        h2 { "No DeployConfigs Found" }
-                        p { "There are no DeployConfigs in the Kubernetes cluster." }
-                    }
-                } @else {
-                    div class="content-container" {
-                        // Left side box with dropdown and actions
-                        div class="left-box" {
-                                h3 { "Deploy config" }
-                                form action="/deploy" method="get" {
-                                    select name="selected" onchange="this.form.submit()" {
-                                        @for config in &sorted_deploy_configs {
-                                            @let name = config.name_any();
-                                            @let selected = if let Some(default) = selected_config {
-                                                default.name_any() == name
-                                            } else {
-                                                false
-                                            };
-
-                                            option value=(name) selected[selected] {
-                                                (name)
-                                            }
-                                        }
-                                    }
-                                }
-
-                                @if let Some(selected_config) = selected_config {
-                                    @let deployment_state = selected_config.deployment_state();
-                                    @let current_branch = deployment_state.artifact_branch();
-                                    form action="/deploy" method="get" {
-                                        input type="hidden" name="selected" value=(selected_config.name_any());
-
-                                        div class="action-radio-group" {
-                                            h4 { "Action" }
-                                            @let is_orphaned = selected_config.is_orphaned();
-                                            label class="action-radio" {
-                                                input type="radio" name="action" value="deploy" checked[action.is_deploy()] disabled[is_orphaned] onchange="this.form.submit()";
-                                                "Deploy"
-                                            }
-                                            label class="action-radio" {
-                                                input type="radio" name="action" value="toggle-autodeploy" checked[action.is_toggle_autodeploy()] disabled[is_orphaned] onchange="this.form.submit()";
-                                                @if selected_config.autodeploy() {
-                                                    "Disable autodeploy"
-                                                } @else {
-                                                    "Enable autodeploy"
-                                                }
-                                            }
-                                            @if selected_config.supports_bounce() {
-                                                label class="action-radio" {
-                                                    input type="radio" name="action" value="bounce" checked[action.is_bounce()] disabled[is_orphaned] onchange="this.form.submit()";
-                                                    "Bounce"
-                                                }
-                                            }
-                                            @if selected_config.supports_execute_job() {
-                                                label class="action-radio" {
-                                                    input type="radio" name="action" value="execute-job" checked[action.is_execute_job()] disabled[is_orphaned] onchange="this.form.submit()";
-                                                    "Execute job"
-                                                }
-                                            }
-                                            @if selected_config.selection(SHA_PARAMETER).is_override() && !is_orphaned {
-                                                label class="action-radio" {
-                                                    input type="radio" name="action" value="clear-selection" checked[action.is_clear_selection()] onchange="this.form.submit()";
-                                                    "Back to default branch"
-                                                }
-                                            }
-                                            @if selected_config.is_temporary_deployment() && !is_orphaned {
-                                                label class="action-radio" {
-                                                    input type="radio" name="action" value="end-temporary" checked[action.is_end_temporary()] onchange="this.form.submit()";
-                                                    "End temporary deployment"
-                                                }
-                                            }
-                                            label class="action-radio" {
-                                                input type="radio" name="action" value="undeploy" checked[action.is_undeploy()] onchange="this.form.submit()";
-                                                "Undeploy"
-                                            }
-                                        }
-
-                                        @if action.is_deploy() && !selected_config.is_orphaned() {
-                                            div class="action-input" {
-                                                label for="branch" { "Branch" }
-                                                input id="branch" type="text" name="branch" placeholder="Enter branch name" value=(query.get("branch").unwrap_or(&current_branch.unwrap_or_default().to_string())) onblur="this.form.submit()";
-                                            }
-                                            div class="action-input" {
-                                                label for="sha" { "SHA override" }
-                                                input id="sha" type="text" name="sha" placeholder="Enter commit SHA" pattern="[0-9a-fA-F]{5,40}" value=(query.get("sha").unwrap_or(&"".to_string())) onblur="this.form.submit()";
-                                            }
-                                            @if !action.is_deploy() || matches!(action, Action::DeployBranch { .. } | Action::DeployCommit { .. }) {
-                                                @let default_durability = if matches!(action, Action::DeployCommit { .. }) { "standing" } else { "temporary" };
-                                                @let durability = query.get("durability").map(String::as_str).unwrap_or(default_durability);
-                                                div class="action-input" {
-                                                    label for="durability" { "How long" }
-                                                    select id="durability" name="durability" onchange="this.form.submit()" {
-                                                        option value="temporary" selected[durability == "temporary"] { "Temporary: I am babysitting this and will end it" }
-                                                        option value="standing" selected[durability == "standing"] { "Standing: ordinary operation, leave it" }
-                                                    }
-                                                }
-                                                div class="action-input" {
-                                                    label for="note" { "Why" }
-                                                    input id="note" type="text" name="note" placeholder="e.g. testing the resizer fix" value=(query.get("note").unwrap_or(&"".to_string())) onblur="this.form.submit()";
-                                                }
-                                                div class="action-input" {
-                                                    label for="by" { "Your name" }
-                                                    input id="by" type="text" name="by" placeholder="who is making this change" value=(query.get("by").unwrap_or(&"".to_string())) onblur="this.form.submit()";
-                                                }
-                                            }
-                                        }
-                                    }
-                                    form action=(format!("/api/deploy/{}/{}",
-                                        selected_config.namespace().unwrap_or_default(),
-                                        selected_config.name_any()))
-                                        method="post"
-                                    {
-                                        input type="hidden" name="branch" value=(query.get("branch").unwrap_or(&"".to_string()));
-                                        input type="hidden" name="sha" value=(query.get("sha").unwrap_or(&"".to_string()));
-                                        input type="hidden" name="action" value=(query.get("action").unwrap_or(&"".to_string()));
-                                        input type="hidden" name="durability" value=(query.get("durability").unwrap_or(&"".to_string()));
-                                        input type="hidden" name="note" value=(query.get("note").unwrap_or(&"".to_string()));
-                                        input type="hidden" name="by" value=(query.get("by").unwrap_or(&"".to_string()));
-                                        // One-shot values for tracked tag parameters, for when
-                                        // watchtower cannot resolve them. Left empty, latest resolves.
-                                        @for (pname, source) in &selected_config.spec.spec.parameters {
-                                            @if source.is_tag() && !selected_config.selection(pname).is_override() {
-                                                div class="action-input" {
-                                                    label for=(format!("value_{pname}")) { "$" (pname) " for this deploy only (leave empty to resolve latest)" }
-                                                    input id=(format!("value_{pname}")) type="text" name=(format!("value_{pname}")) placeholder="e.g. 1.27.3, only if watchtower is down";
-                                                }
-                                            }
-                                        }
-                                        @let is_orphaned = selected_config.is_orphaned();
-                                        button.primary-action-button.danger-button[action.is_undeploy()] type="submit" disabled[is_orphaned && !action.is_undeploy()] {
-                                            @match action {
-                                                Action::DeployLatest | Action::DeployBranch { .. } | Action::DeployCommit { .. } => {
-                                                    "Deploy"
-                                                }
-                                                Action::ToggleAutodeploy => {
-                                                    @if selected_config.autodeploy() {
-                                                        "Disable autodeploy"
-                                                    } @else {
-                                                        "Enable autodeploy"
-                                                    }
-                                                }
-                                                Action::Bounce => {
-                                                    "Bounce"
-                                                }
-                                                Action::ExecuteJob => {
-                                                    "Execute job"
-                                                }
-                                                Action::Undeploy => {
-                                                    "Undeploy"
-                                                }
-                                                Action::Rollback { .. } => {
-                                                    "Roll back"
-                                                }
-                                                Action::ClearSelection => {
-                                                    "Clear and deploy latest"
-                                                }
-                                                Action::EndTemporary => {
-                                                    "End temporary deployment"
-                                                }
-                                                Action::SetParameter { .. } => {
-                                                    "Set and deploy"
-                                                }
-                                            }
-                                        }
-                                    }
-                                    (parameters_panel)
-                                    (patches_panel)
-                                    (blocker_panel)
-                                }
-                            }
-
-                            // Right side box with preview
-                            @if let Some(selected_config) = selected_config {
-                                div class="right-box" {
-                                    h1 {
-                                        @match action {
-                                            Action::DeployLatest => {
-                                                "Deploy of "
-                                            }
-                                            Action::DeployBranch { .. } => {
-                                                "Branch deploy of "
-                                            }
-                                            Action::DeployCommit { .. } => {
-                                                "Commit deploy of "
-                                            }
-                                            Action::Bounce => {
-                                                "Bounce deployments in "
-                                            }
-                                            Action::ExecuteJob => {
-                                                "Manual execution of "
-                                            }
-                                            Action::ToggleAutodeploy => {
-                                                "Option change for "
-                                            }
-                                            Action::Undeploy => {
-                                                "Undeploy of "
-                                            }
-                                            Action::Rollback { revision } => {
-                                                (format!("Rollback to revision {} of ", revision))
-                                            }
-                                            Action::ClearSelection => {
-                                                "Back to the default branch for "
-                                            }
-                                            Action::EndTemporary => {
-                                                "End of the temporary deployment of "
-                                            }
-                                            Action::SetParameter { ref parameter, .. } => {
-                                                (format!("Set ${} on ", parameter))
-                                            }
-                                        }
-                                        strong {
-                                            (format!("{}", selected_config.name_any()))
-                                        }
-                                    }
-                                    @if selected_config.is_orphaned() {
-                                        div.alert.alert-warning {
-                                            div class="alert-header" {
-                                                i class="fa fa-exclamation-triangle" {}
-                                                " Orphaned Deploy Config"
-                                            }
-                                            div class="alert-content" {
-                                                div class="details" {
-                                                    "This deploy config has been deleted from the config repository but is still deployed. Only undeploy is available."
-                                                }
-                                            }
-                                        }
-                                    }
-                                    (generate_preview(selected_config, &action, &conn, &client, &namespaced_objs).await)
-                                }
-                            }
+                div class="content" {
+                    @if sorted_deploy_configs.is_empty() {
+                        div class="empty-state" {
+                            h2 { "No deploy configs" }
+                            p { "There are no deploy configs in the cluster." }
+                        }
+                    } @else {
+                        div class="content-container" {
+                            (left_column)
+                            (right_column)
                         }
                     }
                 }
@@ -1537,15 +1136,27 @@ pub async fn deploy_config(
             .body("Cannot perform this action on an orphaned deploy config. Only undeploy is allowed.");
     }
 
-    let return_url = format!(
-        "/deploy?selected={}&action={}&branch={}&sha={}",
-        name,
-        form.get("action").unwrap_or(&"".to_string()),
-        form.get("branch").unwrap_or(&"".to_string()),
-        form.get("sha").unwrap_or(&"".to_string())
-    );
+    // An advanced deploy lands back in simple mode: its choices are now the
+    // config's selections and the plain preview shows them.
+    let return_url = if action.is_deploy_advanced() {
+        format!("/deploy?selected={}", url_encode(&name))
+    } else {
+        format!(
+            "/deploy?selected={}&action={}&branch={}&sha={}",
+            url_encode(&name),
+            form.get("action").unwrap_or(&"".to_string()),
+            url_encode(form.get("branch").unwrap_or(&"".to_string())),
+            url_encode(form.get("sha").unwrap_or(&"".to_string()))
+        )
+    };
 
-    let intent = crate::deploys::SelectionIntent::from_form(&form);
+    let mut intent = crate::deploys::SelectionIntent::from_form(&form);
+    if action.is_deploy_advanced() {
+        // The form asks neither why nor who; the durability is the action's.
+        intent.durability = action.durability();
+        intent.note = Some("advanced deploy".to_string());
+        intent.by = Some("web".to_string());
+    }
     let result =
         crate::deploys::run_action(&action, &config, &client, &octocrabs, &pool, "web", &intent)
             .await;
@@ -1590,4 +1201,142 @@ pub async fn deploy_config(
     HttpResponse::SeeOther()
         .append_header(("Location", return_url))
         .finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn query(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn advanced_choices_round_trip_through_the_query_string() {
+        let q = query(&[
+            ("action", "deploy-advanced"),
+            ("durability", "standing"),
+            ("sel_SHA", "track"),
+            ("track_SHA", "fix/upload timeout"),
+            ("sel_NGINX", "pin"),
+            ("pin_NGINX", "1.27.4"),
+            ("sel_REPLICAS", "default"),
+            ("sel_", "pin"),
+        ]);
+        let action = Action::from_query(&q);
+        let Action::DeployAdvanced {
+            choices,
+            durability,
+            patches,
+        } = &action
+        else {
+            panic!("expected an advanced deploy, got {action:?}");
+        };
+        assert!(patches.is_empty());
+        assert_eq!(*durability, Durability::Standing);
+        assert_eq!(choices.len(), 3, "the empty name is ignored");
+        assert_eq!(
+            choices["SHA"],
+            Choice::Track("fix/upload timeout".into()),
+            "typed channels are trimmed, not mangled"
+        );
+        assert_eq!(choices["NGINX"], Choice::Pin("1.27.4".into()));
+        assert_eq!(choices["REPLICAS"], Choice::Default);
+
+        let params = action.as_params();
+        let reparsed: HashMap<String, String> = url::form_urlencoded::parse(params.as_bytes())
+            .into_owned()
+            .collect();
+        assert_eq!(Action::from_query(&reparsed), action);
+        assert!(action.is_deploy() && action.is_deploy_advanced());
+        assert!(action.deploys_latest());
+        assert_eq!(action.form_value(), "deploy-advanced");
+    }
+
+    #[test]
+    fn missing_typed_values_are_empty_choices() {
+        let q = query(&[("action", "deploy-advanced"), ("sel_SHA", "pin")]);
+        match Action::from_query(&q) {
+            Action::DeployAdvanced {
+                choices,
+                durability,
+                ..
+            } => {
+                assert_eq!(choices["SHA"], Choice::Pin(String::new()));
+                assert_eq!(durability, Durability::Temporary, "temporary by default");
+            }
+            other => panic!("expected an advanced deploy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pending_patches_ride_along_in_the_query_string() {
+        use crate::kubernetes::patches::{ManifestPatch, PatchOp, PatchTarget};
+        let changes = PatchChanges {
+            remove: vec![1],
+            add: vec![ManifestPatch {
+                target: PatchTarget {
+                    file: None,
+                    kind: "Deployment".into(),
+                    name: "web".into(),
+                },
+                op: PatchOp::Replace,
+                path: "/spec/replicas".into(),
+                value: Some(serde_json::json!(3)),
+                durability: Durability::Temporary,
+                note: None,
+                by: None,
+                since: None,
+            }],
+        };
+        let action = Action::DeployAdvanced {
+            choices: BTreeMap::new(),
+            durability: Durability::Standing,
+            patches: changes.clone(),
+        };
+        let reparsed: HashMap<String, String> =
+            url::form_urlencoded::parse(action.as_params().as_bytes())
+                .into_owned()
+                .collect();
+        assert_eq!(Action::from_query(&reparsed), action);
+        assert_eq!(action.patch_changes(), Some(&changes));
+
+        let broken = query(&[("action", "deploy-advanced"), ("patches", "{nope")]);
+        assert!(Action::from_query(&broken)
+            .patch_changes()
+            .is_some_and(PatchChanges::is_empty));
+        let cleared = action.with_patch_changes(PatchChanges::default());
+        assert!(cleared.patch_changes().is_some_and(PatchChanges::is_empty));
+    }
+
+    #[test]
+    fn typed_values_come_from_value_fields() {
+        let q = query(&[
+            ("value_NGINX", " 1.27.5 "),
+            ("value_", "x"),
+            ("value_EMPTY", " "),
+        ]);
+        let typed = typed_values(&q);
+        assert_eq!(typed.len(), 1);
+        assert_eq!(typed["NGINX"], "1.27.5");
+    }
+
+    #[test]
+    fn blockers_gate_everything_that_deploys() {
+        assert!(Action::DeployLatest.is_gated_by_blockers());
+        assert!(Action::DeployAdvanced {
+            choices: BTreeMap::new(),
+            durability: Durability::Temporary,
+            patches: Default::default(),
+        }
+        .is_gated_by_blockers());
+        assert!(Action::EndTemporary.is_gated_by_blockers());
+        assert!(!Action::Undeploy.is_gated_by_blockers());
+        assert!(!Action::Bounce.is_gated_by_blockers());
+        assert!(!Action::ToggleAutodeploy.is_gated_by_blockers());
+        assert!(!Action::Rollback { revision: 1 }.is_gated_by_blockers());
+    }
 }

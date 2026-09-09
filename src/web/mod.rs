@@ -3,13 +3,17 @@ pub mod blockers;
 mod bootstrap;
 mod build_status_helpers;
 mod deploy_configs;
+mod deploy_form;
 mod deploy_history;
+#[cfg(test)]
+mod fixtures;
 mod formatting;
 mod fragments;
 mod header;
 mod index;
 pub mod parameters;
 pub mod patches;
+pub mod preview;
 mod resource_logs;
 mod resource_status;
 pub mod rollback;

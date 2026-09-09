@@ -1130,6 +1130,19 @@ impl LiteResource {
         self.format_with_muted(namespaced_objs, false)
     }
 
+    /// Like [`Self::format`], with a state appended to this item (not its
+    /// children): the deploy page marks every top-level resource
+    /// `→ removed` when previewing an undeploy.
+    fn format_marked(&self, namespaced_objs: &[DynamicObject], mark: &str) -> Markup {
+        html! {
+            li.deployables-tree__item {
+                (self.format_self(namespaced_objs))
+                (render_state_span(mark, "error"))
+                (self.format_children(namespaced_objs))
+            }
+        }
+    }
+
     fn self_status(&self, namespaced_objs: &[DynamicObject]) -> Option<ResourceStatus> {
         let obj = namespaced_objs.iter().find(|o| {
             o.name_any() == self.name
@@ -1202,24 +1215,59 @@ impl TryFrom<&DynamicObject> for LiteResource {
     }
 }
 
+/// What a deploy would do to the resource tree: a state to append to a
+/// top-level resource that exists now (`→ removed`), and resources the
+/// desired manifests add that do not exist yet.
+#[derive(Default)]
+pub struct ResourcePlan {
+    /// `(kind, name)` of current resources that the deploy removes.
+    pub removed: Vec<(String, String)>,
+    /// `(kind, name)` of resources the deploy creates.
+    pub created: Vec<(String, String)>,
+}
+
 pub trait ResourceStatuses {
-    async fn format_resources(&self, namespaced_objs: &[DynamicObject]) -> Markup;
+    /// The tree of what exists now, annotated with what a deploy changes.
+    async fn format_resources_planned(
+        &self,
+        namespaced_objs: &[DynamicObject],
+        plan: &ResourcePlan,
+    ) -> Markup;
     fn format_resources_json(&self, namespaced_objs: &[DynamicObject]) -> Vec<Value>;
 }
 
 impl ResourceStatuses for DeployConfig {
-    async fn format_resources(&self, namespaced_objs: &[DynamicObject]) -> Markup {
+    async fn format_resources_planned(
+        &self,
+        namespaced_objs: &[DynamicObject],
+        plan: &ResourcePlan,
+    ) -> Markup {
         html! {
             ul.deployable-item__child-list {
                 @for resource in &self.resource_specs() {
                     @match TryInto::<LiteResource>::try_into(resource) {
                         Ok(resource) => {
-                            (resource.format(namespaced_objs))
+                            @let removed = plan.removed.iter().any(|(k, n)| *k == resource.kind.to_string() && *n == resource.name);
+                            @if removed {
+                                (resource.format_marked(namespaced_objs, "→ removed"))
+                            } @else {
+                                (resource.format(namespaced_objs))
+                            }
                         }
                         Err(e) => {
                             li.deployables-tree__item {
                                 (format!("Kube spec parse error: {}", format_error_chain(&e)))
                             }
+                        }
+                    }
+                }
+                @for (kind, name) in &plan.created {
+                    li.deployables-tree__item.deployables-tree__item--muted {
+                        span {
+                            b { (kind) }
+                            ": "
+                            (name)
+                            span.m-left-2.deployable-state.deployable-state--muted.deployable-state--will-skip { "(will be created)" }
                         }
                     }
                 }

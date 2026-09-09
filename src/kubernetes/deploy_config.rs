@@ -272,11 +272,14 @@ impl DeployConfig {
     /// It is what the badge, the homepage list and autodeploy's suspension
     /// key on. Standing overrides (a pinned dependency, a replica bump) are
     /// ordinary operation and do not count.
-    #[allow(dead_code)] // the deploy page and env vars use this in the next PRs
     pub fn is_temporary_deployment(&self) -> bool {
-        if matches!(self.deployment_state(), DeploymentState::Undeployed) {
-            return false;
-        }
+        !matches!(self.deployment_state(), DeploymentState::Undeployed)
+            && self.has_temporary_overrides()
+    }
+
+    /// Whether any selection or patch is temporary, deployed or not. What
+    /// a deploy of this config as it stands would make temporary.
+    pub fn has_temporary_overrides(&self) -> bool {
         let mut names: Vec<&str> = self
             .spec
             .spec
@@ -294,6 +297,32 @@ impl DeployConfig {
                 .patches
                 .iter()
                 .any(ManifestPatch::is_temporary)
+    }
+
+    /// When the oldest temporary override or patch was made, in
+    /// milliseconds since the epoch. `None` when nothing temporary carries
+    /// a timestamp (derived selections have none).
+    pub fn temporary_since(&self) -> Option<i64> {
+        let parse = |s: &str| {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .ok()
+                .map(|t| t.timestamp_millis())
+        };
+        let selections = self
+            .spec
+            .spec
+            .selections
+            .values()
+            .filter(|s| s.is_temporary())
+            .filter_map(|s| s.since.as_deref().and_then(parse));
+        let patches = self
+            .spec
+            .spec
+            .patches
+            .iter()
+            .filter(|p| p.is_temporary())
+            .filter_map(|p| p.since.as_deref().and_then(parse));
+        selections.chain(patches).min()
     }
 
     /// The `CICD_*` environment variables to inject into every container of the
@@ -898,6 +927,33 @@ mod tests {
         let undeployed = env(&base);
         assert_eq!(undeployed["CICD_TEMPORARY_DEPLOY"], "false");
         assert!(!undeployed.contains_key("CICD_PARAM_SHA"));
+    }
+
+    #[test]
+    fn temporary_since_is_the_oldest_temporary_change() {
+        let mut dc = with_status(
+            config(repo("kj800x", "app"), Some(repo("kj800x", "app"))),
+            "abc",
+            Some("master"),
+        );
+        assert_eq!(dc.temporary_since(), None);
+        assert!(!dc.has_temporary_overrides());
+        let mut newer = Selection::pin("5", Durability::Temporary);
+        newer.since = Some("2026-09-08T10:00:00Z".into());
+        let mut older = Selection::track("feature", Durability::Temporary);
+        older.since = Some("2026-09-08T08:00:00Z".into());
+        let mut standing = Selection::pin("1", Durability::Standing);
+        standing.since = Some("2026-09-01T00:00:00Z".into());
+        dc.spec.spec.selections.insert("REPLICAS".into(), newer);
+        dc.spec.spec.selections.insert(SHA_PARAMETER.into(), older);
+        dc.spec.spec.selections.insert("OTHER".into(), standing);
+        assert!(dc.has_temporary_overrides());
+        assert_eq!(
+            dc.temporary_since(),
+            chrono::DateTime::parse_from_rfc3339("2026-09-08T08:00:00Z")
+                .ok()
+                .map(|t| t.timestamp_millis())
+        );
     }
 
     #[test]

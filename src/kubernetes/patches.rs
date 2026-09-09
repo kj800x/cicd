@@ -52,6 +52,39 @@ impl ManifestPatch {
         self.durability == Durability::Temporary
     }
 
+    /// The operation without its durability, the way the deploy page lists
+    /// it: `replace /spec/replicas = 3 on Deployment/web (deployment.yaml)`.
+    pub fn describe_op(&self) -> String {
+        let file = self
+            .target
+            .file
+            .as_deref()
+            .map(|f| format!(" ({f})"))
+            .unwrap_or_default();
+        let target = format!("on {}/{}{}", self.target.kind, self.target.name, file);
+        match self.op {
+            PatchOp::Remove => format!("remove {} {}", self.path, target),
+            PatchOp::Add => format!(
+                "add {} = {} {}",
+                self.path,
+                self.value
+                    .as_ref()
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
+                target
+            ),
+            PatchOp::Replace => format!(
+                "replace {} = {} {}",
+                self.path,
+                self.value
+                    .as_ref()
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
+                target
+            ),
+        }
+    }
+
     /// A one-line description for lists and logs.
     pub fn describe(&self) -> String {
         let file = self
@@ -114,6 +147,90 @@ impl ManifestPatch {
         serde_json::from_value(op).map_err(|e| {
             AppError::InvalidInput(format!("patch {} is malformed: {e}", self.describe()))
         })
+    }
+}
+
+/// A pending edit to a config's patch list, carried by a deploy: existing
+/// patches to drop (by position in the current list) and new ones to add.
+/// Nothing is written until the deploy runs; the form keeps this in the
+/// query string.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PatchChanges {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remove: Vec<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub add: Vec<ManifestPatch>,
+}
+
+impl PatchChanges {
+    pub fn is_empty(&self) -> bool {
+        self.remove.is_empty() && self.add.is_empty()
+    }
+
+    pub fn removes(&self, index: usize) -> bool {
+        self.remove.contains(&index)
+    }
+
+    /// These edits with position `index` of the current list marked removed.
+    pub fn removing(&self, index: usize) -> Self {
+        let mut out = self.clone();
+        if !out.remove.contains(&index) {
+            out.remove.push(index);
+        }
+        out
+    }
+
+    /// These edits with position `index` kept after all.
+    pub fn keeping(&self, index: usize) -> Self {
+        let mut out = self.clone();
+        out.remove.retain(|r| *r != index);
+        out
+    }
+
+    /// These edits without the `index`th addition.
+    pub fn without_addition(&self, index: usize) -> Self {
+        let mut out = self.clone();
+        if index < out.add.len() {
+            out.add.remove(index);
+        }
+        out
+    }
+
+    /// The list a deploy would leave: `current` without the removed
+    /// positions, then the additions, each stamped with the deploy's
+    /// durability and the time of the deploy.
+    pub fn apply_to(
+        &self,
+        current: &[ManifestPatch],
+        durability: Durability,
+    ) -> Vec<ManifestPatch> {
+        let mut out: Vec<ManifestPatch> = current
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !self.removes(*i))
+            .map(|(_, p)| p.clone())
+            .collect();
+        for patch in &self.add {
+            let mut patch = patch.clone();
+            patch.durability = durability;
+            patch.since = Some(chrono::Utc::now().to_rfc3339());
+            out.push(patch);
+        }
+        out
+    }
+
+    /// Parse the query-string form; empty or absent is no change, and
+    /// anything unparseable is refused rather than silently ignored.
+    pub fn from_json(raw: &str) -> Result<Self, String> {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Ok(PatchChanges::default());
+        }
+        serde_json::from_str(raw).map_err(|e| format!("pending patches are not readable: {e}"))
+    }
+
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
     }
 }
 
@@ -281,6 +398,76 @@ mod tests {
         let mut no_value = patch("Deployment", "web", PatchOp::Add, "/spec/x", None);
         no_value.target.file = Some("a.yaml".into());
         assert!(apply_patches(&t, rendered, &[no_value]).is_err());
+    }
+
+    #[test]
+    fn pending_changes_apply_at_deploy_time() {
+        let current = vec![
+            patch(
+                "Deployment",
+                "web",
+                PatchOp::Replace,
+                "/spec/replicas",
+                Some(json!(2)),
+            ),
+            patch("Deployment", "web", PatchOp::Remove, "/spec/x", None),
+        ];
+        let mut added = patch(
+            "Deployment",
+            "web",
+            PatchOp::Replace,
+            "/spec/replicas",
+            Some(json!(3)),
+        );
+        added.since = None;
+        let changes = PatchChanges {
+            remove: vec![0],
+            add: vec![added],
+        };
+        assert!(!changes.is_empty() && changes.removes(0) && !changes.removes(1));
+        let out = changes.apply_to(&current, Durability::Standing);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].path, "/spec/x", "the kept one comes first");
+        assert_eq!(out[1].value, Some(json!(3)));
+        assert_eq!(
+            out[1].durability,
+            Durability::Standing,
+            "additions take the deploy's durability"
+        );
+        assert!(out[1].since.is_some());
+
+        assert_eq!(changes.removing(0).remove, vec![0], "no duplicates");
+        assert_eq!(changes.removing(1).remove, vec![0, 1]);
+        assert!(changes.keeping(0).remove.is_empty());
+        assert!(changes.without_addition(0).add.is_empty());
+        assert_eq!(changes.without_addition(5), changes);
+        let round = PatchChanges::from_json(&changes.to_json()).unwrap_or_default();
+        assert_eq!(round, changes);
+        assert!(PatchChanges::from_json("  ").unwrap_or_default().is_empty());
+        assert!(PatchChanges::from_json("{nope").is_err());
+        assert!(PatchChanges::default().apply_to(&current, Durability::Temporary) == current);
+    }
+
+    #[test]
+    fn describe_op_reads_like_the_deploy_page() {
+        let mut p = patch(
+            "Deployment",
+            "web",
+            PatchOp::Replace,
+            "/spec/replicas",
+            Some(json!(3)),
+        );
+        assert_eq!(
+            p.describe_op(),
+            "replace /spec/replicas = 3 on Deployment/web"
+        );
+        p.target.file = Some("deployment.yaml".into());
+        assert_eq!(
+            p.describe_op(),
+            "replace /spec/replicas = 3 on Deployment/web (deployment.yaml)"
+        );
+        let r = patch("Deployment", "web", PatchOp::Remove, "/spec/x", None);
+        assert_eq!(r.describe_op(), "remove /spec/x on Deployment/web");
     }
 
     #[test]

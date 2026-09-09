@@ -362,6 +362,66 @@ pub async fn fetch_deploy_config_by_sha(
     Ok(config)
 }
 
+/// Process-wide memo of what `.deploy/` held at a commit, for the pages
+/// that preview a deploy: the content at a full sha never changes, so one
+/// GitHub fetch per (repo, sha) serves every poll after it. Only settled
+/// answers are kept (a fetch that failed is retried next time), and the map
+/// is emptied when it grows past a few hundred commits.
+type CommitKey = (String, String, String);
+type ConfigsAtCommit = std::sync::Mutex<HashMap<CommitKey, Vec<DeployConfig>>>;
+static CONFIGS_AT_COMMIT: std::sync::OnceLock<ConfigsAtCommit> = std::sync::OnceLock::new();
+
+const CONFIG_CACHE_LIMIT: usize = 256;
+
+fn cache_key(repository: &impl IRepo, sha: &str) -> CommitKey {
+    (
+        repository.owner().to_ascii_lowercase(),
+        repository.repo().to_ascii_lowercase(),
+        sha.to_ascii_lowercase(),
+    )
+}
+
+/// [`fetch_deploy_configs_by_sha`] through the memo. Abbreviated shas are
+/// not cached: only a full sha names one immutable tree.
+pub async fn fetch_deploy_configs_cached(
+    octocrabs: &Octocrabs,
+    repository: impl IRepo,
+    sha: &str,
+) -> AppResult<Vec<DeployConfig>> {
+    let cacheable = sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit());
+    let key = cache_key(&repository, sha);
+    if cacheable {
+        let cache = CONFIGS_AT_COMMIT.get_or_init(Default::default);
+        if let Some(found) = cache.lock().ok().and_then(|c| c.get(&key).cloned()) {
+            return Ok(found);
+        }
+    }
+    let configs = fetch_deploy_configs_by_sha(octocrabs, repository, sha).await?;
+    if cacheable {
+        let cache = CONFIGS_AT_COMMIT.get_or_init(Default::default);
+        if let Ok(mut c) = cache.lock() {
+            if c.len() >= CONFIG_CACHE_LIMIT {
+                c.clear();
+            }
+            c.insert(key, configs.clone());
+        }
+    }
+    Ok(configs)
+}
+
+/// One config's definition at a commit, through the memo.
+pub async fn fetch_deploy_config_cached(
+    octocrabs: &Octocrabs,
+    repository: impl IRepo,
+    sha: &str,
+    config_name: &str,
+) -> AppResult<Option<DeployConfig>> {
+    Ok(fetch_deploy_configs_cached(octocrabs, repository, sha)
+        .await?
+        .into_iter()
+        .find(|config| config.name_any() == config_name))
+}
+
 pub async fn fetch_deploy_configs_by_sha(
     octocrabs: &Octocrabs,
     repository: impl IRepo,

@@ -13,6 +13,7 @@ pub fn render(active_page: &str) -> Markup {
                 }
                 div class="subheader-nav" {
                     a href="/deploy" class=(if active_page == "deploy" { "subheader-nav-item active" } else { "subheader-nav-item" }) { "Deploy" }
+                    a href="/blockers" class=(if active_page == "blockers" { "subheader-nav-item active" } else { "subheader-nav-item" }) { "Blockers" }
                     a href="/deploy-history" class=(if active_page == "history" { "subheader-nav-item active" } else { "subheader-nav-item" }) { "History" }
                     a href="/watchdog" class=(if active_page == "watchdog" { "subheader-nav-item active" } else { "subheader-nav-item" }) { "Health" }
                     a href="/branches" class=(if active_page == "branches" { "subheader-nav-item active" } else { "subheader-nav-item" }) { "Branch heads" }

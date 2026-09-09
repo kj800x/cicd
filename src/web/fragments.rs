@@ -8,7 +8,7 @@ use crate::{
         list_namespace_objects, DeployConfig,
     },
     prelude::*,
-    web::{formatting, render_preview_content, Action, BuildFilter, HumanTime, ResolvedVersion},
+    web::{formatting, preview, Action, BuildFilter, HumanTime, ResolvedVersion},
 };
 use k8s_openapi::api::{apps::v1::Deployment, core::v1::Pod};
 use kube::{api::DynamicObject, Client, ResourceExt};
@@ -421,6 +421,7 @@ pub async fn deploy_preview(
     path: web::Path<(String, String)>,
     query: web::Query<std::collections::HashMap<String, String>>,
     pool: web::Data<Pool<SqliteConnectionManager>>,
+    octocrabs: web::Data<crate::crab_ext::Octocrabs>,
 ) -> impl Responder {
     // Initialize Kubernetes client
     // FIXME: Should this come from web::Data?
@@ -465,7 +466,18 @@ pub async fn deploy_preview(
     };
 
     let action = Action::from_query(&action_params);
-    let markup = render_preview_content(&selected_config, &action, &conn, &namespaced_objs).await;
+    let typed = crate::web::typed_values(&action_params);
+    let prepared = preview::prepare(&conn, &selected_config, &action);
+    let resolved = preview::resolve_tags(&prepared, &typed).await;
+    let markup = preview::render_preview_content(
+        &prepared,
+        &conn,
+        Some(&octocrabs),
+        &namespaced_objs,
+        &typed,
+        &resolved,
+    )
+    .await;
 
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")

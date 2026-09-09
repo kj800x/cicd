@@ -23,7 +23,11 @@ src/
 │   └── ...                 # One file per entity
 ├── web/                    # HTTP handlers
 │   ├── index.rs            # Home page
-│   ├── deploy_configs.rs   # Deploy management UI
+│   ├── deploy_configs.rs   # Deploy page: routes, the Action enum, resolution
+│   ├── deploy_form.rs      # Deploy page left column (picker, action chooser, advanced form)
+│   ├── preview.rs          # Deploy page right column (parameter rows, alerts, resources)
+│   ├── patches.rs          # Patch list, the add-patch flow, patch routes
+│   ├── blockers.rs         # Blockers page, held strip, blocker routes
 │   ├── deploy_history.rs   # Deploy history page
 │   └── ...                 # One file per page/feature
 ├── kubernetes/             # Kubernetes integration
@@ -346,20 +350,25 @@ html! {
 
 **Selections and durability:**
 - `spec.selections.<PARAM>` records what a parameter follows: `track: {branch}` (an override), `pin: {value}`, or absent (the default channel). Each override has `durability: temporary | standing`, plus optional `note`, `by`, `since`
-- Written by the deploy handler on branch and commit deploys; config sync never touches it. "Latest" resolves through the selection; "Back to default branch" clears it
+- Written by the deploy handler on branch and commit deploys and by the advanced form; config sync never touches it. "Latest" resolves through the selection; choosing "Track default" for `SHA` on the advanced form clears it (writing an explicit empty selection when the current one was derived from status)
 - A config with any temporary override is a *temporary deployment*: badge, strip at the top of `/deploy`, and `CICD_TEMPORARY_DEPLOY=true`
 
-**Value parameters, patches and autodeploy:**
+**The deploy page (`/deploy`):**
+- Simple mode is the config picker, the action chooser (End temporary deployment · Deploy · Deploy advanced · autodeploy toggle · Bounce · Execute job · Undeploy) and one button. "Deploy advanced" is an action: it unfolds one selector per parameter (track default / track another channel / pin), the patch list and a durability toggle that applies to every override made in that deploy. Only choices that differ from the current selection are recorded (`deploys::selection_changes`), so re-submitting a standing pin does not rewrite its durability
+- Every choice lives in the query string (`action=deploy-advanced&sel_SHA=track&track_SHA=…&durability=…`); the GET form re-submits on change and the POST form mirrors it as hidden inputs. `preview::prepare` turns the action into the config as it would be after the deploy, and both columns render from that
+- The preview prints one row per parameter, `NAME: current → new (channel)`, with `CONFIG` first; unchanged rows print one value. Tag parameters are resolved through watchtower on every render; an unresolvable row grows the one-shot input
+- When the deploy moves the config commit, the preview reads the manifests at that commit to list resources that will be created or removed. `config_sync::fetch_deploy_configs_cached` memoises `.deploy/` per full sha for the process, so one GitHub fetch serves every poll after the first
+- Blockers are created and cleared on `/blockers`; the deploy page only shows the held strip, the alert and disabled deploy actions
 - `parameters:` in `.deploy/<name>.yaml` declares parameters: `{type: commit, owner, repo, branch}` or `{type: value, default}`. `artifactRepo` is sugar for a commit parameter named `SHA`. Every parameter is substituted for `$NAME` in manifests; a declared parameter without a deployed value refuses to render
-- Value parameters resolve to their pinned value or default at deploy time; set them from the Parameters panel or the `set_parameter` MCP tool
+- Value parameters resolve to their pinned value or default at deploy time; set them from the advanced form ("Deploy advanced" on `/deploy`) or the `set_parameter` MCP tool
 - "End temporary deployment" (deploy page action, `end_temporary_deployment` MCP tool) clears every temporary selection and removes every temporary patch in one step, then deploys latest; standing overrides stay. `deploys::temporary_changes` computes what it would touch
-- `spec.patches` are JSON Patch operations applied to rendered manifests after substitution, targeted by kind, name and optionally file. A patch that no longer fits fails the render loudly. Manage them from the Patches panel or `add_patch` / `remove_patch`
+- `spec.patches` are JSON Patch operations applied to rendered manifests after substitution, targeted by kind, name and optionally file. A patch that no longer fits fails the render loudly. On the web they are edited from the advanced form's patch list (the add flow picks a resource, then a knob such as replicas or an env var, and builds the JSON Patch; a custom form is one link away) and applied by the deploy: removals and additions ride along as `PatchChanges` in the query string (`patches=` JSON) and on the deploy request, are dry-run against Kubernetes when added and again in `run_action`, and are written with the deploy. The MCP `add_patch` / `remove_patch` tools still apply a change on their own
 - Autodeploy (`src/webhooks/autodeploy.rs`): a successful check run on the branch a config's `SHA` parameter tracks deploys latest, unless the parameter is pinned, the config is a temporary deployment, or a blocker is active
 
 **Tag parameters and watchtower:**
 - `{type: tag, image: docker.io/library/nginx, pattern: "1.27.*"}` declares a parameter whose candidates are the image's tags as [watchtower](https://watchtower.home.coolkev.com/) sees them. The pattern is a semver range with Cargo's rules (`^1.27` admits 1.28; `~1.27` or `1.27.*` stay on 1.27); only complete versions qualify (`1.27.3`, `v1.27.3`), never floating tags, and a suffixed tag (`1.27.3-alpine`) is a prerelease a range never picks: pin it. `src/kubernetes/tags.rs` holds the pure resolution
 - Selections: `track: {pattern}` beside `track: {branch}`; pins are a tag. Status: `{type: tag, value, pattern?, digest?}`; the digest is informational
-- `src/watchtower.rs` is the only client (`WATCHTOWER_URL`, default `http://watchtower.cicd.svc`). A deploy resolves tracked tag parameters through it after the static ones; pins, rollbacks, undeploys and every commit or value parameter never call it. Unreachable means the deploy fails closed with a 503 naming the parameter; the person types the tag for that one deploy (`value_<PARAM>` under the deploy form, `values` on the MCP deploy tool). The typed value is recorded under the tracked channel and the selection is not changed
+- `src/watchtower.rs` is the only client (`WATCHTOWER_URL`, default `http://watchtower.cicd.svc`). A deploy resolves tracked tag parameters through it after the static ones; pins, rollbacks, undeploys and every commit or value parameter never call it. Unreachable means the deploy fails closed with a 503 naming the parameter; the person types the tag for that one deploy (the box the preview grows under an unresolvable tag row, submitted as `value_<PARAM>`; `values` on the MCP deploy tool). The typed value is recorded under the tracked channel and the selection is not changed
 - Registration: after every config sync, 15 s after start, and hourly, cicd reconciles watchtower's repo list to the images every config's tag parameters name (register, re-activate, and by default deactivate the rest). `CICD_WATCHTOWER_RECONCILE=full|activate-only|off`
 - Events: `src/webhooks/tag_events.rs` polls `GET /api/events?after=<cursor>` every 30 s (cursor in the `watchtower_cursor` table; a first run starts from now) and runs the autodeploy gates for each added or moved tag
 
@@ -483,6 +492,15 @@ cargo test
 
 ### Integration Tests
 Tests go in `tests/` directory (not yet implemented).
+
+### Rendering the pages without a cluster
+`src/web/fixtures.rs` renders the deploy page in several states (simple, advanced, held, temporary, watchtower down, undeploy) and the blockers page from synthetic data into static HTML with the stylesheets inlined:
+
+```bash
+CICD_FIXTURE_DIR=/tmp/cicd-pages cargo test fixtures -- --ignored
+```
+
+Open the files in a browser to check a CSS or layout change against the design.
 
 ### Manual Testing Checklist
 - [ ] Bootstrap feature syncs repos correctly

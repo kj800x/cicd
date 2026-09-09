@@ -1082,6 +1082,7 @@ async fn execute_deploy_action_with(
         Action::DeployLatest => "Deploy (latest)".to_string(),
         Action::DeployBranch { branch } => format!("Deploy (branch: {})", branch),
         Action::DeployCommit { sha } => format!("Deploy (sha: {})", sha),
+        Action::DeployAdvanced { .. } => "Advanced deploy".to_string(),
         Action::Rollback { revision } => format!("Rollback (revision: {})", revision),
         Action::ClearSelection => "Clear selection and deploy latest".to_string(),
         Action::EndTemporary => "End temporary deployment".to_string(),

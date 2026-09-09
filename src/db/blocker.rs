@@ -115,6 +115,18 @@ impl Blocker {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Cleared blockers across all configs, most recently cleared first.
+    pub fn recently_cleared(
+        conn: &PooledConnection<SqliteConnectionManager>,
+        limit: usize,
+    ) -> AppResult<Vec<Self>> {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {COLUMNS} FROM blocker WHERE cleared_at IS NOT NULL ORDER BY cleared_at DESC, id DESC LIMIT ?1"
+        ))?;
+        let rows = stmt.query_map(params![limit as i64], Self::from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Full history for one config, newest first.
     pub fn history_for(
         conn: &PooledConnection<SqliteConnectionManager>,
@@ -177,6 +189,10 @@ mod tests {
         assert!(!stored.is_active());
         assert_eq!(stored.cleared_by.as_deref(), Some("kevin"));
         assert_eq!(Blocker::history_for(&conn, "site", 10)?.len(), 1);
+        let cleared = Blocker::recently_cleared(&conn, 10)?;
+        assert_eq!(cleared.len(), 1);
+        assert_eq!(cleared[0].id, b.id);
+        assert!(Blocker::recently_cleared(&conn, 0)?.is_empty());
         Ok(())
     }
 

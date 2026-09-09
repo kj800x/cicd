@@ -38,6 +38,8 @@ pub struct Repository {
 }
 
 impl Repository {
+    /// Test convenience: a repository with a tracking branch attached.
+    #[cfg(test)]
     pub fn with_branch(&self, branch: &str) -> RepositoryBranch {
         RepositoryBranch {
             owner: self.owner.clone(),
