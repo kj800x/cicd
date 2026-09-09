@@ -652,6 +652,14 @@ async fn write_pages() -> AppResult<()> {
                 home::DriftLine::HeldBack { name: "NGINX".into(), value: "1.27.0".into(), available: "1.27.6".into() },
             ], autodeploy: true, temporary: false, pinned: true },
         ],
+        upgrades: vec![
+            home::Upgrade { name: "nginx-cache".into(), config_url: "https://github.com/kj800x/homelab/blob/master/.deploy/nginx-cache.yaml".into(), lines: vec![
+                home::UpgradeLine { name: "NGINX".into(), current: "1.27.0".into(), newest: "1.29.1".into(), channel: "1.27.*".into() },
+            ] },
+            home::Upgrade { name: "mosquitto".into(), config_url: "https://github.com/kj800x/homelab/blob/master/.deploy/mosquitto.yaml".into(), lines: vec![
+                home::UpgradeLine { name: "MQTT".into(), current: "2.1.2-alpine".into(), newest: "3.0.1-alpine".into(), channel: "^2.1.2 · alpine".into() },
+            ] },
+        ],
         activity: activity.clone(),
         standing: vec![
             home::Standing { name: "nginx-cache".into(), what: "NGINX pinned 1.27.0".into(), since: Some(now_ms() - 86 * 86_400_000) },
@@ -671,6 +679,7 @@ async fn write_pages() -> AppResult<()> {
         unhealthy: vec![],
         healthy_count: home_configs.len(),
         drift: vec![],
+        upgrades: vec![],
         activity,
         standing: data.standing,
         last_deploy: data.last_deploy,
