@@ -81,7 +81,7 @@ pub fn tag_parameter_for(
             Mode::Track(p) => p.to_string(),
             Mode::Default => source.default_channel().unwrap_or_default().to_string(),
         };
-        if !tags::matches(tag, &pattern) {
+        if !tags::matches(tag, &pattern, source.variant()) {
             last = Skip::OutsideRange(pattern);
             continue;
         }
@@ -266,6 +266,7 @@ mod tests {
             ParameterSource::Tag {
                 image: "docker.io/library/nginx".into(),
                 pattern: "1.27.*".into(),
+                variant: None,
             },
         );
         let mut dc = DeployConfig::new(
@@ -364,6 +365,51 @@ mod tests {
         assert_eq!(
             tag_parameter_for(&dc, &nginx(), &arrives("1.27.3"), &known(&["1.27.3"])),
             Ok("NGINX".into())
+        );
+    }
+
+    #[test]
+    fn a_followed_variant_moves_on_its_own_tags_only() {
+        let mut dc = config(true, "2.1.2-alpine");
+        if let Some(ParameterSource::Tag {
+            pattern, variant, ..
+        }) = dc.spec.spec.parameters.get_mut("NGINX")
+        {
+            *pattern = "^2.1.2".into();
+            *variant = Some("alpine".into());
+        }
+        let known = |tags: &[&str]| -> Vec<Tag> {
+            tags.iter()
+                .map(|t| {
+                    let (version, variant) = t.split_once('-').unwrap_or((t, ""));
+                    Tag {
+                        tag: t.to_string(),
+                        active: true,
+                        version: Some(version.to_string()),
+                        variant: (!variant.is_empty()).then(|| variant.to_string()),
+                        history: vec![],
+                    }
+                })
+                .collect()
+        };
+        let tags = known(&["2.1.2-alpine", "2.1.3-alpine", "2.1.3"]);
+        assert_eq!(
+            tag_parameter_for(
+                &dc,
+                &nginx(),
+                &Candidate::new("2.1.3-alpine", "2.1.3", Some("alpine")),
+                &tags
+            ),
+            Ok("NGINX".into())
+        );
+        assert_eq!(
+            tag_parameter_for(
+                &dc,
+                &nginx(),
+                &Candidate::new("2.1.3", "2.1.3", None),
+                &tags
+            ),
+            Err(Skip::OutsideRange("^2.1.2".into()))
         );
     }
 

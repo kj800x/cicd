@@ -135,7 +135,7 @@ pub async fn resolve_tag_parameter(
         .iter()
         .filter(|t| t.active)
         .filter_map(crate::kubernetes::tags::Candidate::of);
-    let chosen = crate::kubernetes::tags::highest_matching(candidates, &pattern)
+    let chosen = crate::kubernetes::tags::highest_matching(candidates, &pattern, source.variant())
         .map_err(AppError::InvalidInput)?
         .ok_or_else(|| {
             AppError::InvalidInput(format!(
@@ -1204,6 +1204,7 @@ mod tests {
             ParameterSource::Tag {
                 image: "nginx".into(),
                 pattern: "1.27.*".into(),
+                variant: None,
             },
         );
         config.spec.spec.parameters.insert(

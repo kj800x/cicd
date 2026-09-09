@@ -159,6 +159,7 @@ fn config(name: &str) -> DeployConfig {
         ParameterSource::Tag {
             image: "ghcr.io/kj800x/nginx".into(),
             pattern: "1.27.*".into(),
+            variant: None,
         },
     );
     parameters.insert(

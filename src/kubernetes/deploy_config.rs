@@ -977,6 +977,7 @@ mod tests {
             ParameterSource::Tag {
                 image: "nginx".into(),
                 pattern: "1.27.*".into(),
+                variant: None,
             },
         );
         let mut dc = with_status(dc, "abc", None);
