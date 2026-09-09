@@ -1013,11 +1013,11 @@ pub async fn deploy_configs(
             Ok(objs) => objs,
             Err(e) => {
                 log::error!("Failed to get namespaced objects: {}", e);
-                vec![]
+                std::sync::Arc::new(vec![])
             }
         }
     } else {
-        vec![]
+        std::sync::Arc::new(vec![])
     };
 
     let temporary_strip = crate::web::selections::render_temporary_strip(&deploy_configs);

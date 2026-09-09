@@ -26,7 +26,7 @@ async fn find_resource_by_uid_in_namespace(
     client: &Client,
     uid: &str,
     namespace: &str,
-) -> AppResult<Option<(DynamicObject, Vec<DynamicObject>)>> {
+) -> AppResult<Option<(DynamicObject, std::sync::Arc<Vec<DynamicObject>>)>> {
     let objs =
         list_namespace_objects(client, namespace, crate::kubernetes::api::ListMode::All).await?;
     if let Some(obj) = find_resource_by_uid(uid, &objs) {
@@ -40,7 +40,7 @@ async fn find_resource_by_uid_in_namespace(
 async fn find_resource_by_uid_all_namespaces(
     client: &Client,
     uid: &str,
-) -> AppResult<Option<(DynamicObject, Vec<DynamicObject>, String)>> {
+) -> AppResult<Option<(DynamicObject, std::sync::Arc<Vec<DynamicObject>>, String)>> {
     let deploy_configs = crate::kubernetes::api::get_all_deploy_configs(client).await?;
 
     for config in deploy_configs {
