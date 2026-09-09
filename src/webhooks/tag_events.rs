@@ -22,9 +22,13 @@ use crate::{
     deploys::{run_action, SelectionIntent},
     error::AppResult,
     kubernetes::{
-        api::get_all_deploy_configs, parameters::ImageRef, selections::Mode, tags, DeployConfig,
+        api::get_all_deploy_configs,
+        parameters::ImageRef,
+        selections::Mode,
+        tags::{self, Candidate},
+        DeployConfig,
     },
-    watchtower::{Event, EventKind, Watchtower},
+    watchtower::{Event, EventKind, Tag, Watchtower},
     web::Action,
 };
 
@@ -45,11 +49,13 @@ pub enum Skip {
 }
 
 /// The pure part: the name of the tag parameter that should move for
-/// this tag of this image, or why not.
+/// this tag of this image, or why not. `known` is the image's tags as
+/// watchtower has them, which is where the deployed tag's rank comes from.
 pub fn tag_parameter_for(
     config: &DeployConfig,
     image: &ImageRef,
-    tag: &str,
+    tag: &Candidate,
+    known: &[Tag],
 ) -> Result<String, Skip> {
     if !config.autodeploy() {
         return Err(Skip::Off);
@@ -79,8 +85,13 @@ pub fn tag_parameter_for(
             last = Skip::OutsideRange(pattern);
             continue;
         }
-        let newer = match deployed.get(pname).and_then(|v| tags::parse_version(v)) {
-            Some(current) => tags::parse_version(tag).is_some_and(|new| new > current),
+        let current = deployed
+            .get(pname)
+            .and_then(|value| known.iter().find(|t| t.tag == *value))
+            .and_then(Candidate::of)
+            .and_then(|c| tags::rank(&c));
+        let newer = match current {
+            Some(current) => tags::rank(tag).is_some_and(|new| new > current),
             None => true,
         };
         if !newer {
@@ -139,23 +150,45 @@ impl TagEventPoller {
         }
         let configs = get_all_deploy_configs(&self.client).await?;
         for event in &page.events {
-            self.handle(event, &configs).await;
+            self.handle(watchtower, event, &configs).await;
             watchtower_cursor::set(&self.pool.get()?, event.id)?;
         }
         Ok(())
     }
 
-    async fn handle(&self, event: &Event, configs: &[DeployConfig]) {
+    async fn handle(&self, watchtower: &Watchtower, event: &Event, configs: &[DeployConfig]) {
         if event.kind == EventKind::Removed {
             return;
         }
+        let Some(tag) = Candidate::of_event(event) else {
+            log::debug!(
+                "Tag autodeploy: {}:{} names no version, nothing tracks it",
+                event.name,
+                event.tag
+            );
+            return;
+        };
         let image = ImageRef {
             registry: event.registry.clone(),
             name: event.name.clone(),
         };
+        // The deployed tag's rank comes from the same reading of the image.
+        let known = match watchtower.lookup(&image).await {
+            Ok(Some(repo)) => repo.tag,
+            Ok(None) => vec![],
+            Err(e) => {
+                log::warn!(
+                    "Tag autodeploy: lookup of {}/{} failed, treating the deployed tag as unknown: {}",
+                    image.registry,
+                    image.name,
+                    e
+                );
+                vec![]
+            }
+        };
         for config in configs {
             let name = config.name_any();
-            let parameter = match tag_parameter_for(config, &image, &event.tag) {
+            let parameter = match tag_parameter_for(config, &image, &tag, &known) {
                 Ok(p) => p,
                 Err(Skip::Off) | Err(Skip::OtherImage) => continue,
                 Err(skip) => {
@@ -277,28 +310,74 @@ mod tests {
         ImageRef::parse("docker.io/library/nginx")
     }
 
+    /// Tags as watchtower reads them: the version is the tag itself here.
+    fn known(tags: &[&str]) -> Vec<Tag> {
+        tags.iter()
+            .map(|t| Tag {
+                tag: t.to_string(),
+                active: true,
+                version: Some(t.to_string()),
+                variant: None,
+                history: vec![],
+            })
+            .collect()
+    }
+
+    fn arrives(tag: &str) -> Candidate<'_> {
+        Candidate::new(tag, tag, None)
+    }
+
+    fn moves(
+        dc: &DeployConfig,
+        image: &ImageRef,
+        tag: &str,
+        deployed: &str,
+    ) -> Result<String, Skip> {
+        tag_parameter_for(dc, image, &arrives(tag), &known(&[deployed, tag]))
+    }
+
     #[test]
     fn a_newer_tag_in_range_moves_a_tracked_parameter() {
         let dc = config(true, "1.27.2");
+        assert_eq!(moves(&dc, &nginx(), "1.27.3", "1.27.2"), Ok("NGINX".into()));
         assert_eq!(
-            tag_parameter_for(&dc, &nginx(), "1.27.3"),
-            Ok("NGINX".into())
-        );
-        assert_eq!(
-            tag_parameter_for(&dc, &nginx(), "1.27.1"),
+            moves(&dc, &nginx(), "1.27.1", "1.27.2"),
             Err(Skip::NotNewer("1.27.2".into()))
         );
         assert_eq!(
-            tag_parameter_for(&dc, &nginx(), "1.28.0"),
+            moves(&dc, &nginx(), "1.28.0", "1.27.2"),
             Err(Skip::OutsideRange("1.27.*".into()))
         );
         assert_eq!(
-            tag_parameter_for(&dc, &ImageRef::parse("library/redis"), "7.0.0"),
+            moves(&dc, &ImageRef::parse("library/redis"), "7.0.0", "1.27.2"),
             Err(Skip::OtherImage)
         );
         assert_eq!(
-            tag_parameter_for(&config(false, "1.27.2"), &nginx(), "1.27.3"),
+            moves(&config(false, "1.27.2"), &nginx(), "1.27.3", "1.27.2"),
             Err(Skip::Off)
+        );
+    }
+
+    #[test]
+    fn a_deployed_tag_watchtower_does_not_know_counts_as_older() {
+        let dc = config(true, "1.27.2");
+        assert_eq!(
+            tag_parameter_for(&dc, &nginx(), &arrives("1.27.3"), &known(&["1.27.3"])),
+            Ok("NGINX".into())
+        );
+    }
+
+    #[test]
+    fn two_part_versions_move_a_parameter_too() {
+        let mut dc = config(true, "15.11");
+        dc.spec.spec.selections.insert(
+            "NGINX".into(),
+            Selection::track_pattern("^15.11", Durability::Standing),
+        );
+        assert_eq!(moves(&dc, &nginx(), "15.12", "15.11"), Ok("NGINX".into()));
+        assert_eq!(
+            moves(&dc, &nginx(), "15.11", "15.11"),
+            Err(Skip::NotNewer("15.11".into()))
         );
     }
 
@@ -309,10 +388,7 @@ mod tests {
             "NGINX".into(),
             Selection::pin("1.27.2", Durability::Standing),
         );
-        assert_eq!(
-            tag_parameter_for(&dc, &nginx(), "1.27.3"),
-            Err(Skip::Pinned)
-        );
+        assert_eq!(moves(&dc, &nginx(), "1.27.3", "1.27.2"), Err(Skip::Pinned));
 
         let mut dc = config(true, "1.27.2");
         dc.spec.spec.selections.insert(
@@ -320,7 +396,7 @@ mod tests {
             Selection::track_pattern("1.*", Durability::Temporary),
         );
         assert_eq!(
-            tag_parameter_for(&dc, &nginx(), "1.28.0"),
+            moves(&dc, &nginx(), "1.28.0", "1.27.2"),
             Err(Skip::Temporary)
         );
     }
