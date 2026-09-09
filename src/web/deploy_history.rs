@@ -764,11 +764,20 @@ pub async fn deploy_history_fragment(
         Err(e) => return db_error(e),
     };
     let scope = Scope::from(&req, &query);
+    // Stage timings at debug level: RUST_LOG=cicd::web::deploy_history=debug.
+    let t = std::time::Instant::now();
     let revisions = scope.revisions(&conn);
+    log::debug!(
+        "history fragment: {} revisions loaded in {:?}",
+        revisions.len(),
+        t.elapsed()
+    );
+    let t = std::time::Instant::now();
     let markup = match scope {
         Scope::Config(_) => render_config_feed(revisions),
         _ => feed::render_feed(feed::group_bursts(feed::entries(revisions))),
     };
+    log::debug!("history fragment: rendered in {:?}", t.elapsed());
     page(markup)
 }
 
