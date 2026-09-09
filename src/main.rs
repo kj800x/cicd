@@ -113,6 +113,9 @@ async fn start_http(
             .app_data(Data::new(octocrabs.clone()))
             .app_data(Data::new(pool.clone()))
             .wrap(middleware::Logger::default())
+            // Pages and fragments are large, repetitive HTML; the history
+            // feed alone is 100 KB uncompressed and gzips to a tenth.
+            .wrap(middleware::Compress::default())
             .service(web::home)
             .service(deploy_configs)
             .service(web::blockers_page)

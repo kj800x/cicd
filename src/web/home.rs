@@ -397,12 +397,23 @@ pub async fn gather(
         .into_iter()
         .filter(|b| names.contains(&b.config_name))
         .collect();
+    // Stage timings at debug level: RUST_LOG=cicd::web::home=debug.
+    let t = std::time::Instant::now();
     let (unhealthy, healthy_count) = match client {
         Some(client) => health_of(client, &configs).await,
         None => (vec![], 0),
     };
+    log::debug!(
+        "home: health of {} configs in {:?}",
+        configs.len(),
+        t.elapsed()
+    );
+    let t = std::time::Instant::now();
     let drift = drift_of(conn, &configs).await;
+    log::debug!("home: drift (watchtower + builds) in {:?}", t.elapsed());
+    let t = std::time::Instant::now();
     let revisions = revisions_for_teams(conn, &scope_teams).unwrap_or_default();
+    log::debug!("home: {} revisions in {:?}", revisions.len(), t.elapsed());
     let last_deploy = revisions
         .iter()
         .find(|r| r.action == "deploy")
@@ -661,6 +672,7 @@ pub async fn home(
     // The shared client from app data; building one per request costs a
     // config load and a TLS setup each time.
     let client: Option<Client> = client.map(|c| c.get_ref().clone());
+    let t = std::time::Instant::now();
     let all_configs = match &client {
         Some(client) => get_all_deploy_configs(client).await.unwrap_or_else(|e| {
             log::warn!("Failed to list deploy configs for home: {}", e);
@@ -668,13 +680,23 @@ pub async fn home(
         }),
         None => vec![],
     };
+    log::debug!(
+        "home: {} configs listed in {:?}",
+        all_configs.len(),
+        t.elapsed()
+    );
     let teams = teams_of(&req);
     let selected_team = query.get("team").filter(|t| !t.is_empty()).cloned();
+    let t = std::time::Instant::now();
     let strips = render_strips(&conn, &all_configs);
+    log::debug!("home: strips in {:?}", t.elapsed());
     let data = gather(&conn, client.as_ref(), all_configs, teams, selected_team).await;
+    let t = std::time::Instant::now();
+    let body = render_home(&data, strips, client.is_some()).into_string();
+    log::debug!("home: rendered {} bytes in {:?}", body.len(), t.elapsed());
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
-        .body(render_home(&data, strips, client.is_some()).into_string())
+        .body(body)
 }
 
 #[cfg(test)]
