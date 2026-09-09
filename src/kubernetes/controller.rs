@@ -14,6 +14,9 @@ use kube::{
 };
 use std::{sync::Arc, time::Duration};
 
+/// How often an unchanged config is reconciled again to catch drift.
+const RESYNC: Duration = Duration::from_secs(300);
+
 /// Context for the controller
 #[derive(Clone)]
 pub struct ControllerContext {
@@ -100,7 +103,11 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> AppRes
     log::debug!("Pruning stale resources complete");
 
     // Requeue reconciliation
-    Ok(Action::requeue(Duration::from_secs(5)))
+    // Changes to the DeployConfig reconcile immediately through the watch;
+    // this requeue only catches drift in the children. Five seconds across
+    // sixty configs, each listing every kind in its namespace, was most of
+    // the API server's load.
+    Ok(Action::requeue(RESYNC))
 }
 
 /// Whether the stale-resource prune step is switched off.

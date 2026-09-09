@@ -7,7 +7,6 @@ use kube::{
     api::{Api, DynamicObject, ListParams, Patch, PatchParams, ResourceExt},
     client::Client,
     core::discovery,
-    Discovery,
 };
 
 pub async fn apply(client: &Client, ns: &str, obj: DynamicObject) -> AppResult<DynamicObject> {
@@ -119,69 +118,60 @@ pub enum ListMode {
     Owned,
 }
 
-/// Return all DynamicObjects in `ns`
+/// Return all DynamicObjects in `ns`: one list per namespaced kind the
+/// cluster serves (discovery is cached, see `discovery_cache`).
 pub async fn list_namespace_objects(
     client: &Client,
     ns: &str,
     mode: ListMode,
 ) -> AppResult<Vec<DynamicObject>> {
-    let disc = Discovery::new(client.clone()).run().await?;
+    let kinds = crate::kubernetes::discovery_cache::namespaced_kinds(client).await?;
     let mut out = Vec::new();
 
-    for group in disc.groups() {
-        for (ar, caps) in group.resources_by_stability() {
-            // Only namespaced top-level resources (skip subresources like */status)
-            if caps.scope != discovery::Scope::Namespaced || ar.plural.contains("/") {
-                continue;
-            }
-            let types = TypeMeta {
-                api_version: ar.api_version.clone(),
-                kind: ar.kind.clone(),
-            };
+    for (ar, _caps) in kinds.iter() {
+        let types = TypeMeta {
+            api_version: ar.api_version.clone(),
+            kind: ar.kind.clone(),
+        };
 
-            let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), ns, &ar);
+        let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), ns, ar);
 
-            // Paginate to avoid truncation on large lists
-            // only what *we* manage
-            let mut lp = match mode {
-                ListMode::All => ListParams::default().limit(500),
-                ListMode::Owned => ListParams::default()
-                    .labels("app.kubernetes.io/managed-by=cicd-controller")
-                    .limit(500),
-            };
-            let mut continue_token: Option<String> = None;
+        // Paginate to avoid truncation on large lists
+        // only what *we* manage
+        let mut lp = match mode {
+            ListMode::All => ListParams::default().limit(500),
+            ListMode::Owned => ListParams::default()
+                .labels("app.kubernetes.io/managed-by=cicd-controller")
+                .limit(500),
+        };
+        let mut continue_token: Option<String> = None;
 
-            loop {
-                if let Some(token) = continue_token.clone() {
-                    lp = ListParams {
-                        continue_token: Some(token),
-                        ..lp.clone()
-                    };
-                }
-
-                let res = api.list(&lp).await;
-                let list = match res {
-                    Ok(l) => l,
-                    // 405 = method not allowed (common for subresources/misreported caps)
-                    Err(kube::Error::Api(e)) if e.code == 405 => break,
-                    // 403/404/etc.: skip this kind but keep going
-                    Err(_) => break,
+        loop {
+            if let Some(token) = continue_token.clone() {
+                lp = ListParams {
+                    continue_token: Some(token),
+                    ..lp.clone()
                 };
+            }
 
-                out.extend(list.items.into_iter().map(|mut o| {
-                    o.types = o.types.or(Some(types.clone()));
-                    o
-                }));
+            let res = api.list(&lp).await;
+            let list = match res {
+                Ok(l) => l,
+                // 405 = method not allowed (common for subresources/misreported caps)
+                Err(kube::Error::Api(e)) if e.code == 405 => break,
+                // 403/404/etc.: skip this kind but keep going
+                Err(_) => break,
+            };
 
-                // FIXME: ChatGPT maybe suggests a "stall guard" (check to see if continue token is the same as the last one) to avoid k8s bugs.
-                continue_token =
-                    list.metadata
-                        .continue_
-                        .and_then(|x| if x.is_empty() { None } else { Some(x) });
+            out.extend(list.items.into_iter().map(|mut o| {
+                o.types = o.types.or(Some(types.clone()));
+                o
+            }));
 
-                if continue_token.is_none() {
-                    break;
-                }
+            continue_token = list.metadata.continue_.filter(|x| !x.is_empty());
+
+            if continue_token.is_none() {
+                break;
             }
         }
     }

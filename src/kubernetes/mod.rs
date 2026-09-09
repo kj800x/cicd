@@ -3,6 +3,7 @@ pub mod controller;
 pub mod cr_writers;
 pub mod deploy_config;
 pub mod deploy_handlers;
+pub mod discovery_cache;
 pub mod parameters;
 pub mod patches;
 pub mod repo;
