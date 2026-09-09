@@ -49,6 +49,8 @@ spec:
                         type: string
                       pattern:
                         type: string
+                      variant:
+                        type: string
                       default:
                         type: string
                     x-kubernetes-validations:

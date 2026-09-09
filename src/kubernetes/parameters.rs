@@ -41,6 +41,12 @@ pub enum ParameterSource {
         /// `ghcr.io/kj800x/nginx`. A bare name means Docker Hub.
         image: String,
         pattern: String,
+        /// Follow one build variant of the image: only tags whose suffix
+        /// after the first `-` is exactly this (`alpine`, `java25`) are
+        /// candidates, compared on the version before it. Without it, a
+        /// suffixed tag is a prerelease a range never picks.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        variant: Option<String>,
     },
     /// A static value with no feed. Its only channel is the default; a
     /// selection can pin it to something else.
@@ -150,6 +156,23 @@ impl ParameterSource {
 
     pub fn is_tag(&self) -> bool {
         matches!(self, ParameterSource::Tag { .. })
+    }
+
+    /// The build variant a tag source follows, if it follows one.
+    pub fn variant(&self) -> Option<&str> {
+        match self {
+            ParameterSource::Tag { variant, .. } => variant.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// A tag channel as shown to people: the range, and the variant when
+    /// there is one (`^2.1.2 · alpine`).
+    pub fn channel_label(pattern: &str, variant: Option<&str>) -> String {
+        match variant {
+            Some(variant) => format!("{pattern} · {variant}"),
+            None => pattern.to_string(),
+        }
     }
 
     pub fn type_name(&self) -> &'static str {
@@ -312,6 +335,20 @@ mod tests {
         )?;
         assert_eq!(src.default_channel(), Some("^1.27"));
         assert!(src.default_value().is_none());
+        assert_eq!(src.variant(), None);
+        assert!(
+            !serde_json::to_string(&src)?.contains("variant"),
+            "absent stays absent"
+        );
+        let alpine: ParameterSource = serde_json::from_value(json!({
+            "type": "tag", "image": "eclipse-mosquitto", "pattern": "^2.1.2", "variant": "alpine"
+        }))?;
+        assert_eq!(alpine.variant(), Some("alpine"));
+        assert_eq!(
+            ParameterSource::channel_label("^2.1.2", alpine.variant()),
+            "^2.1.2 · alpine"
+        );
+        assert_eq!(serde_json::to_value(&alpine)?["variant"], "alpine");
         assert_eq!(
             src.image_ref(),
             Some(ImageRef {

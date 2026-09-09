@@ -107,12 +107,15 @@ impl HomeData {
     }
 }
 
-/// The highest tag of each image that matches each pattern asked for, from
+/// A tag channel: the range and the variant followed.
+type Channel = (String, Option<String>);
+
+/// The highest tag of each image that matches each channel asked for, from
 /// one watchtower lookup per image. Images watchtower cannot answer for
 /// are absent.
 async fn latest_tags(
-    wanted: &BTreeMap<ImageRef, Vec<String>>,
-) -> HashMap<(ImageRef, String), String> {
+    wanted: &BTreeMap<ImageRef, Vec<Channel>>,
+) -> HashMap<(ImageRef, Channel), String> {
     let lookups = wanted
         .keys()
         .map(|image| async move { (image.clone(), Watchtower::for_preview().lookup(image).await) });
@@ -137,11 +140,13 @@ async fn latest_tags(
             .filter(|t| t.active)
             .filter_map(crate::kubernetes::tags::Candidate::of)
             .collect();
-        for pattern in wanted.get(&image).into_iter().flatten() {
-            if let Ok(Some(best)) =
-                crate::kubernetes::tags::highest_matching(candidates.iter().copied(), pattern)
-            {
-                out.insert((image.clone(), pattern.clone()), best);
+        for channel in wanted.get(&image).into_iter().flatten() {
+            if let Ok(Some(best)) = crate::kubernetes::tags::highest_matching(
+                candidates.iter().copied(),
+                &channel.0,
+                channel.1.as_deref(),
+            ) {
+                out.insert((image.clone(), channel.clone()), best);
             }
         }
     }
@@ -174,7 +179,7 @@ async fn drift_of(
     configs: &[DeployConfig],
 ) -> Vec<Drift> {
     // One watchtower round trip per image, whatever the number of configs.
-    let mut wanted: BTreeMap<ImageRef, Vec<String>> = BTreeMap::new();
+    let mut wanted: BTreeMap<ImageRef, Vec<Channel>> = BTreeMap::new();
     for config in configs {
         for (pname, source) in &config.spec.spec.parameters {
             let (Some(image), Some(default)) = (source.image_ref(), source.default_channel())
@@ -185,9 +190,10 @@ async fn drift_of(
                 Mode::Track(p) => p.to_string(),
                 _ => default.to_string(),
             };
-            let patterns = wanted.entry(image).or_default();
-            if !patterns.contains(&pattern) {
-                patterns.push(pattern);
+            let channel = (pattern, source.variant().map(String::from));
+            let channels = wanted.entry(image).or_default();
+            if !channels.contains(&channel) {
+                channels.push(channel);
             }
         }
     }
@@ -238,12 +244,18 @@ async fn drift_of(
                         }
                     }
                 }
-                ParameterSource::Tag { image, pattern } => {
+                ParameterSource::Tag {
+                    image,
+                    pattern,
+                    variant,
+                } => {
                     let image = ImageRef::parse(image);
                     match selection.mode() {
                         Mode::Pin(value) => {
                             pinned = true;
-                            if let Some(best) = latest.get(&(image, pattern.clone())) {
+                            if let Some(best) =
+                                latest.get(&(image, (pattern.clone(), variant.clone())))
+                            {
                                 if best != value {
                                     lines.push(DriftLine::HeldBack {
                                         name: pname.clone(),
@@ -254,17 +266,22 @@ async fn drift_of(
                             }
                         }
                         mode => {
-                            let channel = match mode {
+                            let range = match mode {
                                 Mode::Track(p) => p.to_string(),
                                 _ => pattern.clone(),
                             };
-                            if let Some(best) = latest.get(&(image, channel.clone())) {
+                            if let Some(best) =
+                                latest.get(&(image, (range.clone(), variant.clone())))
+                            {
                                 if *best != current {
                                     lines.push(DriftLine::Moves {
                                         name: pname.clone(),
                                         from: current.clone(),
                                         to: best.clone(),
-                                        channel,
+                                        channel: ParameterSource::channel_label(
+                                            &range,
+                                            variant.as_deref(),
+                                        ),
                                     });
                                 }
                             }
