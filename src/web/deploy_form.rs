@@ -334,7 +334,8 @@ pub fn render(
                 (render_durability_toggle(durability))
             }
 
-            form id="deployForm" action=(format!("/api/deploy/{}/{}", config.namespace().unwrap_or_default(), name)) method="post" {
+            form id="deployForm" action=(format!("/api/deploy/{}/{}", config.namespace().unwrap_or_default(), name)) method="post"
+                onsubmit="const b=this.querySelector('button[type=submit]'); if (b) { b.disabled=true; b.textContent='Working…'; }" {
                 input type="hidden" name="action" value=(action.form_value());
                 @if let Some(choices) = action.choices() {
                     input type="hidden" name="durability" value=(durability.as_str());

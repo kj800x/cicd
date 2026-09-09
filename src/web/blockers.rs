@@ -229,6 +229,7 @@ pub fn render_blockers_page(
 pub async fn blockers_page(
     req: HttpRequest,
     pool: web::Data<Pool<SqliteConnectionManager>>,
+    client: Option<web::Data<Client>>,
 ) -> impl Responder {
     let conn = match pool.get() {
         Ok(c) => c,
@@ -248,8 +249,8 @@ pub async fn blockers_page(
 
     // The config list is for the picker; without a cluster the form falls
     // back to a text box.
-    let mut config_names: Vec<String> = match Client::try_default().await {
-        Ok(client) => match crate::kubernetes::api::get_all_deploy_configs(&client).await {
+    let mut config_names: Vec<String> = match client.as_deref() {
+        Some(client) => match crate::kubernetes::api::get_all_deploy_configs(client).await {
             Ok(configs) => TeamsCookie::from_request(&req)
                 .filter_configs(&configs)
                 .iter()
@@ -260,8 +261,8 @@ pub async fn blockers_page(
                 vec![]
             }
         },
-        Err(e) => {
-            log::warn!("No Kubernetes client for the blockers page: {}", e);
+        None => {
+            log::warn!("No Kubernetes client for the blockers page");
             vec![]
         }
     };
