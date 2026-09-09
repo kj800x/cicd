@@ -44,6 +44,13 @@ pub struct Tag {
     pub tag: String,
     /// Still present in the registry's tag list.
     pub active: bool,
+    /// The version the tag names as watchtower read it (`15.11`,
+    /// `1.27.3`, `4.0.19.2979`; a leading `v` dropped), if any.
+    #[serde(default)]
+    pub version: Option<String>,
+    /// What follows the first `-` of a versioned tag (`alpine`, `rc1`).
+    #[serde(default)]
+    pub variant: Option<String>,
     /// Newest first; empty until the digest has been fetched.
     #[serde(default)]
     pub history: Vec<TagDigest>,
@@ -84,6 +91,11 @@ pub struct Event {
     pub registry: String,
     pub name: String,
     pub tag: String,
+    /// As on [`Tag`].
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub variant: Option<String>,
     pub kind: EventKind,
     pub digest: Option<String>,
     pub previous_digest: Option<String>,

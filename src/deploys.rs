@@ -130,7 +130,11 @@ pub async fn resolve_tag_parameter(
         }
         Err(e) => return Err(e),
     };
-    let candidates = repo.tag.iter().filter(|t| t.active).map(|t| t.tag.as_str());
+    let candidates = repo
+        .tag
+        .iter()
+        .filter(|t| t.active)
+        .filter_map(crate::kubernetes::tags::Candidate::of);
     let chosen = crate::kubernetes::tags::highest_matching(candidates, &pattern)
         .map_err(AppError::InvalidInput)?
         .ok_or_else(|| {

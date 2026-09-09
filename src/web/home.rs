@@ -131,11 +131,11 @@ async fn latest_tags(
                 continue;
             }
         };
-        let candidates: Vec<&str> = repo
+        let candidates: Vec<crate::kubernetes::tags::Candidate> = repo
             .tag
             .iter()
             .filter(|t| t.active)
-            .map(|t| t.tag.as_str())
+            .filter_map(crate::kubernetes::tags::Candidate::of)
             .collect();
         for pattern in wanted.get(&image).into_iter().flatten() {
             if let Ok(Some(best)) =
