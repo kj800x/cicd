@@ -188,6 +188,11 @@ pub fn migrations() -> Migrations<'static> {
               after INTEGER NOT NULL
           );
         "#}),
+        // Whether the deploy a revision records was a temporary deployment
+        // (any temporary override or patch active), so history can badge it.
+        M::up(indoc! { r#"
+          ALTER TABLE revision ADD COLUMN temporary BOOLEAN NOT NULL DEFAULT FALSE;
+        "#}),
     ])
 }
 

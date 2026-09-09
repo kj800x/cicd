@@ -45,6 +45,9 @@ pub struct Revision {
     pub config_version_hash: Option<String>,
     /// The manifest patches active at the time, as JSON, if any.
     pub patches: Option<String>,
+    /// Whether any temporary override or patch was active: the deploy was
+    /// a temporary deployment.
+    pub temporary: bool,
     pub parameters: Vec<RevisionParameter>,
 }
 
@@ -59,6 +62,7 @@ pub struct NewRevision {
     pub config_branch: Option<String>,
     pub config_version_hash: Option<String>,
     pub patches: Option<String>,
+    pub temporary: bool,
     pub parameters: Vec<RevisionParameter>,
 }
 
@@ -102,6 +106,7 @@ impl NewRevision {
                 .and_then(|c| c.branch.clone()),
             config_version_hash: None,
             patches: patches_json(config),
+            temporary: config.has_temporary_overrides(),
             parameters,
         }
     }
@@ -153,6 +158,7 @@ impl NewRevision {
                     config_branch: cfg.branch.clone(),
                     config_version_hash,
                     patches: patches_json(config),
+                    temporary: config.has_temporary_overrides(),
                     parameters,
                 })
             }
@@ -165,6 +171,7 @@ impl NewRevision {
                 config_branch: None,
                 config_version_hash: None,
                 patches: None,
+                temporary: false,
                 parameters: vec![],
             }),
             DeployAction::Bounce { .. }
@@ -175,7 +182,7 @@ impl NewRevision {
 }
 
 const COLUMNS: &str =
-    "id, config_name, created_at, actor, action, reason, config_sha, config_branch, config_version_hash, patches";
+    "id, config_name, created_at, actor, action, reason, config_sha, config_branch, config_version_hash, patches, temporary";
 
 impl Revision {
     fn from_row(row: &Row) -> rusqlite::Result<Self> {
@@ -190,6 +197,7 @@ impl Revision {
             config_branch: row.get(7)?,
             config_version_hash: row.get(8)?,
             patches: row.get(9)?,
+            temporary: row.get(10)?,
             parameters: vec![],
         })
     }
@@ -220,8 +228,8 @@ impl Revision {
         let created_at = Utc::now().timestamp_millis();
         let tx = conn.unchecked_transaction()?;
         tx.execute(
-            "INSERT INTO revision (config_name, created_at, actor, action, reason, config_sha, config_branch, config_version_hash, patches) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO revision (config_name, created_at, actor, action, reason, config_sha, config_branch, config_version_hash, patches, temporary) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 new.config_name,
                 created_at,
@@ -231,7 +239,8 @@ impl Revision {
                 new.config_sha,
                 new.config_branch,
                 new.config_version_hash,
-                new.patches
+                new.patches,
+                new.temporary
             ],
         )?;
         let id = tx.last_insert_rowid();
@@ -253,6 +262,7 @@ impl Revision {
             config_branch: new.config_branch,
             config_version_hash: new.config_version_hash,
             patches: new.patches,
+            temporary: new.temporary,
             parameters: new.parameters,
         })
     }
@@ -286,6 +296,24 @@ impl Revision {
             .query_row(
                 "SELECT id FROM revision WHERE config_name = ?1 ORDER BY created_at DESC, id DESC LIMIT 1",
                 params![config_name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match id {
+            Some(id) => Self::get(conn, id),
+            None => Ok(None),
+        }
+    }
+
+    /// The revision before `self` for the same config, if any.
+    pub fn previous(
+        &self,
+        conn: &PooledConnection<SqliteConnectionManager>,
+    ) -> AppResult<Option<Self>> {
+        let id: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM revision WHERE config_name = ?1 AND (created_at < ?2 OR (created_at = ?2 AND id < ?3)) ORDER BY created_at DESC, id DESC LIMIT 1",
+                params![self.config_name, self.created_at, self.id],
                 |row| row.get(0),
             )
             .optional()?;
@@ -457,6 +485,7 @@ mod tests {
             config_branch: Some("master".into()),
             config_version_hash: None,
             patches: None,
+            temporary: false,
             parameters: vec![RevisionParameter {
                 name: SHA_PARAMETER.into(),
                 kind: "commit".into(),
@@ -480,6 +509,10 @@ mod tests {
         );
         assert!(blue[0].parameter("NOPE").is_none());
 
+        let newest = Revision::latest_for(&conn, "a")?
+            .ok_or(crate::error::AppError::NotFound("a".into()))?;
+        let before = newest.previous(&conn)?;
+        assert!(before.is_none_or(|b| b.config_name == "a" && b.id != newest.id));
         let paired = Revision::with_previous(blue);
         assert_eq!(
             paired[0].1.as_ref().map(|r| r.id),

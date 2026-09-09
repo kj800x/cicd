@@ -38,17 +38,17 @@ fn format_short_sha(sha: &str) -> &str {
 }
 
 /// How a parameter's value is shown: `branch:sha` for a tracked commit,
-/// `sha` alone for a pin, the raw value for everything else.
+/// `pinned sha` for a pinned one, the bare tag or value for everything
+/// else. A tag's range is not repeated on every line; the value says
+/// enough, and the revision detail shows the channel.
 fn show(p: &RevisionParameter) -> String {
-    let value = if p.kind == "commit" {
-        format_short_sha(&p.value).to_string()
-    } else {
-        p.value.clone()
-    };
+    if p.kind != "commit" {
+        return p.value.clone();
+    }
+    let value = format_short_sha(&p.value);
     match &p.branch {
         Some(b) if !b.is_empty() => format!("{b}:{value}"),
-        _ if p.kind == "commit" || p.kind == "tag" => format!("pinned {value}"),
-        _ => value,
+        _ => format!("pinned {value}"),
     }
 }
 
@@ -190,6 +190,7 @@ mod tests {
             config_branch: Some("master".into()),
             config_version_hash: None,
             patches: None,
+            temporary: false,
             parameters: params,
         }
     }

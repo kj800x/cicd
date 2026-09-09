@@ -21,6 +21,7 @@ use crate::db::git_branch::GitBranchEgg;
 use crate::db::git_commit::{GitCommit, GitCommitEgg};
 use crate::db::git_commit_build::GitCommitBuild;
 use crate::db::git_repo::GitRepo;
+use crate::db::revision::{NewRevision, Revision, RevisionParameter};
 use crate::db::test_support::migrated_memory_pool;
 use crate::error::AppResult;
 use crate::kubernetes::deploy_config::{
@@ -32,7 +33,7 @@ use crate::kubernetes::repo::{Repository, ShaMaybeBranch};
 use crate::kubernetes::selections::{Choice, Durability, Selection};
 use crate::kubernetes::DeployConfig;
 use crate::web::preview::{self, TagResolutions};
-use crate::web::{deploy_form, header, Action};
+use crate::web::{deploy_form, deploy_history, feed, header, home, Action};
 
 const OLD_SHA: &str = "a1b2c3d0e77a41cb9d2f8e3b7a05c164de9038aa";
 const NEW_SHA: &str = "e4f5a6b0d33c9a17bb4419e0cf7a2b81de905cc4";
@@ -226,6 +227,46 @@ fn config(name: &str) -> DeployConfig {
     );
     dc.status = Some(status);
     dc
+}
+
+/// The alldex-rs config as a temporary deployment: SHA tracking a fix
+/// branch, NGINX pinned, one standing and one temporary patch.
+fn advanced_state() -> DeployConfig {
+    let mut dc = config("alldex-rs");
+    let mut track = Selection::track("fix/upload-timeout", Durability::Temporary)
+        .with_note(Some("advanced deploy"), Some("kevin"));
+    track.since = Some(ago(2 * 3_600_000));
+    dc.spec.spec.selections.insert(SHA_PARAMETER.into(), track);
+    let mut pin = Selection::pin("1.27.4", Durability::Temporary);
+    pin.since = Some(ago(2 * 3_600_000));
+    dc.spec.spec.selections.insert("NGINX".into(), pin);
+    dc.spec.spec.patches = vec![
+        env_patch(
+            Durability::Standing,
+            "point at the new S3 endpoint",
+            86_400_000,
+        ),
+        env_patch(Durability::Temporary, "load test", 2 * 3_600_000),
+    ];
+    if let Some(status) = dc.status.as_mut() {
+        status.autodeploy = Some(false);
+        status.parameters.insert(
+            SHA_PARAMETER.into(),
+            ParameterValue::Commit {
+                value: FIX_SHA.into(),
+                branch: Some("fix/upload-timeout".into()),
+            },
+        );
+        status.config = Some(ShaMaybeBranch {
+            sha: NEW_SHA.into(),
+            branch: Some("master".into()),
+        });
+    }
+    dc
+}
+
+fn paperless_like_alldex(dc: &DeployConfig) -> DeployConfig {
+    dc.clone()
 }
 
 fn env_patch(durability: Durability, note: &str, age_ms: i64) -> ManifestPatch {
@@ -468,6 +509,185 @@ async fn write_pages() -> AppResult<()> {
         let html = render_deploy(&conn, &all, scenario).await;
         std::fs::write(format!("{dir}/{file}"), html)?;
     }
+
+    // Revisions: a day of activity across the configs, oldest first.
+    let param = |name: &str, kind: &str, value: &str, branch: Option<&str>| RevisionParameter {
+        name: name.into(),
+        kind: kind.into(),
+        value: value.into(),
+        branch: branch.map(String::from),
+    };
+    let patch_json = |patches: &[ManifestPatch]| serde_json::to_string(patches).ok();
+    let standing_patch = env_patch(Durability::Standing, "point at the new S3 endpoint", 0);
+    let rev = |config: &str,
+               actor: &str,
+               action: &str,
+               reason: Option<&str>,
+               config_sha: &str,
+               params: Vec<RevisionParameter>,
+               patches: Option<String>,
+               temporary: bool| NewRevision {
+        config_name: config.into(),
+        actor: actor.into(),
+        action: action.into(),
+        reason: reason.map(String::from),
+        config_sha: Some(config_sha.into()),
+        config_branch: Some("master".into()),
+        config_version_hash: None,
+        patches,
+        temporary,
+        parameters: params,
+    };
+    conn.execute(
+        "INSERT INTO deploy_config (name, team, kind, config_repo_id, artifact_repo_id, active) VALUES ('alldex-rs','infra','service',1,1,1), ('grafana','infra','service',1,1,1), ('paperless','media','service',1,1,1), ('plex','media','service',1,1,1)",
+        [],
+    )?;
+    let seeds = vec![
+        (0, rev("alldex-rs", "web", "deploy", None, OLD_SHA, vec![param("SHA", "commit", OLD_SHA, Some("master")), param("NGINX", "tag", "1.27.4", Some("1.27.*"))], None, false)),
+        (0, rev("alldex-rs", "kevin", "deploy", None, OLD_SHA, vec![param("SHA", "commit", OLD_SHA, Some("master")), param("NGINX", "tag", "1.27.4", Some("1.27.*"))], None, false)),
+        (0, rev("alldex-rs", "kevin", "patch", Some("added patch: standing deployment.yaml:Deployment/alldex-rs replace /spec/template/spec/containers/0/env/1/value"), OLD_SHA, vec![param("SHA", "commit", OLD_SHA, Some("master")), param("NGINX", "tag", "1.27.4", Some("1.27.*"))], patch_json(&[standing_patch.clone()]), false)),
+        (0, rev("grafana", "web", "deploy", None, OLD_SHA, vec![param("SHA", "commit", OLD_SHA, Some("master")), param("GRAFANA", "tag", "11.2.0", Some("11.*"))], None, false)),
+        (1, rev("paperless", "autodeploy", "deploy", None, OLD_SHA, vec![param("SHA", "commit", OLD_SHA, Some("master"))], None, false)),
+        (1, rev("plex", "autodeploy", "deploy", None, OLD_SHA, vec![param("SHA", "commit", OLD_SHA, Some("master")), param("PLEX", "tag", "1.41.2", Some("1.41.*"))], None, false)),
+        (1, rev("paperless", "autodeploy", "deploy", None, NEW_SHA, vec![param("SHA", "commit", NEW_SHA, Some("master"))], None, false)),
+        (1, rev("plex", "autodeploy", "deploy", None, OLD_SHA, vec![param("SHA", "commit", OLD_SHA, Some("master")), param("PLEX", "tag", "1.41.3", Some("1.41.*"))], None, false)),
+        (1, rev("alldex-rs", "kevin", "deploy", None, NEW_SHA, vec![param("SHA", "commit", FIX_SHA, Some("fix/upload-timeout")), param("NGINX", "tag", "1.27.4", None)], patch_json(&[standing_patch.clone(), env_patch(Durability::Temporary, "load test", 0)]), true)),
+        (1, rev("grafana", "web", "deploy", Some("rollback to revision 4: 11.2 dashboards broke the ZFS board"), OLD_SHA, vec![param("SHA", "commit", OLD_SHA, Some("master")), param("GRAFANA", "tag", "11.1.4", None)], None, false)),
+    ];
+    let mut ids = Vec::new();
+    for (i, (_day, new)) in seeds.into_iter().enumerate() {
+        let recorded = Revision::record(&conn, new)?;
+        // Spread the revisions over yesterday and today.
+        // Yesterday's four spread out; today's autodeploys a few minutes
+        // apart so they read as a burst, then the two human deploys.
+        let at = match i {
+            0..=3 => now_ms() - 86_400_000 + (i as i64) * 3_600_000 * 2,
+            4..=7 => now_ms() - 60 * 60_000 + (i as i64 - 4) * 4 * 60_000,
+            8 => now_ms() - 20 * 60_000,
+            _ => now_ms() - 5 * 60_000,
+        };
+        conn.execute(
+            "UPDATE revision SET created_at = ?1 WHERE id = ?2",
+            rusqlite::params![at, recorded.id],
+        )?;
+        ids.push(recorded.id);
+    }
+
+    let page_css = |markup: String| {
+        markup.replace(
+            "<link rel=\"stylesheet\" href=\"/res/styles.css\">",
+            &format!("<style>{}</style>", css()),
+        )
+    };
+    let strips = html! {
+        (crate::web::blockers::render_held_strip(&Blocker::all_active(&conn)?))
+        (crate::web::selections::render_temporary_strip(&all))
+    };
+    let scope = deploy_history::Scope::Teams(vec!["infra".into(), "media".into()]);
+    std::fs::write(
+        format!("{dir}/history-feed.html"),
+        page_css(deploy_history::render_feed_page(&conn, &scope, strips.clone()).into_string()),
+    )?;
+    let grafana_blockers = Blocker::active_for(&conn, "grafana")?;
+    let config_page = deploy_history::render_config_page(
+        &conn,
+        "alldex-rs",
+        Some(&paperless_like_alldex(&advanced_state())),
+        &[],
+        strips.clone(),
+    )
+    .into_string();
+    // Open the roll-back panel for the second newest deploy revision.
+    let target = Revision::list_for(&conn, "alldex-rs", 10)?
+        .into_iter()
+        .filter(|r| r.action == "deploy")
+        .nth(1);
+    let panel = target
+        .map(|t| deploy_history::render_rollback_panel(&advanced_state(), &t).into_string())
+        .unwrap_or_default();
+    std::fs::write(
+        format!("{dir}/history-config.html"),
+        page_css(config_page.replace(
+            "<div id=\"rollback-panel\"></div>",
+            &format!("<div id=\"rollback-panel\">{panel}</div>"),
+        )),
+    )?;
+    let _ = grafana_blockers;
+    if let Some(last) = ids.last() {
+        let revision =
+            Revision::get(&conn, *last)?.ok_or(crate::error::AppError::NotFound("rev".into()))?;
+        let previous = revision.previous(&conn)?;
+        std::fs::write(
+            format!("{dir}/revision.html"),
+            page_css(
+                deploy_history::render_revision_page(
+                    &conn,
+                    &revision,
+                    previous.as_ref(),
+                    strips.clone(),
+                )
+                .into_string(),
+            ),
+        )?;
+    }
+
+    // Home, populated and quiet.
+    let revisions = deploy_history::revisions_for_teams(&conn, &["infra".into(), "media".into()])?;
+    let mut activity = feed::group_bursts(feed::entries(revisions));
+    activity.truncate(6);
+    let mut home_configs = all.clone();
+    home_configs.push(advanced_state());
+    let data = home::HomeData {
+        configs: home_configs.clone(),
+        blockers: Blocker::all_active(&conn)?,
+        unhealthy: vec![home::Unhealthy { name: "lerke".into(), message: "Deployment lerke: Ready 0 / 2 · CrashLoopBackOff".into(), since: Some(now_ms() - 11 * 3_600_000) }],
+        healthy_count: home_configs.len() - 1,
+        drift: vec![
+            home::Drift { name: "alldex-rs".into(), lines: vec![
+                home::DriftLine::Moves { name: "SHA".into(), from: "9c31be7".into(), to: "2f9ab30".into(), channel: "fix/upload-timeout".into() },
+                home::DriftLine::HeldBack { name: "NGINX".into(), value: "1.27.4".into(), available: "1.27.6".into() },
+            ], autodeploy: false, temporary: true, pinned: true },
+            home::Drift { name: "nginx-cache".into(), lines: vec![
+                home::DriftLine::HeldBack { name: "NGINX".into(), value: "1.27.0".into(), available: "1.27.6".into() },
+            ], autodeploy: true, temporary: false, pinned: true },
+        ],
+        activity: activity.clone(),
+        standing: vec![
+            home::Standing { name: "nginx-cache".into(), what: "NGINX pinned 1.27.0".into(), since: Some(now_ms() - 86 * 86_400_000) },
+            home::Standing { name: "alldex-rs".into(), what: "patch: replace /spec/template/spec/containers/0/env/1/value on Deployment/alldex-rs".into(), since: Some(now_ms() - 86_400_000) },
+        ],
+        last_deploy: Some(now_ms() - 20 * 60_000),
+        teams: vec!["infra".into(), "media".into()],
+        selected_team: None,
+    };
+    std::fs::write(
+        format!("{dir}/home.html"),
+        page_css(home::render_home(&data, strips.clone(), true).into_string()),
+    )?;
+    let quiet = home::HomeData {
+        configs: home_configs.clone(),
+        blockers: vec![],
+        unhealthy: vec![],
+        healthy_count: home_configs.len(),
+        drift: vec![],
+        activity,
+        standing: data.standing,
+        last_deploy: data.last_deploy,
+        teams: data.teams,
+        selected_team: None,
+    };
+    let mut quiet_configs = quiet.configs.clone();
+    quiet_configs.retain(|c| !c.is_temporary_deployment());
+    let healthy_count = quiet_configs.len();
+    let quiet = home::HomeData {
+        configs: quiet_configs,
+        healthy_count,
+        ..quiet
+    };
+    std::fs::write(
+        format!("{dir}/home-quiet.html"),
+        page_css(home::render_home(&quiet, html! {}, true).into_string()),
+    )?;
 
     let active = Blocker::all_active(&conn)?;
     let cleared = Blocker::recently_cleared(&conn, 20)?;

@@ -36,6 +36,14 @@ impl DeployConfig {
         }
     }
 
+    /// Every team an active config belongs to, sorted.
+    pub fn all_teams(conn: &PooledConnection<SqliteConnectionManager>) -> AppResult<Vec<String>> {
+        let mut stmt =
+            conn.prepare("SELECT DISTINCT team FROM deploy_config WHERE active = 1 ORDER BY team")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn get_by_config_repo_id(
         config_repo_id: u64,
         conn: &PooledConnection<SqliteConnectionManager>,

@@ -181,14 +181,6 @@ pub async fn branch_grid_fragment(
         .body(fragment.into_string())
 }
 
-/// Root redirect handler - redirects to deploy configs page
-#[get("/")]
-pub async fn root() -> impl Responder {
-    HttpResponse::Found()
-        .append_header(("Location", "/deploy"))
-        .finish()
-}
-
 /// Generate HTML for the dashboard homepage that displays recent branches and their commits
 #[get("/branches")]
 pub async fn index(

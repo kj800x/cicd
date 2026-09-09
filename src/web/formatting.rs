@@ -57,6 +57,62 @@ pub fn format_date(timestamp_ms: i64) -> String {
     }
 }
 
+/// `09:41`, in Eastern time.
+pub fn format_time_of_day(timestamp_ms: i64) -> String {
+    match chrono::Utc.timestamp_millis_opt(timestamp_ms).single() {
+        Some(t) => t
+            .with_timezone(&chrono_tz::America::New_York)
+            .format("%H:%M")
+            .to_string(),
+        None => "--:--".to_string(),
+    }
+}
+
+/// `2026-09-08 09:26:41`, in Eastern time.
+pub fn format_datetime(timestamp_ms: i64) -> String {
+    match chrono::Utc.timestamp_millis_opt(timestamp_ms).single() {
+        Some(t) => t
+            .with_timezone(&chrono_tz::America::New_York)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string(),
+        None => "invalid".to_string(),
+    }
+}
+
+/// The calendar day of a timestamp in Eastern time.
+pub fn local_date(timestamp_ms: i64) -> Option<chrono::NaiveDate> {
+    chrono::Utc
+        .timestamp_millis_opt(timestamp_ms)
+        .single()
+        .map(|t| t.with_timezone(&chrono_tz::America::New_York).date_naive())
+}
+
+/// How a day is named in a feed: `Today`, `Yesterday`, the weekday within
+/// the last week, otherwise the date.
+pub fn day_label(day: chrono::NaiveDate, today: chrono::NaiveDate) -> String {
+    let age = (today - day).num_days();
+    match age {
+        0 => "Today".to_string(),
+        1 => "Yesterday".to_string(),
+        2..=6 => day.format("%A").to_string(),
+        _ => day.format("%b %-e").to_string(),
+    }
+}
+
+/// `09:26 today`, `18:12 yesterday`, `2026-08-30` for older.
+pub fn format_when(timestamp_ms: i64) -> String {
+    let today = chrono::Utc::now()
+        .with_timezone(&chrono_tz::America::New_York)
+        .date_naive();
+    match local_date(timestamp_ms) {
+        Some(day) if day == today => format!("{} today", format_time_of_day(timestamp_ms)),
+        Some(day) if (today - day).num_days() == 1 => {
+            format!("{} yesterday", format_time_of_day(timestamp_ms))
+        }
+        _ => format_date(timestamp_ms),
+    }
+}
+
 /// Milliseconds since the epoch for an RFC 3339 timestamp, as selections
 /// and patches record their `since`.
 pub fn rfc3339_to_ms(value: &str) -> Option<i64> {
@@ -117,6 +173,18 @@ mod tests {
         let now = chrono::Utc::now().timestamp_millis();
         assert_eq!(format_ago_short(now), "just now");
         assert_eq!(format_ago_short(now - 2 * 3_600_000), "2h ago");
+    }
+
+    #[test]
+    fn day_labels() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 9, 8).unwrap_or_default();
+        let d = |days: i64| today - chrono::Duration::days(days);
+        assert_eq!(day_label(d(0), today), "Today");
+        assert_eq!(day_label(d(1), today), "Yesterday");
+        assert_eq!(day_label(d(3), today), "Saturday");
+        assert_eq!(day_label(d(9), today), "Aug 30");
+        assert_eq!(format_time_of_day(0), "19:00");
+        assert_eq!(format_datetime(0), "1969-12-31 19:00:00");
     }
 
     #[test]

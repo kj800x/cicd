@@ -812,7 +812,12 @@ pub async fn run_action(
     if let Some(mut new) = NewRevision::from_deploy_action(&deploy_action, &effective, &conn, actor)
     {
         if let Action::Rollback { revision } = action {
-            new.reason = Some(format!("rollback to revision {revision}"));
+            new.reason = Some(match intent.note.as_deref().map(str::trim) {
+                Some(note) if !note.is_empty() => {
+                    format!("rollback to revision {revision}: {note}")
+                }
+                _ => format!("rollback to revision {revision}"),
+            });
         }
         if reason.is_some() {
             new.reason = reason.clone();
@@ -827,14 +832,13 @@ pub async fn run_action(
     // Selections are untouched, so clearing the blocker and deploying latest
     // resumes exactly what was being tracked before.
     if let Action::Rollback { revision } = action {
-        match Blocker::create(
-            &conn,
-            &name,
-            &format!(
+        let reason = match intent.note.as_deref().map(str::trim) {
+            Some(note) if !note.is_empty() => format!("Rolled back to revision {revision}: {note}"),
+            _ => format!(
                 "Rolled back to revision {revision}; clear when it is safe to move forward again"
             ),
-            actor,
-        ) {
+        };
+        match Blocker::create(&conn, &name, &reason, actor) {
             Ok(b) => log::info!("Blocker {} added on {} after rollback", b.id, name),
             Err(e) => log::error!("Failed to add rollback blocker on {}: {}", name, e),
         }

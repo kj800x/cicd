@@ -326,6 +326,7 @@ fn revision_json(r: &Revision) -> Value {
         "reason": r.reason,
         "config_sha": r.config_sha,
         "config_branch": r.config_branch,
+        "temporary": r.temporary,
         "parameters": r.parameters.iter().map(|p| json!({
             "name": p.name,
             "type": p.kind,

@@ -45,16 +45,14 @@ pub async fn rollback(
     }
 
     let action = Action::Rollback { revision };
-    let result = crate::deploys::run_action(
-        &action,
-        &config,
-        &client,
-        &octocrabs,
-        &pool,
-        "web",
-        &crate::deploys::SelectionIntent::default(),
-    )
-    .await;
+    let intent = crate::deploys::SelectionIntent {
+        note: form.get("reason").cloned(),
+        by: Some("web".to_string()),
+        ..Default::default()
+    };
+    let result =
+        crate::deploys::run_action(&action, &config, &client, &octocrabs, &pool, "web", &intent)
+            .await;
     crate::metrics::get().deploy_actions.add(
         1,
         &[
@@ -82,7 +80,7 @@ pub async fn rollback(
 
     let return_url = match form.get("return_url") {
         Some(url) if url.starts_with('/') && !url.starts_with("//") => url.clone(),
-        _ => format!("/deploy-history?name={name}"),
+        _ => format!("/deploy-history/{name}"),
     };
     HttpResponse::SeeOther()
         .append_header(("Location", return_url))

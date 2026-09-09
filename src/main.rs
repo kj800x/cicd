@@ -55,8 +55,8 @@ use cicd::serve_static_file;
 use web::{
     add_blocker, all_recent_builds, bootstrap, clear_blocker, deploy_config, deploy_history,
     deploy_history_index, index, resource_logs_download, resource_logs_fragment,
-    resource_logs_page, rollback, root, set_parameter, settings_fragment, settings_index,
-    toggle_repo, toggle_team,
+    resource_logs_page, rollback, set_parameter, settings_fragment, settings_index, toggle_repo,
+    toggle_team,
 };
 
 async fn start_http(
@@ -113,7 +113,7 @@ async fn start_http(
             .app_data(Data::new(octocrabs.clone()))
             .app_data(Data::new(pool.clone()))
             .wrap(middleware::Logger::default())
-            .service(root)
+            .service(web::home)
             .service(deploy_configs)
             .service(web::blockers_page)
             .service(web::add_blocker_for)
@@ -124,6 +124,8 @@ async fn start_http(
             .service(deploy_history)
             .service(deploy_history_index)
             .service(web::deploy_history_fragment)
+            .service(web::revision_detail)
+            .service(web::rollback_panel)
             .service(settings_index)
             .service(settings_fragment)
             .service(bootstrap)

@@ -48,7 +48,7 @@ pub enum ParameterSource {
 }
 
 /// A container image split the way watchtower keys it.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ImageRef {
     pub registry: String,
     pub name: String,

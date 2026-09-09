@@ -26,7 +26,7 @@ use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
 
 #[derive(Clone, Debug, PartialEq)]
-enum HealthStatus {
+pub enum HealthStatus {
     Healthy,
     Warning,
     Error,
@@ -109,7 +109,7 @@ fn check_repo_health(
 }
 
 /// Check if a deploy config's resources are healthy
-async fn check_deploy_config_health(
+pub async fn check_deploy_config_health(
     config: &DeployConfig,
     client: &Client,
 ) -> AppResult<(HealthStatus, Option<String>)> {

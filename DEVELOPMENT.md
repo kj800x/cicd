@@ -28,7 +28,9 @@ src/
 │   ├── preview.rs          # Deploy page right column (parameter rows, alerts, resources)
 │   ├── patches.rs          # Patch list, the add-patch flow, patch routes
 │   ├── blockers.rs         # Blockers page, held strip, blocker routes
-│   ├── deploy_history.rs   # Deploy history page
+│   ├── deploy_history.rs   # History feed, per-config history, revision detail, roll-back panel
+│   ├── feed.rs             # Revision entries: verbs, tones, bursts, day groups
+│   ├── home.rs             # Home: what needs a human
 │   └── ...                 # One file per page/feature
 ├── kubernetes/             # Kubernetes integration
 │   ├── controller.rs       # CRD reconciliation loop
@@ -359,6 +361,11 @@ html! {
 - The preview prints one row per parameter, `NAME: current → new (channel)`, with `CONFIG` first; unchanged rows print one value. Tag parameters are resolved through watchtower on every render; an unresolvable row grows the one-shot input
 - When the deploy moves the config commit, the preview reads the manifests at that commit to list resources that will be created or removed. `config_sync::fetch_deploy_configs_cached` memoises `.deploy/` per full sha for the process, so one GitHub fetch serves every poll after the first
 - Blockers are created and cleared on `/blockers`; the deploy page only shows the held strip, the alert and disabled deploy actions
+
+**History and home:**
+- `/deploy-history` is a feed grouped by day (`web/feed.rs`): each revision is one sentence (verb, actor, reason) over the changes that matter in the `revision_diff` syntax. Consecutive autodeploys within ten minutes collapse into one disclosure. `/deploy-history/{name}` adds a state band (tracking, overrides, patches, blockers, autodeploy), marks the revision on the cluster, and offers Roll back on older deploy revisions; the confirmation opens beside the feed (`/fragments/rollback/{name}/{id}`) and posts a reason that becomes the blocker's. `/revisions/{id}` is the immutable detail page
+- Revisions carry a `temporary` column so history can badge a temporary deploy without reconstructing selections
+- `/` is home: blocked configs, temporary deployments, unhealthy deploys (the health page's check), configs drifted from latest (database for commits, one watchtower lookup per image for tags), recent activity and standing overrides. Sections render only when non-empty; when the first three are empty the heading turns green over a four-fact band
 - `parameters:` in `.deploy/<name>.yaml` declares parameters: `{type: commit, owner, repo, branch}` or `{type: value, default}`. `artifactRepo` is sugar for a commit parameter named `SHA`. Every parameter is substituted for `$NAME` in manifests; a declared parameter without a deployed value refuses to render
 - Value parameters resolve to their pinned value or default at deploy time; set them from the advanced form ("Deploy advanced" on `/deploy`) or the `set_parameter` MCP tool
 - "End temporary deployment" (deploy page action, `end_temporary_deployment` MCP tool) clears every temporary selection and removes every temporary patch in one step, then deploys latest; standing overrides stay. `deploys::temporary_changes` computes what it would touch
