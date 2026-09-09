@@ -805,8 +805,18 @@ pub async fn run_action(
         }
     }
 
-    // Best-effort: mirror the new state into the GitHub Deployments API.
-    crate::github_deployments::report_deploy_action(octocrabs, config, &deploy_action).await;
+    // Best-effort: mirror the new state into the GitHub Deployments API, in
+    // the background. Two GitHub round trips were on the path between the
+    // click and the response, and nothing here depends on them.
+    {
+        let octocrabs = octocrabs.clone();
+        let config = config.clone();
+        let deploy_action = deploy_action.clone();
+        tokio::spawn(async move {
+            crate::github_deployments::report_deploy_action(&octocrabs, &config, &deploy_action)
+                .await;
+        });
+    }
 
     let conn = pool.get()?;
     if let Some(mut new) = NewRevision::from_deploy_action(&deploy_action, &effective, &conn, actor)

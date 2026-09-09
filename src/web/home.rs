@@ -648,6 +648,7 @@ pub fn render_home(data: &HomeData, strips: Markup, cluster_reachable: bool) -> 
 pub async fn home(
     req: actix_web::HttpRequest,
     pool: web::Data<Pool<SqliteConnectionManager>>,
+    client: Option<web::Data<Client>>,
     query: web::Query<HashMap<String, String>>,
 ) -> impl Responder {
     let conn = match pool.get() {
@@ -657,7 +658,9 @@ pub async fn home(
             return HttpResponse::InternalServerError().body("Failed to connect to database");
         }
     };
-    let client = Client::try_default().await.ok();
+    // The shared client from app data; building one per request costs a
+    // config load and a TLS setup each time.
+    let client: Option<Client> = client.map(|c| c.get_ref().clone());
     let all_configs = match &client {
         Some(client) => get_all_deploy_configs(client).await.unwrap_or_else(|e| {
             log::warn!("Failed to list deploy configs for home: {}", e);
