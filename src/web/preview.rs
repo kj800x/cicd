@@ -85,7 +85,7 @@ pub async fn resolve_tags(prepared: &Prepared, typed: &BTreeMap<String, String>)
             continue;
         }
         let result = resolve_tag_parameter(
-            Watchtower::global(),
+            Watchtower::for_preview(),
             &prepared.effective,
             pname,
             typed.get(pname).map(String::as_str),

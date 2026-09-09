@@ -545,7 +545,7 @@ pub fn render_rollback_panel(config: &DeployConfig, revision: &Revision) -> Mark
                 button.primary-button.danger.block type="submit" { "Roll back and hold" }
             }
             div.rollback-panel__cancel {
-                a href=(format!("/deploy-history/{name}")) hx-get="/fragments/rollback/closed" hx-target="#rollback-panel" hx-swap="innerHTML" { "Cancel" }
+                a href=(format!("/deploy-history/{name}")) hx-get=(format!("/fragments/rollback/{name}/closed")) hx-target="#rollback-panel" hx-swap="innerHTML" { "Cancel" }
             }
         }
     }
@@ -816,7 +816,8 @@ pub async fn rollback_panel(
     path: web::Path<(String, String)>,
 ) -> impl Responder {
     let (name, revision) = path.into_inner();
-    if name == "closed" {
+    // The Cancel link: empty the panel.
+    if revision == "closed" {
         return page(html! {});
     }
     let Ok(revision) = revision.parse::<i64>() else {

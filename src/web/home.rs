@@ -115,7 +115,7 @@ async fn latest_tags(
 ) -> HashMap<(ImageRef, String), String> {
     let lookups = wanted
         .keys()
-        .map(|image| async move { (image.clone(), Watchtower::global().lookup(image).await) });
+        .map(|image| async move { (image.clone(), Watchtower::for_preview().lookup(image).await) });
     let mut out = HashMap::new();
     for (image, result) in join_all(lookups).await {
         let repo = match result {

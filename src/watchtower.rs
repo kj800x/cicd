@@ -96,23 +96,39 @@ pub struct EventsPage {
 }
 
 static GLOBAL: OnceLock<Watchtower> = OnceLock::new();
+static PREVIEW: OnceLock<Watchtower> = OnceLock::new();
 
 impl Watchtower {
     pub fn new(base: &str) -> Self {
+        Self::with_timeout(base, std::time::Duration::from_secs(10))
+    }
+
+    fn with_timeout(base: &str, timeout: std::time::Duration) -> Self {
         Watchtower {
             base: base.trim_end_matches('/').to_string(),
             http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
+                .timeout(timeout)
                 .build()
                 .unwrap_or_default(),
         }
     }
 
+    fn configured_url() -> String {
+        std::env::var("WATCHTOWER_URL").unwrap_or_else(|_| DEFAULT_URL.to_string())
+    }
+
     /// The process-wide client, configured from `WATCHTOWER_URL` on first use.
     pub fn global() -> &'static Watchtower {
-        GLOBAL.get_or_init(|| {
-            let url = std::env::var("WATCHTOWER_URL").unwrap_or_else(|_| DEFAULT_URL.to_string());
-            Watchtower::new(&url)
+        GLOBAL.get_or_init(|| Watchtower::new(&Self::configured_url()))
+    }
+
+    /// The same service with a short timeout, for pages that only show
+    /// what a tag would resolve to. A page must not hang on watchtower;
+    /// a deploy still goes through [`Watchtower::global`] and its longer
+    /// patience.
+    pub fn for_preview() -> &'static Watchtower {
+        PREVIEW.get_or_init(|| {
+            Watchtower::with_timeout(&Self::configured_url(), std::time::Duration::from_secs(3))
         })
     }
 
