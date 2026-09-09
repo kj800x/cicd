@@ -16,7 +16,9 @@
 //! (`4.0.19.2979` above `4.0.19`) and is otherwise ignored.
 //!
 //! A variant is a prerelease: a range never picks one, `=2.1.2-alpine`
-//! does.
+//! does. A parameter that follows a variant (`variant: alpine`) sees only
+//! the tags with exactly that suffix, compared on the version before it,
+//! so `^2.1.2` then moves from `2.1.2-alpine` to `2.1.3-alpine`.
 
 use semver::{BuildMetadata, Prerelease, Version, VersionReq};
 
@@ -77,12 +79,15 @@ fn components(version: &str) -> Option<([u64; 4], usize)> {
 }
 
 /// The semver version a candidate matches as, and its rank; `None` when
-/// the version or variant is not something semver can hold.
-fn parsed(candidate: &Candidate) -> Option<(Version, Rank)> {
+/// the version or variant is not something semver can hold, or when the
+/// parameter follows a variant and this tag is not of it.
+fn parsed(candidate: &Candidate, variant: Option<&str>) -> Option<(Version, Rank)> {
     let (components, parts) = components(candidate.version)?;
-    let pre = match candidate.variant {
-        Some(variant) => Prerelease::new(variant).ok()?,
-        None => Prerelease::EMPTY,
+    let pre = match (variant, candidate.variant) {
+        (Some(wanted), Some(actual)) if wanted == actual => Prerelease::EMPTY,
+        (Some(_), _) => return None,
+        (None, Some(actual)) => Prerelease::new(actual).ok()?,
+        (None, None) => Prerelease::EMPTY,
     };
     let version = Version {
         major: components[0],
@@ -101,7 +106,7 @@ fn parsed(candidate: &Candidate) -> Option<(Version, Rank)> {
 
 /// How a candidate orders against others of the same image.
 pub fn rank(candidate: &Candidate) -> Option<Rank> {
-    parsed(candidate).map(|(_, rank)| rank)
+    parsed(candidate, None).map(|(_, rank)| rank)
 }
 
 /// A pattern that a person typed: a semver range.
@@ -110,15 +115,17 @@ pub fn parse_pattern(pattern: &str) -> Result<VersionReq, String> {
 }
 
 /// The highest-ranked tag among `candidates` that satisfies `pattern`, or
-/// `None` when no tag qualifies.
+/// `None` when no tag qualifies. With a `variant`, only tags of that
+/// variant are candidates.
 pub fn highest_matching<'a>(
     candidates: impl IntoIterator<Item = Candidate<'a>>,
     pattern: &str,
+    variant: Option<&str>,
 ) -> Result<Option<String>, String> {
     let req = parse_pattern(pattern)?;
     let mut best: Option<(Rank, String)> = None;
     for candidate in candidates {
-        let Some((version, rank)) = parsed(&candidate) else {
+        let Some((version, rank)) = parsed(&candidate, variant) else {
             continue;
         };
         if !req.matches(&version) {
@@ -132,9 +139,9 @@ pub fn highest_matching<'a>(
     Ok(best.map(|(_, tag)| tag))
 }
 
-/// Whether one candidate satisfies a pattern.
-pub fn matches(candidate: &Candidate, pattern: &str) -> bool {
-    match (parsed(candidate), parse_pattern(pattern)) {
+/// Whether one candidate satisfies a pattern, for the variant followed.
+pub fn matches(candidate: &Candidate, pattern: &str, variant: Option<&str>) -> bool {
+    match (parsed(candidate, variant), parse_pattern(pattern)) {
         (Some((version, _)), Ok(req)) => req.matches(&version),
         _ => false,
     }
@@ -156,7 +163,11 @@ mod tests {
     }
 
     fn best(tags: &[&str], pattern: &str) -> Option<String> {
-        highest_matching(tags.iter().map(|t| read(t)), pattern).unwrap()
+        highest_matching(tags.iter().map(|t| read(t)), pattern, None).unwrap()
+    }
+
+    fn best_of(tags: &[&str], pattern: &str, variant: &str) -> Option<String> {
+        highest_matching(tags.iter().map(|t| read(t)), pattern, Some(variant)).unwrap()
     }
 
     #[test]
@@ -208,11 +219,11 @@ mod tests {
             Some("1.27.3-alpine")
         );
         assert_eq!(best(&tags, "^2"), None);
-        assert!(highest_matching(tags.iter().map(|t| read(t)), "not a range").is_err());
-        assert!(matches(&read("1.27.3"), "~1.27"));
-        assert!(!matches(&read("1.28.0"), "~1.27"));
-        assert!(!matches(&read("1.27.3-alpine"), "^1.27"));
-        assert!(!matches(&read("latest"), "^1.27"), "no version");
+        assert!(highest_matching(tags.iter().map(|t| read(t)), "not a range", None).is_err());
+        assert!(matches(&read("1.27.3"), "~1.27", None));
+        assert!(!matches(&read("1.28.0"), "~1.27", None));
+        assert!(!matches(&read("1.27.3-alpine"), "^1.27", None));
+        assert!(!matches(&read("latest"), "^1.27", None), "no version");
     }
 
     #[test]
@@ -245,6 +256,53 @@ mod tests {
             rank(&Candidate::new("x", "5.2.3", Some("v2_0"))),
             None,
             "not semver"
+        );
+    }
+
+    #[test]
+    fn following_a_variant_sees_only_its_tags_compared_on_the_version() {
+        let mosquitto = [
+            "latest",
+            "2",
+            "2.1-alpine",
+            "2.1.1-alpine",
+            "2.1.2-alpine",
+            "2.1.3",
+            "2.1.3-openssl",
+        ];
+        assert_eq!(
+            best_of(&mosquitto, "^2.1.2", "alpine").as_deref(),
+            Some("2.1.2-alpine")
+        );
+        assert_eq!(
+            best_of(&mosquitto, "=2.1.1", "alpine").as_deref(),
+            Some("2.1.1-alpine")
+        );
+        assert_eq!(
+            best_of(&mosquitto, "^2.1.2", "openssl").as_deref(),
+            Some("2.1.3-openssl")
+        );
+        assert_eq!(best_of(&mosquitto, "^2.1.2", "bookworm"), None);
+        // Without a variant the same tags are prereleases, as before.
+        assert_eq!(best(&mosquitto, "^2.1.2").as_deref(), Some("2.1.3"));
+        assert!(matches(&read("2.1.3-alpine"), "^2.1.2", Some("alpine")));
+        assert!(
+            !matches(&read("2.1.3"), "^2.1.2", Some("alpine")),
+            "bare tag is not the variant"
+        );
+        assert!(
+            !matches(&read("2.1.3-alpine3.22"), "^2.1.2", Some("alpine")),
+            "exact suffix"
+        );
+        let minecraft = [
+            "2026.9.0",
+            "2026.9.0-java25",
+            "2026.9.1-java25",
+            "2026.9.1-java21",
+        ];
+        assert_eq!(
+            best_of(&minecraft, "^2026.9.0", "java25").as_deref(),
+            Some("2026.9.1-java25")
         );
     }
 }

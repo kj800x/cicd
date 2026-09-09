@@ -500,7 +500,9 @@ fn parameter_rows(
                     one_shot: None,
                 });
             }
-            ParameterSource::Tag { pattern, .. } => {
+            ParameterSource::Tag {
+                pattern, variant, ..
+            } => {
                 let from_shown = deployed.get(pname).map(|v| Shown::plain(&v.rendered()));
                 let typed_value = typed.get(pname).cloned();
                 let to_target = if undeploys {
@@ -525,8 +527,10 @@ fn parameter_rows(
                     Some(format!("revision {}", rev.id))
                 } else {
                     Some(match selection.mode() {
-                        Mode::Default => pattern.clone(),
-                        Mode::Track(p) => p.to_string(),
+                        Mode::Default => {
+                            ParameterSource::channel_label(pattern, variant.as_deref())
+                        }
+                        Mode::Track(p) => ParameterSource::channel_label(p, variant.as_deref()),
                         Mode::Pin(_) => "pinned".to_string(),
                     })
                 };

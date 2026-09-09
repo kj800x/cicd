@@ -196,8 +196,10 @@ fn render_parameter_selector(
                         (describe_commit_choice(conn, config, &shown, branch))
                     }
                 }
-                ParameterSource::Tag { pattern, .. } => {
-                    (radio("default", html! { "Track default (" span.mono { (pattern) } ")" }))
+                ParameterSource::Tag {
+                    pattern, variant, ..
+                } => {
+                    (radio("default", html! { "Track default (" span.mono { (ParameterSource::channel_label(pattern, variant.as_deref())) } ")" }))
                     (radio("track", html! { "Track another range" }))
                     @if shown.kind == "track" { (text("track")) }
                     (radio("pin", html! { "Pin an exact tag" }))
