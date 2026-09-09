@@ -330,6 +330,9 @@
 /* Base Styles */
 body {
   font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  /* Default body text. Anything without its own font-size inherits this;
+     without it, unstyled text falls back to the browser's 16px. */
+  font-size: 12px;
   background-color: white;
   color: var(--text-color);
   margin: 0;
@@ -360,6 +363,7 @@ body {
 
 .header-logo {
   margin-right: 12px;
+  font-size: 16px;
 }
 
 .header-nav {
@@ -397,6 +401,7 @@ body {
   padding: 12px 0;
   margin-right: 24px;
   color: var(--text-color);
+  font-size: 16px;
   font-weight: 600;
   text-decoration: none;
 }
@@ -438,7 +443,7 @@ body {
 }
 
 .alert-header {
-  font-size: 1.4em;
+  font-size: 22px;
   margin-bottom: 4px;
   word-wrap: break-word;
   overflow-wrap: break-word;
@@ -2145,7 +2150,7 @@ header {
   }
 
   h1 {
-    font-size: 1.4em;
+    font-size: 22px;
     font-weight: 400;
     border-bottom: 2px solid var(--border-strong);
     margin: 0 0 16px;
@@ -3192,7 +3197,7 @@ header {
 
   .revision__head h1 {
     margin: 0;
-    font-size: 1.4em;
+    font-size: 22px;
     font-weight: 400;
     color: var(--text-link);
   }
