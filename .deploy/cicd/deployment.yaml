@@ -66,9 +66,13 @@ spec:
         - name: ghcr-kj800x
       serviceAccountName: cicd-operator
       volumes:
+        # The pod is pinned to the NAS (nodeSelector below), so the sqlite
+        # database is read straight from the local ZFS dataset. Over NFS
+        # from the same node every query paid lock and revalidation round
+        # trips, about 2 ms each, which made every page slow.
         - name: cicd-data
-          nfs:
+          hostPath:
             path: /data/services/cicd
-            server: 10.60.1.15
+            type: Directory
       nodeSelector:
         dedicated: nas
