@@ -319,6 +319,7 @@ mod tests {
                 active: true,
                 version: Some(t.to_string()),
                 variant: None,
+                build: None,
                 history: vec![],
             })
             .collect()
@@ -387,6 +388,7 @@ mod tests {
                         active: true,
                         version: Some(version.to_string()),
                         variant: (!variant.is_empty()).then(|| variant.to_string()),
+                        build: None,
                         history: vec![],
                     }
                 })

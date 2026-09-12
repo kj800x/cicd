@@ -51,6 +51,11 @@ pub struct Tag {
     /// What follows the first `-` of a versioned tag (`alpine`, `rc1`).
     #[serde(default)]
     pub variant: Option<String>,
+    /// Build metadata watchtower split off the version, as semver writes
+    /// it after a `+` (`ubu2604.ls48` for linuxserver's `12.0ubu2604-ls48`).
+    /// Rebuilds of one version differ only here.
+    #[serde(default)]
+    pub build: Option<String>,
     /// Newest first; empty until the digest has been fetched.
     #[serde(default)]
     pub history: Vec<TagDigest>,
@@ -96,6 +101,8 @@ pub struct Event {
     pub version: Option<String>,
     #[serde(default)]
     pub variant: Option<String>,
+    #[serde(default)]
+    pub build: Option<String>,
     pub kind: EventKind,
     pub digest: Option<String>,
     pub previous_digest: Option<String>,
