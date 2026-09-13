@@ -784,220 +784,247 @@ fn temporary_by(config: &DeployConfig) -> Option<String> {
 
 /// The whole page.
 pub fn render_home(data: &HomeData, strips: Markup, cluster_reachable: bool) -> Markup {
-    let temporary = data.temporary();
     let quiet = data.all_quiet();
-    let counts = [
-        (data.blockers.len(), "blocked"),
-        (temporary.len(), "temporary"),
-        (data.unhealthy.len(), "unhealthy"),
-        (data.drift.len(), "drifted"),
-        (data.building.len(), "building"),
-    ];
-    let summary: Vec<String> = counts
-        .iter()
-        .filter(|(n, _)| *n > 0)
-        .map(|(n, word)| format!("{n} {word}"))
-        .collect();
-    let autodeploy_on = data.configs.iter().filter(|c| c.autodeploy()).count();
+    let summary = summary_line(data);
     html! {
         (DOCTYPE)
         html lang="en" {
             head {
                 meta charset="UTF-8";
                 meta name="viewport" content="width=device-width, initial-scale=1.0";
-                title { @if quiet { "Nothing needs a human" } @else { (summary.join(" · ")) } }
+                title { @if quiet { "Nothing needs a human" } @else { (summary) } }
                 (header::stylesheet_link())
                 (header::scripts())
             }
-            body.home-page {
+            body.home-page hx-ext="morph" {
                 (header::render("home"))
-                (strips)
-                div class="content" {
-                    div.page-head {
-                        div {
-                            @if quiet {
-                                h1.page-head__title.page-head__title--ok { "Nothing needs a human" }
-                                div.page-head__sub { "No blockers, no temporary deployments, every rollout healthy" }
-                            } @else {
-                                h1.page-head__title { "Needs a human" }
-                                div.page-head__sub { (summary.join(" · ")) }
-                            }
-                        }
-                        (render_team_select("/", &data.teams, data.selected_team.as_deref()))
-                    }
-                    @if !cluster_reachable {
-                        div.preview-strip.preview-strip--neutral { "The cluster is not reachable; only what the database knows is shown." }
-                    }
-                    @if quiet {
-                        div.stat-strip {
-                            div.stat-strip__cell { div.eyebrow { "Deploy configs" } div.stat-strip__value { (data.configs.len()) } }
-                            div.stat-strip__cell { div.eyebrow { "Healthy" } div.stat-strip__value { span.status-indicator.status-success {} " " (data.healthy_count) " / " (data.configs.len()) } }
-                            div.stat-strip__cell { div.eyebrow { "Autodeploy on" } div.stat-strip__value { (autodeploy_on) } }
-                            div.stat-strip__cell { div.eyebrow { "Last deploy" } div.stat-strip__value { @match data.last_deploy { Some(t) => (formatting::format_when(t)), None => "none" } } }
-                        }
-                    }
-                    div.nags {
-                        @if !data.blockers.is_empty() {
-                            (section(html! { i class="fa fa-hand-paper-o" {} "Blocked configs" }, Some(html! { a href="/blockers" { "Blockers" } }), false, html! {
-                                @for b in &data.blockers {
-                                    div.nag-row.nag-row--fail {
-                                        a.nag-row__config href=(format!("/deploy?selected={}", b.config_name)) { (b.config_name) }
-                                        span.nag-row__text { (b.reason) }
-                                        span.nag-row__meta { (formatting::format_ago_short(b.created_at)) " · " span.mono { (b.created_by) } }
-                                        form.nag-row__action action=(format!("/api/blockers/{}/{}/clear", b.config_name, b.id)) method="post" {
-                                            input type="hidden" name="return_url" value="/";
-                                            button.link-button type="submit" { "Clear" }
-                                        }
-                                    }
-                                }
-                            }))
-                        }
-                        @if !temporary.is_empty() {
-                            (section(html! { i class="fa fa-flask" {} "Temporary deployments" }, None, false, html! {
-                                @for config in &temporary {
-                                    @let name = config.name_any();
-                                    div.nag-row.nag-row--warn.nag-row--wide {
-                                        a.nag-row__config href=(format!("/deploy?selected={name}")) { (name) }
-                                        span.nag-row__text.mono { (render_temporary_summary(config)) }
-                                        span.nag-row__meta {
-                                            @if let Some(since) = config.temporary_since() { (formatting::format_ago_short(since)) }
-                                            @if let Some(by) = temporary_by(config) { " · " span.mono { (by) } }
-                                        }
-                                        div.nag-row__action { a.secondary-button href=(format!("/deploy?selected={name}&action=end-temporary")) { "End temporary deployment" } }
-                                    }
-                                }
-                            }))
-                        }
-                        @if !data.unhealthy.is_empty() {
-                            (section(html! { "Unhealthy deploys" }, Some(html! { a href="/watchdog" { "Health" } }), false, html! {
-                                @for u in &data.unhealthy {
-                                    div.nag-row.nag-row--fail {
-                                        a.nag-row__config href=(format!("/deploy?selected={}", u.name)) { (u.name) }
-                                        span.nag-row__text { span.status-indicator.status-failure title="Failed" {} " " (u.message) }
-                                        span.nag-row__meta { @if let Some(since) = u.since { "since " (formatting::format_when(since)) } }
-                                        div.nag-row__action { a href=(format!("/deploy?selected={}", u.name)) { "Resources" } }
-                                    }
-                                }
-                            }))
-                        }
-                        @if !data.drift.is_empty() {
-                            (section(html! { "Drifted from latest" }, Some(html! { span.muted { "what a deploy would change" } }), false, html! {
-                                @for d in &data.drift {
-                                    div.nag-row.nag-row--top {
-                                        a.nag-row__config href=(format!("/deploy?selected={}", d.name)) { (d.name) }
-                                        div.nag-row__lines {
-                                            @for line in &d.lines {
-                                                @match line {
-                                                    DriftLine::Moves { name, from, to, channel } => div { (name) " " (from) " → " (to) " " span.muted { "(" (channel) ")" } },
-                                                    DriftLine::HeldBack { name, value, available } => div { (name) " " (value) " " span.faint { "pinned, " (available) " available" } },
-                                                    DriftLine::Config { from, to } => div.faint { "config " (from) " → " (to) },
-                                                }
-                                            }
-                                        }
-                                        span.nag-row__meta {
-                                            "autodeploy " span.mono { @if d.autodeploy { "on" } @else { "off" } }
-                                            @if d.temporary { " · temporary" } @else if d.pinned { " · standing pin" }
-                                        }
-                                        div.nag-row__action { a href=(format!("/deploy?selected={}", d.name)) { "Deploy" } }
-                                    }
-                                }
-                            }))
-                        }
-                        @if !data.building.is_empty() {
-                            (section(html! { "Active builds" }, Some(html! { span.muted { "deployable once built" } }), false, html! {
-                                @for b in &data.building {
-                                    div.nag-row.nag-row--top {
-                                        div.nag-row__configs {
-                                            @for name in &b.configs {
-                                                a.nag-row__config href=(format!("/deploy?selected={name}")) { (name) }
-                                            }
-                                        }
-                                        div.nag-row__lines {
-                                            div { "SHA " (b.sha) " " span.muted { "(" (b.channel) ")" } }
-                                            div.nag-row__message { (b.message) }
-                                            @if let Some(elapsed) = b.elapsed_ms {
-                                                div.build-progress {
-                                                    @if let Some(pct) = b.pct {
-                                                        div.build-progress__bar {
-                                                            div.build-progress__fill style=(format!("width: {pct}%")) {}
-                                                        }
-                                                    }
-                                                    span.build-progress__label {
-                                                        "running " (formatting::format_duration_ms(elapsed))
-                                                        @if let Some(left) = b.remaining_ms {
-                                                            " · about " (formatting::format_duration_ms(left)) " left"
-                                                        } @else if b.pct.is_some() {
-                                                            " · longer than usual"
-                                                        }
-                                                    }
-                                                }
-                                            } @else {
-                                                div.faint { "queued" }
-                                            }
-                                        }
-                                        span.nag-row__meta {
-                                            "committed " (formatting::format_ago_short(b.committed_at)) " · " span.mono { (b.author) }
-                                        }
-                                        div.nag-row__action {
-                                            @if let Some(url) = &b.build_url { a href=(url) { "Build log" } }
-                                        }
-                                    }
-                                }
-                            }))
-                        }
-                        @if !data.upgrades.is_empty() {
-                            (section(html! { "Available upgrades" }, Some(html! { span.muted { "needs a config change" } }), false, html! {
-                                @for u in &data.upgrades {
-                                    div.nag-row.nag-row--top {
-                                        a.nag-row__config href=(format!("/deploy?selected={}", u.name)) { (u.name) }
-                                        div.nag-row__lines {
-                                            @for line in &u.lines {
-                                                div { (line.name) " " (line.current) " → " (line.newest) " " span.muted { "(outside " (line.channel) ")" } }
-                                            }
-                                        }
-                                        span.nag-row__meta {}
-                                        div.nag-row__action { a href=(u.config_url) { "Edit config" } }
-                                    }
-                                }
-                            }))
-                        }
-                        (section(html! { "Recent activity" }, Some(html! { a href="/deploy-history" { "Deploy history" } }), false, html! {
-                            @if data.activity.is_empty() {
-                                div.nag-empty { "None" }
-                            } @else {
-                                (feed::render_compact(&data.activity))
-                            }
-                        }))
-                        @if !data.standing.is_empty() {
-                            (section(html! { "Standing overrides" }, None, true, html! {
-                                @for s in &data.standing {
-                                    div.nag-row.nag-row--quiet {
-                                        a.nag-row__config href=(format!("/deploy?selected={}", s.name)) { (s.name) }
-                                        span.nag-row__text.mono { (s.what) }
-                                        span.nag-row__meta.faint { @if let Some(since) = s.since { "since " (formatting::format_date(since)) } }
-                                    }
-                                }
-                            }))
-                        }
-                    }
+                div #home-body hx-get=(fragment_url(data.selected_team.as_deref()))
+                               hx-trigger="every 5s"
+                               hx-swap="morph:innerHTML" {
+                    (render_home_body(data, strips, cluster_reachable))
                 }
             }
         }
     }
 }
 
-#[get("/")]
-pub async fn home(
-    req: actix_web::HttpRequest,
-    pool: web::Data<Pool<SqliteConnectionManager>>,
+fn fragment_url(selected_team: Option<&str>) -> String {
+    match selected_team {
+        Some(team) => format!("/home-fragment?team={team}"),
+        None => "/home-fragment".to_string(),
+    }
+}
+
+fn summary_line(data: &HomeData) -> String {
+    let counts = [
+        (data.blockers.len(), "blocked"),
+        (data.temporary().len(), "temporary"),
+        (data.unhealthy.len(), "unhealthy"),
+        (data.drift.len(), "drifted"),
+        (data.building.len(), "building"),
+    ];
+    counts
+        .iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, word)| format!("{n} {word}"))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// Everything below the header: the strips and the content. Polled every
+/// few seconds and morphed into the page so counts and rows stay current.
+pub fn render_home_body(data: &HomeData, strips: Markup, cluster_reachable: bool) -> Markup {
+    let temporary = data.temporary();
+    let quiet = data.all_quiet();
+    let summary = summary_line(data);
+    let autodeploy_on = data.configs.iter().filter(|c| c.autodeploy()).count();
+    html! {
+        (strips)
+        div class="content" {
+        div.page-head {
+            div {
+                @if quiet {
+                    h1.page-head__title.page-head__title--ok { "Nothing needs a human" }
+                    div.page-head__sub { "No blockers, no temporary deployments, every rollout healthy" }
+                } @else {
+                    h1.page-head__title { "Needs a human" }
+                    div.page-head__sub { (summary) }
+                }
+            }
+            (render_team_select("/", &data.teams, data.selected_team.as_deref()))
+        }
+        @if !cluster_reachable {
+            div.preview-strip.preview-strip--neutral { "The cluster is not reachable; only what the database knows is shown." }
+        }
+        @if quiet {
+            div.stat-strip {
+                div.stat-strip__cell { div.eyebrow { "Deploy configs" } div.stat-strip__value { (data.configs.len()) } }
+                div.stat-strip__cell { div.eyebrow { "Healthy" } div.stat-strip__value { span.status-indicator.status-success {} " " (data.healthy_count) " / " (data.configs.len()) } }
+                div.stat-strip__cell { div.eyebrow { "Autodeploy on" } div.stat-strip__value { (autodeploy_on) } }
+                div.stat-strip__cell { div.eyebrow { "Last deploy" } div.stat-strip__value { @match data.last_deploy { Some(t) => (formatting::format_when(t)), None => "none" } } }
+            }
+        }
+        div.nags {
+            @if !data.blockers.is_empty() {
+                (section(html! { i class="fa fa-hand-paper-o" {} "Blocked configs" }, Some(html! { a href="/blockers" { "Blockers" } }), false, html! {
+                    @for b in &data.blockers {
+                        div.nag-row.nag-row--fail {
+                            a.nag-row__config href=(format!("/deploy?selected={}", b.config_name)) { (b.config_name) }
+                            span.nag-row__text { (b.reason) }
+                            span.nag-row__meta { (formatting::format_ago_short(b.created_at)) " · " span.mono { (b.created_by) } }
+                            form.nag-row__action action=(format!("/api/blockers/{}/{}/clear", b.config_name, b.id)) method="post" {
+                                input type="hidden" name="return_url" value="/";
+                                button.link-button type="submit" { "Clear" }
+                            }
+                        }
+                    }
+                }))
+            }
+            @if !temporary.is_empty() {
+                (section(html! { i class="fa fa-flask" {} "Temporary deployments" }, None, false, html! {
+                    @for config in &temporary {
+                        @let name = config.name_any();
+                        div.nag-row.nag-row--warn.nag-row--wide {
+                            a.nag-row__config href=(format!("/deploy?selected={name}")) { (name) }
+                            span.nag-row__text.mono { (render_temporary_summary(config)) }
+                            span.nag-row__meta {
+                                @if let Some(since) = config.temporary_since() { (formatting::format_ago_short(since)) }
+                                @if let Some(by) = temporary_by(config) { " · " span.mono { (by) } }
+                            }
+                            div.nag-row__action { a.secondary-button href=(format!("/deploy?selected={name}&action=end-temporary")) { "End temporary deployment" } }
+                        }
+                    }
+                }))
+            }
+            @if !data.unhealthy.is_empty() {
+                (section(html! { "Unhealthy deploys" }, Some(html! { a href="/watchdog" { "Health" } }), false, html! {
+                    @for u in &data.unhealthy {
+                        div.nag-row.nag-row--fail {
+                            a.nag-row__config href=(format!("/deploy?selected={}", u.name)) { (u.name) }
+                            span.nag-row__text { span.status-indicator.status-failure title="Failed" {} " " (u.message) }
+                            span.nag-row__meta { @if let Some(since) = u.since { "since " (formatting::format_when(since)) } }
+                            div.nag-row__action { a href=(format!("/deploy?selected={}", u.name)) { "Resources" } }
+                        }
+                    }
+                }))
+            }
+            @if !data.drift.is_empty() {
+                (section(html! { "Drifted from latest" }, Some(html! { span.muted { "what a deploy would change" } }), false, html! {
+                    @for d in &data.drift {
+                        div.nag-row.nag-row--top {
+                            a.nag-row__config href=(format!("/deploy?selected={}", d.name)) { (d.name) }
+                            div.nag-row__lines {
+                                @for line in &d.lines {
+                                    @match line {
+                                        DriftLine::Moves { name, from, to, channel } => div { (name) " " (from) " → " (to) " " span.muted { "(" (channel) ")" } },
+                                        DriftLine::HeldBack { name, value, available } => div { (name) " " (value) " " span.faint { "pinned, " (available) " available" } },
+                                        DriftLine::Config { from, to } => div.faint { "config " (from) " → " (to) },
+                                    }
+                                }
+                            }
+                            span.nag-row__meta {
+                                "autodeploy " span.mono { @if d.autodeploy { "on" } @else { "off" } }
+                                @if d.temporary { " · temporary" } @else if d.pinned { " · standing pin" }
+                            }
+                            div.nag-row__action { a href=(format!("/deploy?selected={}", d.name)) { "Deploy" } }
+                        }
+                    }
+                }))
+            }
+            @if !data.building.is_empty() {
+                (section(html! { "Active builds" }, Some(html! { span.muted { "deployable once built" } }), false, html! {
+                    @for b in &data.building {
+                        div.nag-row.nag-row--top {
+                            div.nag-row__configs {
+                                @for name in &b.configs {
+                                    a.nag-row__config href=(format!("/deploy?selected={name}")) { (name) }
+                                }
+                            }
+                            div.nag-row__lines {
+                                div { "SHA " (b.sha) " " span.muted { "(" (b.channel) ")" } }
+                                div.nag-row__message { (b.message) }
+                                @if let Some(elapsed) = b.elapsed_ms {
+                                    div.build-progress {
+                                        @if let Some(pct) = b.pct {
+                                            div.build-progress__bar {
+                                                div.build-progress__fill style=(format!("width: {pct}%")) {}
+                                            }
+                                        }
+                                        span.build-progress__label {
+                                            "running " (formatting::format_duration_ms(elapsed))
+                                            @if let Some(left) = b.remaining_ms {
+                                                " · about " (formatting::format_duration_ms(left)) " left"
+                                            } @else if b.pct.is_some() {
+                                                " · longer than usual"
+                                            }
+                                        }
+                                    }
+                                } @else {
+                                    div.faint { "queued" }
+                                }
+                            }
+                            span.nag-row__meta {
+                                "committed " (formatting::format_ago_short(b.committed_at)) " · " span.mono { (b.author) }
+                            }
+                            div.nag-row__action {
+                                @if let Some(url) = &b.build_url { a href=(url) { "Build log" } }
+                            }
+                        }
+                    }
+                }))
+            }
+            @if !data.upgrades.is_empty() {
+                (section(html! { "Available upgrades" }, Some(html! { span.muted { "needs a config change" } }), false, html! {
+                    @for u in &data.upgrades {
+                        div.nag-row.nag-row--top {
+                            a.nag-row__config href=(format!("/deploy?selected={}", u.name)) { (u.name) }
+                            div.nag-row__lines {
+                                @for line in &u.lines {
+                                    div { (line.name) " " (line.current) " → " (line.newest) " " span.muted { "(outside " (line.channel) ")" } }
+                                }
+                            }
+                            span.nag-row__meta {}
+                            div.nag-row__action { a href=(u.config_url) { "Edit config" } }
+                        }
+                    }
+                }))
+            }
+            (section(html! { "Recent activity" }, Some(html! { a href="/deploy-history" { "Deploy history" } }), false, html! {
+                @if data.activity.is_empty() {
+                    div.nag-empty { "None" }
+                } @else {
+                    (feed::render_compact(&data.activity))
+                }
+            }))
+            @if !data.standing.is_empty() {
+                (section(html! { "Standing overrides" }, None, true, html! {
+                    @for s in &data.standing {
+                        div.nag-row.nag-row--quiet {
+                            a.nag-row__config href=(format!("/deploy?selected={}", s.name)) { (s.name) }
+                            span.nag-row__text.mono { (s.what) }
+                            span.nag-row__meta.faint { @if let Some(since) = s.since { "since " (formatting::format_date(since)) } }
+                        }
+                    }
+                }))
+            }
+        }
+        }
+    }
+}
+
+/// Everything the page and its fragment need: the data, the strips, and
+/// whether the cluster answered.
+async fn load_home(
+    req: &actix_web::HttpRequest,
+    pool: &Pool<SqliteConnectionManager>,
     client: Option<web::Data<Client>>,
-    query: web::Query<HashMap<String, String>>,
-) -> impl Responder {
+    query: &HashMap<String, String>,
+) -> Result<(HomeData, Markup, bool), HttpResponse> {
     let conn = match pool.get() {
         Ok(c) => c,
         Err(e) => {
             log::error!("Failed to get database connection: {}", e);
-            return HttpResponse::InternalServerError().body("Failed to connect to database");
+            return Err(HttpResponse::InternalServerError().body("Failed to connect to database"));
         }
     };
     // The shared client from app data; building one per request costs a
@@ -1016,18 +1043,51 @@ pub async fn home(
         all_configs.len(),
         t.elapsed()
     );
-    let teams = teams_of(&req);
+    let teams = teams_of(req);
     let selected_team = query.get("team").filter(|t| !t.is_empty()).cloned();
     let t = std::time::Instant::now();
     let strips = render_strips(&conn, &all_configs);
     log::debug!("home: strips in {:?}", t.elapsed());
     let data = gather(&conn, client.as_ref(), all_configs, teams, selected_team).await;
-    let t = std::time::Instant::now();
-    let body = render_home(&data, strips, client.is_some()).into_string();
-    log::debug!("home: rendered {} bytes in {:?}", body.len(), t.elapsed());
+    Ok((data, strips, client.is_some()))
+}
+
+fn html_response(body: String) -> HttpResponse {
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
         .body(body)
+}
+
+#[get("/")]
+pub async fn home(
+    req: actix_web::HttpRequest,
+    pool: web::Data<Pool<SqliteConnectionManager>>,
+    client: Option<web::Data<Client>>,
+    query: web::Query<HashMap<String, String>>,
+) -> impl Responder {
+    let (data, strips, reachable) = match load_home(&req, &pool, client, &query).await {
+        Ok(loaded) => loaded,
+        Err(resp) => return resp,
+    };
+    let t = std::time::Instant::now();
+    let body = render_home(&data, strips, reachable).into_string();
+    log::debug!("home: rendered {} bytes in {:?}", body.len(), t.elapsed());
+    html_response(body)
+}
+
+/// The polled body of the home page, morphed into `#home-body`.
+#[get("/home-fragment")]
+pub async fn home_fragment(
+    req: actix_web::HttpRequest,
+    pool: web::Data<Pool<SqliteConnectionManager>>,
+    client: Option<web::Data<Client>>,
+    query: web::Query<HashMap<String, String>>,
+) -> impl Responder {
+    let (data, strips, reachable) = match load_home(&req, &pool, client, &query).await {
+        Ok(loaded) => loaded,
+        Err(resp) => return resp,
+    };
+    html_response(render_home_body(&data, strips, reachable).into_string())
 }
 
 #[cfg(test)]
@@ -1285,7 +1345,10 @@ mod tests {
         let configs = [deployed_from_own_repo(), api];
         let building = builds_of(&conn, &configs);
         assert_eq!(building.len(), 1);
-        assert_eq!(building[0].configs, vec!["web".to_string(), "api".to_string()]);
+        assert_eq!(
+            building[0].configs,
+            vec!["web".to_string(), "api".to_string()]
+        );
         assert_eq!(building[0].sha, "def");
         assert_eq!(building[0].channel, "main");
         assert_eq!(building[0].message, "def");

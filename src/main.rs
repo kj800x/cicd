@@ -117,6 +117,7 @@ async fn start_http(
             // feed alone is 100 KB uncompressed and gzips to a tenth.
             .wrap(middleware::Compress::default())
             .service(web::home)
+            .service(web::home_fragment)
             .service(deploy_configs)
             .service(web::blockers_page)
             .service(web::add_blocker_for)
