@@ -385,14 +385,20 @@ fn drift_of(
                 }
             }
         }
-        // The config commit itself.
+        // The config commit itself: only when this config's manifests
+        // differ between the two commits. A config repo holds many configs
+        // and most commits touch one, so a newer sha alone is not drift.
+        // The preview's CONFIG CHANGED marker uses the same test.
         let deployed_cfg = config
             .status
             .as_ref()
             .and_then(|s| s.config.as_ref())
             .map(|c| c.sha.clone());
         if let (Some(from), Some(to)) = (deployed_cfg, config_latest(conn, config)) {
-            if from != to {
+            if from != to
+                && crate::web::preview::manifests_changed(conn, config, Some(&from), Some(&to))
+                    == Some(true)
+            {
                 lines.push(DriftLine::Config {
                     from: formatting::format_short_sha(&from).to_string(),
                     to: formatting::format_short_sha(&to).to_string(),
@@ -1020,16 +1026,83 @@ mod tests {
         assert!(drift_of(&conn, std::slice::from_ref(&dc), &Latest::new()).is_empty());
     }
 
+    /// Record the manifest hash of `name` at each commit, as config sync
+    /// does on every push.
+    fn config_hashes(
+        conn: &PooledConnection<SqliteConnectionManager>,
+        name: &str,
+        hashes: &[(&str, &str)],
+    ) {
+        use crate::db::deploy_config_version::DeployConfigVersion;
+        DbDeployConfig::upsert(
+            &DbDeployConfig {
+                name: name.into(),
+                team: "t".into(),
+                kind: "service".into(),
+                config_repo_id: 1,
+                artifact_repo_id: None,
+                active: true,
+            },
+            conn,
+        )
+        .expect("config row");
+        for (sha, hash) in hashes {
+            DeployConfigVersion::upsert(
+                &DeployConfigVersion {
+                    name: name.into(),
+                    config_repo_id: 1,
+                    config_commit_sha: (*sha).into(),
+                    hash: (*hash).into(),
+                },
+                conn,
+            )
+            .expect("version row");
+        }
+    }
+
     #[test]
     fn a_built_commit_moves_the_sha_and_the_config_together() {
         let pool = crate::db::test_support::migrated_memory_pool();
         let conn = pool.get().expect("connection");
         repo_with_build_in_flight(&conn, "Success");
+        config_hashes(&conn, "web", &[("abc", "h1"), ("def", "h2")]);
         let dc = deployed_from_own_repo();
         let drift = drift_of(&conn, std::slice::from_ref(&dc), &Latest::new());
         assert_eq!(drift.len(), 1);
+        assert_eq!(drift[0].lines.len(), 2);
         assert!(matches!(&drift[0].lines[0], DriftLine::Moves { to, .. } if to == "def"));
         assert!(matches!(&drift[0].lines[1], DriftLine::Config { to, .. } if to == "def"));
+    }
+
+    #[test]
+    fn a_config_commit_that_left_the_manifests_alone_is_not_config_drift() {
+        let pool = crate::db::test_support::migrated_memory_pool();
+        let conn = pool.get().expect("connection");
+        repo_with_build_in_flight(&conn, "Success");
+        // The same manifests at both commits: someone edited another
+        // config in the repo.
+        config_hashes(&conn, "web", &[("abc", "h1"), ("def", "h1")]);
+        let dc = deployed_from_own_repo();
+        let drift = drift_of(&conn, std::slice::from_ref(&dc), &Latest::new());
+        assert_eq!(drift.len(), 1, "the artifact still moves");
+        assert_eq!(drift[0].lines.len(), 1);
+        assert!(matches!(&drift[0].lines[0], DriftLine::Moves { to, .. } if to == "def"));
+
+        // A third-party config in the same repo: nothing of its own moves,
+        // so it is not listed at all.
+        let other = deployed(config("other"), &[]);
+        config_hashes(&conn, "other", &[("abc", "x"), ("def", "x")]);
+        assert!(drift_of(&conn, std::slice::from_ref(&other), &Latest::new()).is_empty());
+        // Until both hashes are known, the commit alone is not drift either.
+        let unknown = deployed(config("unknown"), &[]);
+        assert!(drift_of(&conn, std::slice::from_ref(&unknown), &Latest::new()).is_empty());
+        // And a config whose own manifests changed is.
+        config_hashes(&conn, "other", &[("def", "y")]);
+        let drift = drift_of(&conn, std::slice::from_ref(&other), &Latest::new());
+        assert_eq!(drift.len(), 1);
+        assert!(
+            matches!(&drift[0].lines[0], DriftLine::Config { from, to } if from == "abc" && to == "def")
+        );
     }
 
     #[test]

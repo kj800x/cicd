@@ -316,7 +316,7 @@ fn artifact_sha(state: &DeploymentState) -> Option<&str> {
 
 /// Whether the config manifests differ between two config commits, when
 /// both hashes are known.
-fn manifests_changed(
+pub fn manifests_changed(
     conn: &PooledConnection<SqliteConnectionManager>,
     config: &DeployConfig,
     from: Option<&str>,
