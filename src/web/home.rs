@@ -2,9 +2,10 @@
 //!
 //! Each section renders only when it has rows, so the page is the size of
 //! the problem: blocked configs, temporary deployments, unhealthy deploys,
-//! configs that have drifted from latest, configs whose tag pattern is
-//! behind what the image publishes, then the recent activity and the
-//! standing overrides as a reminder. When the first three are empty the
+//! configs that have drifted from latest, commits still building that
+//! will be drift once they finish, configs whose tag pattern is behind
+//! what the image publishes, then the recent activity and the standing
+//! overrides as a reminder. When the first three are empty the
 //! heading says so in green and a four-fact band gives the shape of the
 //! fleet.
 
@@ -16,9 +17,11 @@ use maud::{html, Markup, DOCTYPE};
 use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
 
+use crate::build_status::BuildStatus;
 use crate::db::blocker::Blocker;
 use crate::db::deploy_config::DeployConfig as DbDeployConfig;
 use crate::db::git_branch::GitBranch;
+use crate::db::git_commit_build::GitCommitBuild;
 use crate::db::git_repo::GitRepo;
 use crate::kubernetes::api::get_all_deploy_configs;
 use crate::kubernetes::parameters::{ImageRef, ParameterSource, SHA_PARAMETER};
@@ -74,6 +77,30 @@ pub enum DriftLine {
     Config { from: String, to: String },
 }
 
+/// A commit the SHA of one or more configs follows whose build is still
+/// running: not deployable yet, so not drift yet, but about to be. The
+/// progress is the build so far against the repo's recent builds, as the
+/// deploy page's build alert shows it.
+pub struct ActiveBuild {
+    /// Every config following this commit.
+    pub configs: Vec<String>,
+    pub sha: String,
+    pub channel: String,
+    /// The commit message's first line.
+    pub message: String,
+    pub author: String,
+    pub committed_at: i64,
+    pub build_url: Option<String>,
+    /// Since the build started, when GitHub has said when that was.
+    pub elapsed_ms: Option<u64>,
+    /// Elapsed against the repo's average, capped at 100; absent without
+    /// a start time or any finished build to compare with.
+    pub pct: Option<u64>,
+    /// What the average says is left; absent once the build has run past
+    /// it.
+    pub remaining_ms: Option<u64>,
+}
+
 /// A config whose declared pattern excludes the newest tag its image
 /// publishes: an upgrade that only a config change can take, so it is
 /// told apart from drift, which a deploy of latest clears.
@@ -106,6 +133,7 @@ pub struct HomeData {
     pub unhealthy: Vec<Unhealthy>,
     pub healthy_count: usize,
     pub drift: Vec<Drift>,
+    pub building: Vec<ActiveBuild>,
     pub upgrades: Vec<Upgrade>,
     pub activity: Vec<feed::Item>,
     pub standing: Vec<Standing>,
@@ -418,6 +446,90 @@ fn drift_of(
     out
 }
 
+/// The commits still building on the channel each deployed config's SHA
+/// follows, one row per commit however many configs follow it. A pinned
+/// SHA follows nothing.
+fn builds_of(
+    conn: &PooledConnection<SqliteConnectionManager>,
+    configs: &[DeployConfig],
+) -> Vec<ActiveBuild> {
+    let now = chrono::Utc::now().timestamp_millis() as u64;
+    let mut out: Vec<ActiveBuild> = Vec::new();
+    // Where each commit landed in `out`, or that it is not building.
+    let mut seen: HashMap<(u64, String), Option<usize>> = HashMap::new();
+    for config in configs {
+        if !is_live(config) {
+            continue;
+        }
+        let Some(ParameterSource::Commit {
+            owner,
+            repo,
+            branch,
+        }) = config.spec.spec.parameters.get(SHA_PARAMETER)
+        else {
+            continue;
+        };
+        let channel = match config.selection(SHA_PARAMETER).mode() {
+            Mode::Pin(_) => continue,
+            Mode::Track(b) => b.to_string(),
+            Mode::Default => branch.clone(),
+        };
+        let Some(repo) = GitRepo::get_by_name(owner, repo, conn).ok().flatten() else {
+            continue;
+        };
+        let Some(head) = GitBranch::get_by_name(&channel, repo.id, conn)
+            .ok()
+            .flatten()
+            .and_then(|b| b.latest_build(conn).ok().flatten())
+        else {
+            continue;
+        };
+        let key = (repo.id, head.sha.clone());
+        if let Some(placed) = seen.get(&key) {
+            if let Some(i) = placed {
+                out[*i].configs.push(config.name_any());
+            }
+            continue;
+        }
+        let build = head.get_build_status(conn).ok().flatten();
+        if !matches!(BuildStatus::from(build.clone()), BuildStatus::Pending) {
+            seen.insert(key, None);
+            continue;
+        }
+        let elapsed_ms = build
+            .as_ref()
+            .and_then(|b| b.start_time)
+            .map(|start| now.saturating_sub(start));
+        let average = elapsed_ms.and_then(|_| {
+            GitCommitBuild::avg_build_duration_ms(repo.id, 10, conn)
+                .ok()
+                .flatten()
+                .filter(|&avg| avg > 0)
+        });
+        let pct = elapsed_ms
+            .zip(average)
+            .map(|(elapsed, avg)| ((elapsed * 100) / avg).min(100));
+        let remaining_ms = elapsed_ms
+            .zip(average)
+            .and_then(|(elapsed, avg)| avg.checked_sub(elapsed))
+            .filter(|&left| left > 0);
+        seen.insert(key, Some(out.len()));
+        out.push(ActiveBuild {
+            configs: vec![config.name_any()],
+            sha: formatting::format_short_sha(&head.sha).to_string(),
+            channel,
+            message: head.message.lines().next().unwrap_or_default().to_string(),
+            author: head.author,
+            committed_at: head.timestamp,
+            build_url: build.map(|b| b.url).filter(|u| !u.is_empty()),
+            elapsed_ms,
+            pct,
+            remaining_ms,
+        });
+    }
+    out
+}
+
 /// Deployed configs whose declared pattern excludes the newest tag the
 /// image publishes. The test is the pattern itself: the newest tag of the
 /// image (of the variant followed, if one is) is not the best the pattern
@@ -566,8 +678,9 @@ pub async fn gather(
     log::debug!("home: watchtower in {:?}", t.elapsed());
     let t = std::time::Instant::now();
     let drift = drift_of(conn, &configs, &latest);
+    let building = builds_of(conn, &configs);
     let upgrades = upgrades_of(&configs, &latest);
-    log::debug!("home: drift and upgrades in {:?}", t.elapsed());
+    log::debug!("home: drift, builds and upgrades in {:?}", t.elapsed());
     let t = std::time::Instant::now();
     let revisions = revisions_for_teams(conn, &scope_teams).unwrap_or_default();
     log::debug!("home: {} revisions in {:?}", revisions.len(), t.elapsed());
@@ -585,6 +698,7 @@ pub async fn gather(
         unhealthy,
         healthy_count,
         drift,
+        building,
         upgrades,
         activity,
         standing,
@@ -677,6 +791,7 @@ pub fn render_home(data: &HomeData, strips: Markup, cluster_reachable: bool) -> 
         (temporary.len(), "temporary"),
         (data.unhealthy.len(), "unhealthy"),
         (data.drift.len(), "drifted"),
+        (data.building.len(), "building"),
     ];
     let summary: Vec<String> = counts
         .iter()
@@ -784,6 +899,48 @@ pub fn render_home(data: &HomeData, strips: Markup, cluster_reachable: bool) -> 
                                             @if d.temporary { " · temporary" } @else if d.pinned { " · standing pin" }
                                         }
                                         div.nag-row__action { a href=(format!("/deploy?selected={}", d.name)) { "Deploy" } }
+                                    }
+                                }
+                            }))
+                        }
+                        @if !data.building.is_empty() {
+                            (section(html! { "Active builds" }, Some(html! { span.muted { "deployable once built" } }), false, html! {
+                                @for b in &data.building {
+                                    div.nag-row.nag-row--top {
+                                        div.nag-row__configs {
+                                            @for name in &b.configs {
+                                                a.nag-row__config href=(format!("/deploy?selected={name}")) { (name) }
+                                            }
+                                        }
+                                        div.nag-row__lines {
+                                            div { "SHA " (b.sha) " " span.muted { "(" (b.channel) ")" } }
+                                            div.nag-row__message { (b.message) }
+                                            @if let Some(elapsed) = b.elapsed_ms {
+                                                div.build-progress {
+                                                    @if let Some(pct) = b.pct {
+                                                        div.build-progress__bar {
+                                                            div.build-progress__fill style=(format!("width: {pct}%")) {}
+                                                        }
+                                                    }
+                                                    span.build-progress__label {
+                                                        "running " (formatting::format_duration_ms(elapsed))
+                                                        @if let Some(left) = b.remaining_ms {
+                                                            " · about " (formatting::format_duration_ms(left)) " left"
+                                                        } @else if b.pct.is_some() {
+                                                            " · longer than usual"
+                                                        }
+                                                    }
+                                                }
+                                            } @else {
+                                                div.faint { "queued" }
+                                            }
+                                        }
+                                        span.nag-row__meta {
+                                            "committed " (formatting::format_ago_short(b.committed_at)) " · " span.mono { (b.author) }
+                                        }
+                                        div.nag-row__action {
+                                            @if let Some(url) = &b.build_url { a href=(url) { "Build log" } }
+                                        }
                                     }
                                 }
                             }))
@@ -1116,6 +1273,27 @@ mod tests {
             Selection::pin("abc", Durability::Standing),
         );
         assert!(drift_of(&conn, std::slice::from_ref(&dc), &Latest::new()).is_empty());
+    }
+
+    #[test]
+    fn a_commit_still_building_is_an_active_build_shared_by_its_followers() {
+        let pool = crate::db::test_support::migrated_memory_pool();
+        let conn = pool.get().expect("connection");
+        repo_with_build_in_flight(&conn, "Pending");
+        let mut api = deployed_from_own_repo();
+        api.metadata.name = Some("api".into());
+        let configs = [deployed_from_own_repo(), api];
+        let building = builds_of(&conn, &configs);
+        assert_eq!(building.len(), 1);
+        assert_eq!(building[0].configs, vec!["web".to_string(), "api".to_string()]);
+        assert_eq!(building[0].sha, "def");
+        assert_eq!(building[0].channel, "main");
+        assert_eq!(building[0].message, "def");
+        assert!(building[0].elapsed_ms.is_none());
+        assert!(building[0].build_url.is_none());
+
+        repo_with_build_in_flight(&conn, "Success");
+        assert!(builds_of(&conn, &configs).is_empty());
     }
 
     fn tag(image: &str, pattern: &str, variant: Option<&str>) -> ParameterSource {

@@ -3462,6 +3462,24 @@ header {
     min-width: 0;
   }
 
+  .nag-row__configs {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .nag-row__message {
+    font-family: var(--font-sans);
+    color: var(--text-body);
+    overflow-wrap: anywhere;
+  }
+
+  .nag-row__lines .build-progress {
+    margin-top: 4px;
+    max-width: 420px;
+  }
+
   .nag-empty {
     padding: 12px;
     font-size: 13px;
