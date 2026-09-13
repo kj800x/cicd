@@ -574,6 +574,21 @@ async fn write_pages() -> AppResult<()> {
         ids.push(recorded.id);
     }
 
+    // Redeploy previous needs the revisions: alldex-rs's latest is the
+    // temporary branch deploy, so the previous deployment is master.
+    let redeploy = render_deploy(
+        &conn,
+        &all,
+        Scenario {
+            file: "deploy-redeploy-previous.html",
+            config: simple.clone(),
+            action: Action::RedeployPrevious { revision: None },
+            resolved: TagResolutions::new(),
+        },
+    )
+    .await;
+    std::fs::write(format!("{dir}/deploy-redeploy-previous.html"), redeploy)?;
+
     let page_css = |markup: String| {
         markup.replace(
             "<link rel=\"stylesheet\" href=\"/res/styles.css\">",

@@ -211,10 +211,10 @@ impl ResolvedVersion {
                     None => ResolvedVersion::UnknownSha { sha: sha.clone() },
                 }
             }
-            Action::Rollback { revision } => {
-                let sha = Revision::get(conn, *revision)
-                    .ok()
-                    .flatten()
+            Action::Rollback { .. } | Action::RedeployPrevious { .. } => {
+                let sha = action
+                    .replayed_revision()
+                    .and_then(|revision| Revision::get(conn, revision).ok().flatten())
                     .and_then(|rev| rev.parameter(SHA_PARAMETER).map(|p| p.value.clone()));
                 let Some(sha) = sha else {
                     return ResolvedVersion::ResolutionFailed;
@@ -461,7 +461,13 @@ impl DeploymentState {
                     branch: None,
                 },
             }),
-            (Action::Rollback { revision }, artifact_repository) => {
+            (Action::Rollback { .. } | Action::RedeployPrevious { .. }, artifact_repository) => {
+                let revision = &action.replayed_revision().ok_or_else(|| {
+                    AppError::InvalidInput(format!(
+                        "{} has no previous deployment to redeploy",
+                        config.name_any()
+                    ))
+                })?;
                 let rev = Revision::get(conn, *revision)?.ok_or_else(|| {
                     AppError::InvalidInput(format!("Revision {revision} does not exist"))
                 })?;
@@ -529,6 +535,14 @@ pub enum Action {
     Rollback {
         revision: i64,
     },
+    /// Replay the deployment before the current one as a new deploy: the
+    /// values and patches of the newest deploy revision older than the
+    /// latest revision. `revision` is filled in by normalization; `None`
+    /// is the form's request before the previous deployment is looked up.
+    /// Unlike a rollback it adds no blocker and is gated like a deploy.
+    RedeployPrevious {
+        revision: Option<i64>,
+    },
     /// Drop the SHA parameter's override or pin and deploy the latest of
     /// its default channel.
     ClearSelection,
@@ -574,6 +588,9 @@ impl Action {
             "rollback" => match query.get("revision").and_then(|r| r.parse::<i64>().ok()) {
                 Some(revision) => Action::Rollback { revision },
                 None => Action::DeployLatest,
+            },
+            "redeploy-previous" => Action::RedeployPrevious {
+                revision: query.get("revision").and_then(|r| r.parse::<i64>().ok()),
             },
             "clear-selection" => Action::ClearSelection,
             "end-temporary" => Action::EndTemporary,
@@ -660,6 +677,10 @@ impl Action {
                 params
             }
             Action::Rollback { revision } => format!("action=rollback&revision={}", revision),
+            Action::RedeployPrevious { revision: None } => "action=redeploy-previous".to_string(),
+            Action::RedeployPrevious {
+                revision: Some(revision),
+            } => format!("action=redeploy-previous&revision={}", revision),
             Action::ClearSelection => "action=clear-selection".to_string(),
             Action::EndTemporary => "action=end-temporary".to_string(),
             Action::SetParameter { parameter, value } => format!(
@@ -682,6 +703,7 @@ impl Action {
             }
             Action::DeployAdvanced { .. } => "deploy-advanced",
             Action::Rollback { .. } => "rollback",
+            Action::RedeployPrevious { .. } => "redeploy-previous",
             Action::ClearSelection => "clear-selection",
             Action::EndTemporary => "end-temporary",
             Action::SetParameter { .. } => "set-parameter",
@@ -757,6 +779,7 @@ impl Action {
     /// Actions a blocker refuses: everything that deploys something new.
     pub fn is_gated_by_blockers(&self) -> bool {
         self.is_deploy()
+            || self.is_redeploy_previous()
             || self.is_clear_selection()
             || self.is_set_parameter()
             || self.is_end_temporary()
@@ -772,6 +795,7 @@ impl Action {
             }
             Action::DeployAdvanced { .. } => "deploy_advanced",
             Action::Rollback { .. } => "rollback",
+            Action::RedeployPrevious { .. } => "redeploy_previous",
             Action::ClearSelection => "clear_selection",
             Action::EndTemporary => "end_temporary",
             Action::SetParameter { .. } => "set_parameter",
@@ -784,6 +808,20 @@ impl Action {
 
     pub fn is_clear_selection(&self) -> bool {
         matches!(self, Action::ClearSelection)
+    }
+
+    pub fn is_redeploy_previous(&self) -> bool {
+        matches!(self, Action::RedeployPrevious { .. })
+    }
+
+    /// The revision this action replays instead of resolving channels: a
+    /// rollback's target, or the previous deployment once it is looked up.
+    pub fn replayed_revision(&self) -> Option<i64> {
+        match self {
+            Action::Rollback { revision } => Some(*revision),
+            Action::RedeployPrevious { revision } => *revision,
+            _ => None,
+        }
     }
 
     pub fn is_set_parameter(&self) -> bool {
@@ -885,6 +923,12 @@ impl Action {
             Action::ToggleAutodeploy => "Option change for ".to_string(),
             Action::Undeploy => "Undeploy of ".to_string(),
             Action::Rollback { revision } => format!("Rollback to revision {} of ", revision),
+            Action::RedeployPrevious { revision: Some(r) } => {
+                format!("Redeploy of revision {} of ", r)
+            }
+            Action::RedeployPrevious { revision: None } => {
+                "Redeploy of the previous deployment of ".to_string()
+            }
             Action::ClearSelection => "Back to the default branch for ".to_string(),
             Action::EndTemporary => "End of the temporary deployment of ".to_string(),
             Action::SetParameter { parameter, .. } => format!("Set ${} on ", parameter),
@@ -909,6 +953,7 @@ impl Action {
             Action::ExecuteJob => "Execute job".to_string(),
             Action::Undeploy => "Undeploy".to_string(),
             Action::Rollback { .. } => "Roll back".to_string(),
+            Action::RedeployPrevious { .. } => "Redeploy previous".to_string(),
             Action::ClearSelection => "Clear and deploy latest".to_string(),
             Action::EndTemporary => "End temporary deployment".to_string(),
             Action::SetParameter { .. } => "Set and deploy".to_string(),
@@ -1254,6 +1299,36 @@ mod tests {
         assert!(action.is_deploy() && action.is_deploy_advanced());
         assert!(action.deploys_latest());
         assert_eq!(action.form_value(), "deploy-advanced");
+    }
+
+    #[test]
+    fn redeploy_previous_round_trips_with_and_without_its_revision() {
+        let q = HashMap::from([("action".to_string(), "redeploy-previous".to_string())]);
+        let requested = Action::from_query(&q);
+        assert_eq!(requested, Action::RedeployPrevious { revision: None });
+        assert_eq!(requested.form_value(), "redeploy-previous");
+        assert!(requested.is_redeploy_previous());
+        assert!(requested.is_gated_by_blockers());
+        assert!(!requested.is_deploy());
+        assert!(!requested.deploys_latest());
+        assert!(requested.changes_deployment());
+        assert_eq!(requested.replayed_revision(), None);
+
+        let resolved = Action::RedeployPrevious { revision: Some(42) };
+        let reparsed: HashMap<String, String> =
+            url::form_urlencoded::parse(resolved.as_params().as_bytes())
+                .into_owned()
+                .collect();
+        assert_eq!(Action::from_query(&reparsed), resolved);
+        assert_eq!(resolved.replayed_revision(), Some(42));
+        assert_eq!(
+            Action::from_query(&HashMap::from([
+                ("action".to_string(), "redeploy-previous".to_string()),
+                ("revision".to_string(), "nope".to_string()),
+            ])),
+            Action::RedeployPrevious { revision: None },
+            "an unreadable revision is looked up again"
+        );
     }
 
     #[test]
