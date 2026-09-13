@@ -227,6 +227,38 @@ fn latest_on(
     commit.map(|c| c.sha)
 }
 
+/// The config commit a deploy of latest would take, by the deploy's own
+/// rule. When the config lives in the repo the SHA parameter builds, the
+/// two move together: the config comes from the same commit as the
+/// artifact, so it is the latest *successful* build on the channel the
+/// SHA follows, or the pinned commit itself. A commit still building is
+/// not yet deployable, so it is not yet drift. A config kept in another
+/// repo has no build to wait for, so its branch head is what a deploy
+/// takes.
+fn config_latest(
+    conn: &PooledConnection<SqliteConnectionManager>,
+    config: &DeployConfig,
+) -> Option<String> {
+    let cfg = config.config_repository();
+    let sha_source = config
+        .spec
+        .spec
+        .parameters
+        .get(SHA_PARAMETER)
+        .and_then(ParameterSource::as_repository_branch)
+        .filter(|s| s.owner == cfg.owner && s.repo == cfg.repo);
+    let Some(source) = sha_source else {
+        return latest_on(conn, &cfg.owner, &cfg.repo, &config_branch(config), false);
+    };
+    let selection = config.selection(SHA_PARAMETER);
+    let channel = match selection.mode() {
+        Mode::Pin(sha) => return Some(sha.to_string()),
+        Mode::Track(branch) => branch,
+        Mode::Default => source.branch.as_str(),
+    };
+    latest_on(conn, &cfg.owner, &cfg.repo, channel, true)
+}
+
 /// The branch the deployed config came from; `master` until known.
 fn config_branch(config: &DeployConfig) -> String {
     config
@@ -354,16 +386,12 @@ fn drift_of(
             }
         }
         // The config commit itself.
-        let cfg = config.config_repository();
         let deployed_cfg = config
             .status
             .as_ref()
             .and_then(|s| s.config.as_ref())
             .map(|c| c.sha.clone());
-        if let (Some(from), Some(to)) = (
-            deployed_cfg,
-            latest_on(conn, &cfg.owner, &cfg.repo, &config_branch(config), false),
-        ) {
+        if let (Some(from), Some(to)) = (deployed_cfg, config_latest(conn, config)) {
             if from != to {
                 lines.push(DriftLine::Config {
                     from: formatting::format_short_sha(&from).to_string(),
@@ -900,6 +928,121 @@ mod tests {
         assert_eq!(standing[0].what, "NGINX pinned 1.27.0");
         assert_eq!(render_temporary_summary(&dc), "SHA tracking fix/x, 1 patch");
         assert_eq!(temporary_by(&dc).as_deref(), Some("kevin"));
+    }
+
+    /// A repo whose `main` has an old commit built and a newer head whose
+    /// build is still running.
+    fn repo_with_build_in_flight(
+        conn: &PooledConnection<SqliteConnectionManager>,
+        head_status: &str,
+    ) {
+        use crate::db::git_branch::GitBranchEgg;
+        use crate::db::git_commit::{GitCommit, GitCommitEgg};
+        use crate::db::git_commit_build::GitCommitBuild;
+        GitRepo {
+            id: 1,
+            owner_name: "o".into(),
+            name: "c".into(),
+            default_branch: "main".into(),
+            private: false,
+            language: None,
+        }
+        .upsert(conn)
+        .expect("repo row");
+        let main = GitBranchEgg {
+            name: "main".into(),
+            head_commit_sha: "def".into(),
+            repo_id: 1,
+            active: true,
+        }
+        .upsert(conn)
+        .expect("branch row");
+        for (sha, ts, status) in [("abc", 1, "Success"), ("def", 2, head_status)] {
+            let commit = GitCommit::upsert(
+                &GitCommitEgg {
+                    sha: sha.into(),
+                    repo_id: 1,
+                    message: sha.into(),
+                    author: "k".into(),
+                    committer: "k".into(),
+                    timestamp: ts,
+                },
+                conn,
+            )
+            .expect("commit row");
+            commit.add_branch(main.id, conn).expect("commit on branch");
+            GitCommitBuild::upsert(
+                &GitCommitBuild {
+                    repo_id: 1,
+                    commit_id: commit.id,
+                    check_name: "build".into(),
+                    status: status.into(),
+                    url: String::new(),
+                    start_time: None,
+                    settle_time: None,
+                    app_id: None,
+                },
+                conn,
+            )
+            .expect("build row");
+        }
+    }
+
+    /// A config whose SHA parameter builds from the repo the config lives
+    /// in, deployed at `abc` for both.
+    fn deployed_from_own_repo() -> DeployConfig {
+        let mut dc = config("web");
+        dc.spec.spec.parameters.insert(
+            SHA_PARAMETER.into(),
+            ParameterSource::Commit {
+                owner: "o".into(),
+                repo: "c".into(),
+                branch: "main".into(),
+            },
+        );
+        let mut dc = deployed(dc, &[]);
+        dc.status.as_mut().expect("deployed").parameters.insert(
+            SHA_PARAMETER.into(),
+            ParameterValue::Commit {
+                value: "abc".into(),
+                branch: Some("main".into()),
+            },
+        );
+        dc
+    }
+
+    #[test]
+    fn a_commit_still_building_is_not_yet_drift() {
+        let pool = crate::db::test_support::migrated_memory_pool();
+        let conn = pool.get().expect("connection");
+        repo_with_build_in_flight(&conn, "Pending");
+        let dc = deployed_from_own_repo();
+        assert!(drift_of(&conn, std::slice::from_ref(&dc), &Latest::new()).is_empty());
+    }
+
+    #[test]
+    fn a_built_commit_moves_the_sha_and_the_config_together() {
+        let pool = crate::db::test_support::migrated_memory_pool();
+        let conn = pool.get().expect("connection");
+        repo_with_build_in_flight(&conn, "Success");
+        let dc = deployed_from_own_repo();
+        let drift = drift_of(&conn, std::slice::from_ref(&dc), &Latest::new());
+        assert_eq!(drift.len(), 1);
+        assert!(matches!(&drift[0].lines[0], DriftLine::Moves { to, .. } if to == "def"));
+        assert!(matches!(&drift[0].lines[1], DriftLine::Config { to, .. } if to == "def"));
+    }
+
+    #[test]
+    fn a_pinned_sha_keeps_its_config_commit() {
+        let pool = crate::db::test_support::migrated_memory_pool();
+        let conn = pool.get().expect("connection");
+        repo_with_build_in_flight(&conn, "Success");
+        let mut dc = deployed_from_own_repo();
+        dc.spec.spec.selections.insert(
+            SHA_PARAMETER.into(),
+            Selection::pin("abc", Durability::Standing),
+        );
+        assert!(drift_of(&conn, std::slice::from_ref(&dc), &Latest::new()).is_empty());
     }
 
     fn tag(image: &str, pattern: &str, variant: Option<&str>) -> ParameterSource {
