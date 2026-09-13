@@ -306,6 +306,7 @@ pub fn render(
                 }
                 (radio("deploy", action.is_deploy() && !advanced, deploy_disabled, html! { "Deploy" }))
                 (radio("deploy-advanced", advanced, deploy_disabled, html! { "Deploy advanced" }))
+                (radio("redeploy-previous", action.is_redeploy_previous(), deploy_disabled, html! { "Redeploy previous" }))
                 (radio("toggle-autodeploy", action.is_toggle_autodeploy(), is_orphaned, html! {
                     @if config.autodeploy() { "Disable autodeploy" } @else { "Enable autodeploy" }
                 }))
@@ -339,6 +340,9 @@ pub fn render(
             form id="deployForm" action=(format!("/api/deploy/{}/{}", config.namespace().unwrap_or_default(), name)) method="post"
                 onsubmit="const b=this.querySelector('button[type=submit]'); if (b) { b.disabled=true; b.textContent='Working…'; }" {
                 input type="hidden" name="action" value=(action.form_value());
+                @if let Some(revision) = action.replayed_revision() {
+                    input type="hidden" name="revision" value=(revision);
+                }
                 @if let Some(choices) = action.choices() {
                     input type="hidden" name="durability" value=(durability.as_str());
                     @if let Some(pending) = action.patch_changes().filter(|p| !p.is_empty()) {

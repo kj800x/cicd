@@ -214,6 +214,7 @@ pub fn selection_change(
         | Action::DeployAdvanced { .. }
         | Action::EndTemporary
         | Action::Rollback { .. }
+        | Action::RedeployPrevious { .. }
         | Action::Undeploy
         | Action::Bounce
         | Action::ExecuteJob
@@ -327,6 +328,15 @@ pub fn normalize_action(
                 choices,
                 durability: *durability,
                 patches: patches.clone(),
+            })
+        }
+        Action::RedeployPrevious { revision: None } => {
+            let name = kube::ResourceExt::name_any(config);
+            let previous = Revision::previous_deploy_for(conn, &name)?.ok_or_else(|| {
+                AppError::InvalidInput(format!("{name} has no previous deployment to redeploy"))
+            })?;
+            Ok(Action::RedeployPrevious {
+                revision: Some(previous.id),
             })
         }
         other => Ok(other.clone()),
@@ -584,6 +594,7 @@ pub fn check_blockers(
     config_name: &str,
 ) -> AppResult<()> {
     if !action.is_deploy()
+        && !action.is_redeploy_previous()
         && !action.is_clear_selection()
         && !action.is_set_parameter()
         && !action.is_end_temporary()
@@ -623,6 +634,7 @@ pub fn to_deploy_action(
         | Action::DeployCommit { .. }
         | Action::DeployAdvanced { .. }
         | Action::Rollback { .. }
+        | Action::RedeployPrevious { .. }
         | Action::ClearSelection
         | Action::SetParameter { .. }
         | Action::EndTemporary
@@ -764,16 +776,18 @@ pub async fn run_action(
     }
 
     let state = DeploymentState::from_action(action, &effective, &conn)?;
-    let mut values = match action {
-        Action::Rollback { revision } => values_from_revision(&conn, *revision)?,
-        _ => effective.resolve_value_parameters(),
+    let mut values = match action.replayed_revision() {
+        Some(revision) => values_from_revision(&conn, revision)?,
+        None => effective.resolve_value_parameters(),
     };
     drop(conn);
     // Tag parameters resolve through watchtower, after the connection is
-    // released (the lookup is an await). A rollback already carries them.
+    // released (the lookup is an await). A replayed revision already
+    // carries them.
     let deploys = !matches!(
         action,
         Action::Rollback { .. }
+            | Action::RedeployPrevious { .. }
             | Action::Undeploy
             | Action::Bounce
             | Action::ExecuteJob
@@ -833,6 +847,12 @@ pub async fn run_action(
                 _ => format!("rollback to revision {revision}"),
             });
         }
+        if let Action::RedeployPrevious {
+            revision: Some(revision),
+        } = action
+        {
+            new.reason = Some(format!("redeploy of revision {revision}"));
+        }
         if reason.is_some() {
             new.reason = reason.clone();
         }
@@ -882,6 +902,15 @@ mod tests {
             check_blockers(&conn, &Action::DeployBranch { branch: "b".into() }, "site").is_err()
         );
         assert!(check_blockers(&conn, &Action::DeployCommit { sha: "s".into() }, "site").is_err());
+
+        // Redeploying the previous deployment is a deploy with no hold of
+        // its own, so it waits like one.
+        assert!(check_blockers(
+            &conn,
+            &Action::RedeployPrevious { revision: Some(1) },
+            "site"
+        )
+        .is_err());
 
         // Not gated: the emergency exit and the non-version actions.
         assert!(check_blockers(&conn, &Action::Undeploy, "site").is_ok());
@@ -959,6 +988,57 @@ mod tests {
         let conn = pool.get()?;
         Blocker::create(&conn, "site", "incident", "kevin")?;
         assert!(check_blockers(&conn, &Action::Rollback { revision: 7 }, "site").is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn redeploy_previous_normalizes_to_the_deployment_before_the_latest() -> AppResult<()> {
+        use crate::db::revision::{NewRevision, RevisionParameter};
+        let pool = migrated_memory_pool();
+        let conn = pool.get()?;
+        let config = bare_config();
+        let requested = Action::RedeployPrevious { revision: None };
+
+        match normalize_action(&conn, &config, &requested) {
+            Err(AppError::InvalidInput(message)) => {
+                assert!(message.contains("no previous deployment"), "{message}")
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+
+        let rev = |sha: &str| NewRevision {
+            config_name: "site".into(),
+            actor: "web".into(),
+            action: "deploy".into(),
+            reason: None,
+            config_sha: Some("cfg".into()),
+            config_branch: Some("master".into()),
+            config_version_hash: None,
+            patches: None,
+            temporary: false,
+            parameters: vec![RevisionParameter {
+                name: SHA_PARAMETER.into(),
+                kind: "commit".into(),
+                value: sha.into(),
+                branch: Some("master".into()),
+            }],
+        };
+        let first = Revision::record(&conn, rev("aaa"))?;
+        Revision::record(&conn, rev("bbb"))?;
+
+        let normalized = normalize_action(&conn, &config, &requested)?;
+        assert_eq!(
+            normalized,
+            Action::RedeployPrevious {
+                revision: Some(first.id)
+            }
+        );
+        assert_eq!(normalized.replayed_revision(), Some(first.id));
+        // An already-resolved request is left alone.
+        let pinned = Action::RedeployPrevious { revision: Some(99) };
+        assert_eq!(normalize_action(&conn, &config, &pinned)?, pinned);
+        // Nothing about the selections changes: the replay is one-shot.
+        assert!(selection_changes(&normalized, &config, &SelectionIntent::default()).is_empty());
         Ok(())
     }
 

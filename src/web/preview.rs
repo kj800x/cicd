@@ -106,7 +106,11 @@ pub async fn resolve_tags(prepared: &Prepared, typed: &BTreeMap<String, String>)
 
 /// Actions whose new parameter values come from resolving channels now.
 fn resolves_new_values(action: &Action) -> bool {
-    action.changes_deployment() && !matches!(action, Action::Undeploy | Action::Rollback { .. })
+    action.changes_deployment()
+        && !matches!(
+            action,
+            Action::Undeploy | Action::Rollback { .. } | Action::RedeployPrevious { .. }
+        )
 }
 
 /// The heading, the meta row and the polled body.
@@ -351,10 +355,9 @@ fn parameter_rows(
     let name = config.name_any();
     let deploys = action.changes_deployment();
     let undeploys = matches!(action, Action::Undeploy);
-    let revision = match action {
-        Action::Rollback { revision } => Revision::get(conn, *revision).ok().flatten(),
-        _ => None,
-    };
+    let revision = action
+        .replayed_revision()
+        .and_then(|revision| Revision::get(conn, revision).ok().flatten());
     let deployed = config
         .status
         .as_ref()

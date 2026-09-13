@@ -323,6 +323,30 @@ impl Revision {
         }
     }
 
+    /// The deployment before the current one: the newest deploy revision
+    /// older than the config's latest revision, skipping undeploys and
+    /// patch changes. `None` when the config has fewer than two revisions
+    /// or nothing was deployed before the latest one.
+    pub fn previous_deploy_for(
+        conn: &PooledConnection<SqliteConnectionManager>,
+        config_name: &str,
+    ) -> AppResult<Option<Self>> {
+        let Some(latest) = Self::latest_for(conn, config_name)? else {
+            return Ok(None);
+        };
+        let id: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM revision WHERE config_name = ?1 AND action = 'deploy' AND (created_at < ?2 OR (created_at = ?2 AND id < ?3)) ORDER BY created_at DESC, id DESC LIMIT 1",
+                params![config_name, latest.created_at, latest.id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match id {
+            Some(id) => Self::get(conn, id),
+            None => Ok(None),
+        }
+    }
+
     /// Revisions for every config on a team, newest first.
     pub fn list_for_team(
         conn: &PooledConnection<SqliteConnectionManager>,
@@ -521,6 +545,55 @@ mod tests {
         );
         assert_eq!(paired[1].1, None, "b1 is the oldest b in the list");
         assert_eq!(paired[2].1, None);
+        Ok(())
+    }
+
+    #[test]
+    fn previous_deploy_skips_undeploys_and_patch_changes() -> AppResult<()> {
+        let pool = migrated_memory_pool();
+        let conn = pool.get()?;
+        let rev = |action: &str, sha: &str| NewRevision {
+            config_name: "site".into(),
+            actor: "web".into(),
+            action: action.into(),
+            reason: None,
+            config_sha: Some("cfg".into()),
+            config_branch: Some("master".into()),
+            config_version_hash: None,
+            patches: None,
+            temporary: false,
+            parameters: vec![RevisionParameter {
+                name: SHA_PARAMETER.into(),
+                kind: "commit".into(),
+                value: sha.into(),
+                branch: Some("master".into()),
+            }],
+        };
+
+        assert!(Revision::previous_deploy_for(&conn, "site")?.is_none());
+        let first = Revision::record(&conn, rev("deploy", "aaa"))?;
+        assert!(
+            Revision::previous_deploy_for(&conn, "site")?.is_none(),
+            "one revision has nothing before it"
+        );
+        let second = Revision::record(&conn, rev("deploy", "bbb"))?;
+        assert_eq!(
+            Revision::previous_deploy_for(&conn, "site")?.map(|r| r.id),
+            Some(first.id)
+        );
+        Revision::record(&conn, rev("patch", "bbb"))?;
+        Revision::record(&conn, rev("undeploy", "bbb"))?;
+        let previous = Revision::previous_deploy_for(&conn, "site")?;
+        assert_eq!(
+            previous.as_ref().map(|r| r.id),
+            Some(second.id),
+            "the newest deploy before the latest revision, whatever the latest is"
+        );
+        assert_eq!(
+            previous.and_then(|r| r.parameter(SHA_PARAMETER).map(|p| p.value.clone())),
+            Some("bbb".into())
+        );
+        assert!(Revision::previous_deploy_for(&conn, "other")?.is_none());
         Ok(())
     }
 
