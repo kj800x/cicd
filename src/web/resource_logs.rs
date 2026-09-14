@@ -1,6 +1,7 @@
 use crate::error::{format_error_chain, AppError};
 use crate::kubernetes::list_namespace_objects;
 use crate::prelude::*;
+use crate::web::ansi::ansi_to_html;
 use crate::web::header;
 use k8s_openapi::api::core::v1::Pod;
 use kube::{
@@ -389,7 +390,7 @@ pub async fn resource_logs_fragment(
     let markup = html! {
         div.resource-logs__content {
             @for line in reversed_lines.iter() {
-                div.resource-logs__line { (line) }
+                div.resource-logs__line { (ansi_to_html(line)) }
             }
         }
     };

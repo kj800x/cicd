@@ -1,4 +1,5 @@
 mod all_recent_builds;
+mod ansi;
 pub mod blockers;
 mod bootstrap;
 mod build_status_helpers;
