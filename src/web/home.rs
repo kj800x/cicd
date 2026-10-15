@@ -2,8 +2,8 @@
 //!
 //! Each section renders only when it has rows, so the page is the size of
 //! the problem: blocked configs, temporary deployments, unhealthy deploys,
-//! configs that have drifted from latest, commits still building that
-//! will be drift once they finish, configs whose tag pattern is behind
+//! commits still building that will be drift once they finish, configs
+//! that have drifted from latest, configs whose tag pattern is behind
 //! what the image publishes, then the recent activity and the standing
 //! overrides as a reminder. When the first three are empty the
 //! heading says so in green and a four-fact band gives the shape of the
@@ -908,29 +908,6 @@ pub fn render_home_body(data: &HomeData, strips: Markup, cluster_reachable: bool
                     }
                 }))
             }
-            @if !data.drift.is_empty() {
-                (section(html! { "Drifted from latest" }, Some(html! { span.muted { "what a deploy would change" } }), false, html! {
-                    @for d in &data.drift {
-                        div.nag-row.nag-row--top {
-                            a.nag-row__config href=(format!("/deploy?selected={}", d.name)) { (d.name) }
-                            div.nag-row__lines {
-                                @for line in &d.lines {
-                                    @match line {
-                                        DriftLine::Moves { name, from, to, channel } => div { (name) " " (from) " → " (to) " " span.muted { "(" (channel) ")" } },
-                                        DriftLine::HeldBack { name, value, available } => div { (name) " " (value) " " span.faint { "pinned, " (available) " available" } },
-                                        DriftLine::Config { from, to } => div.faint { "config " (from) " → " (to) },
-                                    }
-                                }
-                            }
-                            span.nag-row__meta {
-                                "autodeploy " span.mono { @if d.autodeploy { "on" } @else { "off" } }
-                                @if d.temporary { " · temporary" } @else if d.pinned { " · standing pin" }
-                            }
-                            div.nag-row__action { a href=(format!("/deploy?selected={}", d.name)) { "Deploy" } }
-                        }
-                    }
-                }))
-            }
             @if !data.building.is_empty() {
                 (section(html! { "Active builds" }, Some(html! { span.muted { "deployable once built" } }), false, html! {
                     @for b in &data.building {
@@ -969,6 +946,29 @@ pub fn render_home_body(data: &HomeData, strips: Markup, cluster_reachable: bool
                             div.nag-row__action {
                                 @if let Some(url) = &b.build_url { a href=(url) { "Build log" } }
                             }
+                        }
+                    }
+                }))
+            }
+            @if !data.drift.is_empty() {
+                (section(html! { "Drifted from latest" }, Some(html! { span.muted { "what a deploy would change" } }), false, html! {
+                    @for d in &data.drift {
+                        div.nag-row.nag-row--top {
+                            a.nag-row__config href=(format!("/deploy?selected={}", d.name)) { (d.name) }
+                            div.nag-row__lines {
+                                @for line in &d.lines {
+                                    @match line {
+                                        DriftLine::Moves { name, from, to, channel } => div { (name) " " (from) " → " (to) " " span.muted { "(" (channel) ")" } },
+                                        DriftLine::HeldBack { name, value, available } => div { (name) " " (value) " " span.faint { "pinned, " (available) " available" } },
+                                        DriftLine::Config { from, to } => div.faint { "config " (from) " → " (to) },
+                                    }
+                                }
+                            }
+                            span.nag-row__meta {
+                                "autodeploy " span.mono { @if d.autodeploy { "on" } @else { "off" } }
+                                @if d.temporary { " · temporary" } @else if d.pinned { " · standing pin" }
+                            }
+                            div.nag-row__action { a href=(format!("/deploy?selected={}", d.name)) { "Deploy" } }
                         }
                     }
                 }))
