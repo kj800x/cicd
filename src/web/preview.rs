@@ -158,6 +158,9 @@ pub async fn render_page_preview(
                     (render_autodeploy_badge(config.autodeploy()))
                 }
             }
+            @if prepared.action.is_gated_by_blockers() && !config.spec.spec.checks.pre.is_empty() {
+                (crate::web::pre_checks::render_slot(&namespace, &name))
+            }
             div.preview-content-poll-wrapper
                 hx-get=(poll_url)
                 hx-include="[name^=value_]"
@@ -683,7 +686,7 @@ fn render_row(row: &ParamRow) -> Markup {
     }
 }
 
-fn render_alert(tone: &str, title: Markup, body: Markup) -> Markup {
+pub(crate) fn render_alert(tone: &str, title: Markup, body: Markup) -> Markup {
     html! {
         div class=(format!("alert alert-{tone}")) {
             div class="alert-header" { (title) }
@@ -692,7 +695,7 @@ fn render_alert(tone: &str, title: Markup, body: Markup) -> Markup {
     }
 }
 
-fn render_strip(tone: &str, body: Markup) -> Markup {
+pub(crate) fn render_strip(tone: &str, body: Markup) -> Markup {
     html! {
         div class=(format!("preview-strip preview-strip--{tone}")) { (body) }
     }

@@ -97,6 +97,7 @@ async fn start_http(
                 .service(clear_blocker)
                 .service(rollback)
                 .service(set_parameter)
+                .service(web::pre_checks::pre_checks_fragment)
                 .service(web::patch_flow)
                 .service(web::patch_flow_add)
                 .route("/mcp", actix_web::web::post().to(mcp::handle_mcp))

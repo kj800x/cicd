@@ -609,6 +609,87 @@ async fn write_pages() -> AppResult<()> {
         };
     }
 
+    // plex's autodeploy is held by a pre-check; the grafana rollback went
+    // past a soft block someone acknowledged.
+    let waiting = crate::db::deploy_run::DeployRun::wait(
+        &conn,
+        "plex",
+        "autodeploy",
+        "plex-streams: 2 active streams",
+        now_ms() + 4 * 60_000,
+    )?;
+    let outcome =
+        |name: &str, status, title: &str, message: Option<&str>| crate::checks::PreOutcome {
+            name: name.into(),
+            status,
+            title: Some(title.into()),
+            message: message.map(String::from),
+            details_url: Some("https://jellyfin.example/web/#/dashboard".into()),
+            started_at: now_ms(),
+            finished_at: now_ms(),
+        };
+    crate::db::check_result::CheckResult::record_pre(
+        &conn,
+        waiting.id,
+        &[outcome(
+            "plex-streams",
+            crate::checks::PreStatus::SoftBlock,
+            "2 active streams",
+            Some("alice on Living Room TV, bob on iPad"),
+        )],
+        3,
+    )?;
+    if let Some(last) = ids.last() {
+        let grafana_run: i64 = conn.query_row(
+            "SELECT id FROM deploy_run WHERE revision_id = ?1",
+            [last],
+            |r| r.get(0),
+        )?;
+        conn.execute(
+            "UPDATE deploy_run SET acknowledged = '[\"dashboards-viewed\"]' WHERE id = ?1",
+            [grafana_run],
+        )?;
+        crate::db::check_result::CheckResult::record_pre(
+            &conn,
+            grafana_run,
+            &[
+                outcome(
+                    "dashboards-viewed",
+                    crate::checks::PreStatus::SoftBlock,
+                    "3 people on the ZFS board",
+                    None,
+                ),
+                outcome(
+                    "no-alerts",
+                    crate::checks::PreStatus::Ok,
+                    "quiet for 2 h",
+                    None,
+                ),
+            ],
+            1,
+        )?;
+    }
+    let pre_check_strip = crate::web::pre_checks::render(
+        "media",
+        "plex",
+        &[
+            outcome(
+                "plex-streams",
+                crate::checks::PreStatus::SoftBlock,
+                "2 active streams",
+                Some("alice on Living Room TV, bob on iPad"),
+            ),
+            outcome(
+                "maintenance",
+                crate::checks::PreStatus::HardBlock,
+                "NAS scrub running",
+                Some("ends around 04:00"),
+            ),
+        ],
+        Some(&waiting),
+    )
+    .into_string();
+
     // Redeploy previous needs the revisions: alldex-rs's latest is the
     // temporary branch deploy, so the previous deployment is master.
     let redeploy = render_deploy(
@@ -622,6 +703,14 @@ async fn write_pages() -> AppResult<()> {
         },
     )
     .await;
+    std::fs::write(
+        format!("{dir}/deploy-pre-checks.html"),
+        redeploy.replacen(
+            "<div class=\"preview-content-poll-wrapper\"",
+            &format!("<div id=\"pre-checks\">{pre_check_strip}</div><div class=\"preview-content-poll-wrapper\""),
+            1,
+        ),
+    )?;
     std::fs::write(format!("{dir}/deploy-redeploy-previous.html"), redeploy)?;
 
     let page_css = |markup: String| {
@@ -691,6 +780,7 @@ async fn write_pages() -> AppResult<()> {
     let data = home::HomeData {
         configs: home_configs.clone(),
         blockers: Blocker::all_active(&conn)?,
+        waiting: vec![waiting.clone()],
         unhealthy: vec![home::Unhealthy { name: "lerke".into(), message: "Deployment lerke: Ready 0 / 2 · CrashLoopBackOff".into(), since: Some(now_ms() - 11 * 3_600_000) }],
         healthy_count: home_configs.len() - 1,
         drift: vec![
@@ -752,6 +842,7 @@ async fn write_pages() -> AppResult<()> {
     let quiet = home::HomeData {
         configs: home_configs.clone(),
         blockers: vec![],
+        waiting: vec![],
         unhealthy: vec![],
         healthy_count: home_configs.len(),
         drift: vec![],
