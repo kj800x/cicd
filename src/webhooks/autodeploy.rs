@@ -208,6 +208,7 @@ mod tests {
             "site",
             DeployConfigSpec {
                 spec: DeployConfigSpecFields {
+                    checks: Default::default(),
                     team: "t".into(),
                     kind: "service".into(),
                     parameters: ParameterSource::sha_map(Some(RepositoryBranch {

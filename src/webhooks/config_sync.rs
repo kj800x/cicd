@@ -16,7 +16,9 @@ use crate::{
     },
     error::{AppError, AppResult},
     kubernetes::{
-        deploy_config::{DeployConfig, DeployConfigSpec, DeployConfigSpecFields, Template},
+        deploy_config::{
+            DeployChecks, DeployConfig, DeployConfigSpec, DeployConfigSpecFields, Template,
+        },
         parameters::{ParameterSource, ParameterSources, SHA_PARAMETER},
         repo::RepositoryBranch,
         test_mode,
@@ -303,6 +305,9 @@ struct GitHubDeployConfig {
     team: String,
     kind: String,
     namespace: String,
+    /// What happens around a deploy: `onFailure` and `rolloutDeadline`.
+    #[serde(default)]
+    checks: DeployChecks,
 }
 
 impl GitHubDeployConfig {
@@ -612,6 +617,7 @@ pub async fn fetch_deploy_configs_by_sha(
         let dc = DeployConfig {
             spec: DeployConfigSpec {
                 spec: DeployConfigSpecFields {
+                    checks: config.checks.clone(),
                     parameters,
                     // Selections are user intent, owned by the deploy handler;
                     // empty here means "leave whatever is on the object".

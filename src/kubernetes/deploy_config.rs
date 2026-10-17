@@ -68,6 +68,11 @@ pub struct DeployConfigSpecFields {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub patches: Vec<ManifestPatch>,
 
+    /// What happens around a deploy, from `checks` in the `.deploy` file.
+    /// Written by config sync.
+    #[serde(default, skip_serializing_if = "DeployChecks::is_empty")]
+    pub checks: DeployChecks,
+
     /// Repository information
     pub config: Repository,
 
@@ -77,6 +82,49 @@ pub struct DeployConfigSpecFields {
     /// as having no file. Written by the deploy handler only.
     #[serde(default)]
     pub specs: Vec<serde_json::Value>,
+}
+
+/// What a failed deploy run does.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum OnFailure {
+    /// Roll back to the last run that succeeded, which adds a blocker.
+    Rollback,
+    /// Leave the failed deploy in place and add a blocker.
+    Hold,
+}
+
+/// `checks` in a `.deploy` file. Both fields are optional; the defaults
+/// live with their readers.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeployChecks {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_failure: Option<OnFailure>,
+    /// A duration such as `10m`, `90s` or `1h`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollout_deadline: Option<String>,
+}
+
+impl DeployChecks {
+    pub fn is_empty(&self) -> bool {
+        self == &DeployChecks::default()
+    }
+
+    /// The rollout deadline in milliseconds, or `None` when it is absent
+    /// or not a whole number of seconds, minutes or hours.
+    pub fn rollout_deadline_ms(&self) -> Option<i64> {
+        let text = self.rollout_deadline.as_deref()?.trim();
+        let (number, unit) = text.split_at(text.len().checked_sub(1)?);
+        let n: i64 = number.parse().ok()?;
+        let unit_ms = match unit {
+            "s" => 1_000,
+            "m" => 60_000,
+            "h" => 3_600_000,
+            _ => return None,
+        };
+        n.checked_mul(unit_ms).filter(|ms| *ms > 0)
+    }
 }
 
 /// One manifest template and the `.deploy/<config>/` file it came from.
@@ -603,6 +651,29 @@ impl DeployConfig {
 mod tests {
     use super::*;
 
+    #[test]
+    fn checks_parse_their_rollout_deadline() {
+        let checks = |deadline: &str| DeployChecks {
+            on_failure: None,
+            rollout_deadline: Some(deadline.to_string()),
+        };
+        assert_eq!(checks("90s").rollout_deadline_ms(), Some(90_000));
+        assert_eq!(checks("10m").rollout_deadline_ms(), Some(600_000));
+        assert_eq!(checks("2h").rollout_deadline_ms(), Some(7_200_000));
+        for bad in ["", "m", "10", "0m", "1.5m", "10d", "-1m"] {
+            assert_eq!(checks(bad).rollout_deadline_ms(), None, "{bad:?}");
+        }
+        assert_eq!(DeployChecks::default().rollout_deadline_ms(), None);
+        assert!(DeployChecks::default().is_empty());
+
+        let parsed: DeployChecks = serde_json::from_value(
+            serde_json::json!({"onFailure": "rollback", "rolloutDeadline": "5m"}),
+        )
+        .expect("valid checks");
+        assert_eq!(parsed.on_failure, Some(OnFailure::Rollback));
+        assert_eq!(parsed.rollout_deadline_ms(), Some(300_000));
+    }
+
     fn repo(owner: &str, repo: &str) -> Repository {
         Repository {
             owner: owner.to_string(),
@@ -615,6 +686,7 @@ mod tests {
             "test",
             DeployConfigSpec {
                 spec: DeployConfigSpecFields {
+                    checks: Default::default(),
                     team: "test".to_string(),
                     kind: "service".to_string(),
                     parameters: ParameterSource::sha_map(

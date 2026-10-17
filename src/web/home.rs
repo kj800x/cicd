@@ -1106,6 +1106,7 @@ mod tests {
             name,
             DeployConfigSpec {
                 spec: DeployConfigSpecFields {
+                    checks: Default::default(),
                     team: "t".into(),
                     kind: "service".into(),
                     parameters: Default::default(),

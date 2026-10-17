@@ -140,6 +140,20 @@ spec:
                         type: string
                       since:
                         type: string
+                checks:
+                  type: object
+                  description: "What happens around a deploy, from `checks` in the .deploy file. Written by config sync."
+                  properties:
+                    onFailure:
+                      type: string
+                      description: "What a failed deploy run does: roll back to the last good run, or hold the config with a blocker. Default: rollback for autodeploy, hold otherwise."
+                      enum:
+                        - rollback
+                        - hold
+                    rolloutDeadline:
+                      type: string
+                      description: "How long a deploy may take to roll out before its run fails, e.g. 10m. Default 10m."
+                      pattern: "^[0-9]+(s|m|h)$"
                 team:
                   type: string
                 kind:

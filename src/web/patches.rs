@@ -1178,6 +1178,7 @@ mod tests {
             "web",
             crate::kubernetes::deploy_config::DeployConfigSpec {
                 spec: crate::kubernetes::deploy_config::DeployConfigSpecFields {
+                    checks: Default::default(),
                     team: "t".into(),
                     kind: "service".into(),
                     parameters: Default::default(),
