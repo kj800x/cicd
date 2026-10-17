@@ -30,6 +30,7 @@ pub mod prelude {
 }
 
 mod build_status;
+mod checks;
 mod crab_ext;
 mod db;
 mod deploy_runs;

@@ -1,6 +1,7 @@
 use std::ops::Deref;
 
 pub mod blocker;
+pub mod check_result;
 pub mod deploy_config;
 pub mod deploy_config_version;
 pub mod deploy_run;

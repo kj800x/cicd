@@ -154,6 +154,45 @@ spec:
                       type: string
                       description: "How long a deploy may take to roll out before its run fails, e.g. 10m. Default 10m."
                       pattern: "^[0-9]+(s|m|h)$"
+                    retryInterval:
+                      type: string
+                      description: "How often a held autodeploy asks its pre-checks again. Default 5m."
+                      pattern: "^[0-9]+(s|m|h)$"
+                    maxWait:
+                      type: string
+                      description: "How long a held autodeploy waits before it is reported to Discord (once; it keeps waiting). Default 24h."
+                      pattern: "^[0-9]+(s|m|h)$"
+                    pre:
+                      type: array
+                      description: "Checks asked before a deploy is applied. Any of them can hold it."
+                      items:
+                        type: object
+                        required:
+                          - name
+                        properties:
+                          name:
+                            type: string
+                          http:
+                            type: string
+                            description: "URL the check protocol is POSTed to."
+                          timeout:
+                            type: string
+                            description: "How long to wait for an answer. Default 3s."
+                            pattern: "^[0-9]+(s|m|h)$"
+                          secretRef:
+                            type: object
+                            description: "A Secret in the config's namespace whose key is sent as a bearer token."
+                            required:
+                              - name
+                              - key
+                            properties:
+                              name:
+                                type: string
+                              key:
+                                type: string
+                        x-kubernetes-validations:
+                          - rule: "has(self.http)"
+                            message: "a check needs a target (http)"
                 team:
                   type: string
                 kind:

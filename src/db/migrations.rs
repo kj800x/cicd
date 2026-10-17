@@ -224,6 +224,31 @@ pub fn migrations() -> Migrations<'static> {
             AND r.action != 'undeploy'
           ORDER BY r.id;
         "#}),
+        // Deploy checks: one row per check a run asked, see
+        // db/check_result.rs. A run records which soft blocks a person
+        // acknowledged (a JSON array of check names), when a held
+        // autodeploy asks again, and when its long wait was reported.
+        M::up(indoc! { r#"
+          CREATE TABLE check_result (
+              id INTEGER PRIMARY KEY NOT NULL,
+              run_id INTEGER NOT NULL,
+              phase TEXT NOT NULL,
+              check_name TEXT NOT NULL,
+              status TEXT NOT NULL,
+              title TEXT,
+              message TEXT,
+              details_url TEXT,
+              attempt INTEGER NOT NULL DEFAULT 1,
+              started_at INTEGER NOT NULL,
+              finished_at INTEGER,
+              FOREIGN KEY(run_id) REFERENCES deploy_run(id)
+          );
+          CREATE INDEX IF NOT EXISTS idx_check_result_run ON check_result(run_id, phase);
+
+          ALTER TABLE deploy_run ADD COLUMN acknowledged TEXT;
+          ALTER TABLE deploy_run ADD COLUMN next_check_at INTEGER;
+          ALTER TABLE deploy_run ADD COLUMN notified_at INTEGER;
+        "#}),
     ])
 }
 
