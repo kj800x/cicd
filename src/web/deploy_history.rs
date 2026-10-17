@@ -733,23 +733,35 @@ fn render_run_section(run: &DeployRun, checks: &[CheckResult]) -> Markup {
         @if let Some(message) = &run.message {
             div.revision__reason { (message) }
         }
-        @if !checks.is_empty() {
-            div.eyebrow { "Pre-checks" }
-            div.check-results {
-                @for c in checks {
-                    @let tone = match c.status.as_str() { "OK" => "hl-badge--ok", _ => "hl-badge--fail" };
-                    div.check-result {
-                        span.mono { (c.check_name) }
-                        " " span class=(format!("hl-badge {tone}")) { (c.status) }
-                        @if run.acknowledged.contains(&c.check_name) { " " span.hl-badge.hl-badge--standing { "acknowledged" } }
-                        @if let Some(title) = &c.title { " " (title) }
-                        @if let Some(message) = &c.message { span.muted { " · " (message) } }
-                        @if let Some(url) = &c.details_url { " · " a href=(url) target="_blank" { "details" } }
-                        @if c.attempt > 1 { span.faint { " · asked " (c.attempt) " times" } }
+        @for (phase, heading) in [("pre", "Pre-checks"), ("post", "Post-checks")] {
+            @let rows: Vec<&CheckResult> = checks.iter().filter(|c| c.phase == phase).collect();
+            @if !rows.is_empty() {
+                div.eyebrow { (heading) }
+                div.check-results {
+                    @for c in rows {
+                        div.check-result {
+                            span.mono { (c.check_name) }
+                            " " span class=(format!("hl-badge {}", check_tone(&c.status))) { (c.status) }
+                            @if run.acknowledged.contains(&c.check_name) { " " span.hl-badge.hl-badge--standing { "acknowledged" } }
+                            @if let Some(title) = &c.title { " " (title) }
+                            @if let Some(message) = &c.message { span.muted { " · " (message) } }
+                            @if let Some(url) = &c.details_url { " · " a href=(url) target="_blank" { "details" } }
+                            @if c.attempt > 1 { span.faint { " · asked " (c.attempt) " times" } }
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+/// The badge class for a check's status.
+fn check_tone(status: &str) -> &'static str {
+    match status {
+        "OK" => "hl-badge--ok",
+        "WARN" | "SOFT_BLOCK" => "hl-badge--warn",
+        "PENDING" => "hl-badge--progress",
+        _ => "hl-badge--fail",
     }
 }
 
