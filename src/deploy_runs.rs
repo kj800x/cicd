@@ -25,6 +25,7 @@
 //! Until rollout tracking has earned trust, failures are observed only:
 //! nothing is rolled back or held, and the Discord message says what would
 //! have happened. `CICD_FAILED_RUN_ACTIONS=act` turns the actions on.
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -32,14 +33,17 @@ use kube::{Api, Client, ResourceExt};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 
+use crate::checks::{poll_post_check, PostAsk, PostPoll, PostStatus};
 use crate::crab_ext::Octocrabs;
 use crate::db::blocker::Blocker;
+use crate::db::check_result::CheckResult;
 use crate::db::deploy_run::{DeployRun, RunState};
+use crate::db::revision::Revision;
 use crate::deploys::SelectionIntent;
 use crate::discord;
 use crate::error::{AppError, AppResult};
 use crate::kubernetes::api::ListMode;
-use crate::kubernetes::deploy_config::OnFailure;
+use crate::kubernetes::deploy_config::{parse_duration_ms, CheckSpec, OnFailure, Severity};
 use crate::kubernetes::discovery_cache;
 use crate::kubernetes::rollout::{self, Rollout};
 use crate::kubernetes::{list_namespace_objects, DeployConfig};
@@ -67,14 +71,18 @@ async fn tick(
     pool: &Pool<SqliteConnectionManager>,
     octocrabs: &Octocrabs,
 ) -> AppResult<()> {
-    let (runs, waiting) = {
+    let (runs, waiting, monitoring) = {
         let conn = pool.get()?;
-        (DeployRun::unfinished(&conn)?, DeployRun::waiting(&conn)?)
+        (
+            DeployRun::unfinished(&conn)?,
+            DeployRun::waiting(&conn)?,
+            DeployRun::monitoring(&conn)?,
+        )
     };
-    if runs.is_empty() && waiting.is_empty() {
+    if runs.is_empty() && waiting.is_empty() && monitoring.is_empty() {
         return Ok(());
     }
-    // One list per tick, and only while something is rolling out or waiting.
+    // One list per tick, and only while some run is not settled.
     let configs = Api::<DeployConfig>::all(client.clone())
         .list(&Default::default())
         .await?
@@ -89,7 +97,24 @@ async fn tick(
             Some(config) => judge(client, config).await,
             None => Rollout::Failed(format!("DeployConfig {} no longer exists", run.config_name)),
         };
-        let failed = advance(&pool.get()?, &run, verdict)?;
+        let post = config
+            .map(|c| c.spec.spec.checks.post.as_slice())
+            .unwrap_or(&[]);
+        let failed = advance(&pool.get()?, &run, verdict, post)?;
+        if let Some(why) = failed {
+            on_failure(client, pool, octocrabs, &run, config, &why).await;
+        }
+    }
+    for run in monitoring {
+        let config = configs.iter().find(|c| c.name_any() == run.config_name);
+        let failed = match config {
+            Some(config) => monitor(client, pool, &run, config).await?,
+            None => {
+                let why = format!("DeployConfig {} no longer exists", run.config_name);
+                DeployRun::finish(&pool.get()?, run.id, RunState::Failed, Some(&why))?
+                    .then_some(why)
+            }
+        };
         if let Some(why) = failed {
             on_failure(client, pool, octocrabs, &run, config, &why).await;
         }
@@ -223,6 +248,219 @@ async fn judge(client: &Client, config: &DeployConfig) -> Rollout {
     }
 }
 
+/// How long a post-check may take to reach a final answer by default.
+const DEFAULT_POST_TIMEOUT_MS: i64 = 10 * 60_000;
+
+/// Start a rolled-out run's post-checks, or end it as succeeded when it
+/// has none. Returns whether it is now monitoring.
+fn after_rollout(
+    conn: &r2d2::PooledConnection<SqliteConnectionManager>,
+    run: &DeployRun,
+    post: &[CheckSpec],
+) -> AppResult<bool> {
+    if post.is_empty() || !DeployRun::monitor(conn, run.id)? {
+        return Ok(false);
+    }
+    let checks: Vec<(String, i64)> = post
+        .iter()
+        .map(|spec| {
+            let deadline = spec
+                .timeout
+                .as_deref()
+                .and_then(parse_duration_ms)
+                .unwrap_or(DEFAULT_POST_TIMEOUT_MS);
+            (spec.name.clone(), deadline)
+        })
+        .collect();
+    CheckResult::start_post(conn, run.id, &checks, Utc::now().timestamp_millis())?;
+    log::info!(
+        "Deploy run {} for {} rolled out; monitoring {} post-check{}",
+        run.id,
+        run.config_name,
+        checks.len(),
+        if checks.len() == 1 { "" } else { "s" }
+    );
+    Ok(true)
+}
+
+/// The most a check's failing answer may count for: its `onFail`, and
+/// never more than a warning on a run that is itself a rollback.
+fn cap(spec: Option<&CheckSpec>, trigger: &str) -> Severity {
+    let configured = spec.and_then(|s| s.on_fail).unwrap_or(Severity::Rollback);
+    if trigger == "rollback" {
+        configured.min(Severity::Warn)
+    } else {
+        configured
+    }
+}
+
+/// Fold one poll into a post-check row: a final answer is capped and
+/// ends it; a pending one schedules the next ask.
+fn apply_poll(row: &mut CheckResult, poll: PostPoll, cap: Severity, now: i64) {
+    row.title = poll.title;
+    row.message = poll.message;
+    if poll.details_url.is_some() {
+        row.details_url = poll.details_url;
+    }
+    if poll.handle.is_some() {
+        row.handle = poll.handle;
+    }
+    match poll.status.severity() {
+        Some(severity) => {
+            row.status = PostStatus::from_severity(severity.min(cap))
+                .as_str()
+                .to_string();
+            row.finished_at = Some(now);
+            row.next_poll_at = None;
+        }
+        None => {
+            let wait_s = poll.retry_after.unwrap_or(15).clamp(5, 300) as i64;
+            row.status = PostStatus::Pending.as_str().to_string();
+            row.next_poll_at = Some(now + wait_s * 1000);
+        }
+    }
+}
+
+/// What a monitored run comes to once every post-check has a final
+/// answer: the worst one decides. `None` while any is pending.
+fn verdict(rows: &[CheckResult]) -> Option<(RunState, Option<String>)> {
+    let mut worst = Severity::Ok;
+    let mut notes = Vec::new();
+    for row in rows {
+        let severity = PostStatus::parse(&row.status)?.severity()?;
+        if severity > Severity::Ok {
+            notes.push(format!(
+                "post-check {}: {}",
+                row.check_name,
+                row.title.as_deref().unwrap_or(&row.status)
+            ));
+        }
+        worst = worst.max(severity);
+    }
+    let message = (!notes.is_empty()).then(|| notes.join("; "));
+    Some(match worst {
+        Severity::Ok => (RunState::Succeeded, None),
+        Severity::Warn => (RunState::SucceededWithWarnings, message),
+        Severity::Rollback => (RunState::Failed, message),
+    })
+}
+
+/// Poll a monitoring run's due post-checks and end the run once they have
+/// all answered. Returns the reason when this call failed the run.
+async fn monitor(
+    client: &Client,
+    pool: &Pool<SqliteConnectionManager>,
+    run: &DeployRun,
+    config: &DeployConfig,
+) -> AppResult<Option<String>> {
+    let now = Utc::now().timestamp_millis();
+    let (mut rows, parameters) = {
+        let conn = pool.get()?;
+        let parameters = match run.revision_id {
+            Some(id) => Revision::get(&conn, id)?
+                .map(|r| {
+                    r.parameters
+                        .into_iter()
+                        .map(|p| (p.name, p.value))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            None => BTreeMap::new(),
+        };
+        (CheckResult::post_for_run(&conn, run.id)?, parameters)
+    };
+    for row in rows.iter_mut() {
+        if row.status != PostStatus::Pending.as_str() || row.next_poll_at.is_some_and(|at| at > now)
+        {
+            continue;
+        }
+        let spec = config
+            .spec
+            .spec
+            .checks
+            .post
+            .iter()
+            .find(|s| s.name == row.check_name);
+        let Some(spec) = spec else {
+            row.status = PostStatus::Ok.as_str().to_string();
+            row.title = Some("no longer in the config".to_string());
+            row.finished_at = Some(now);
+            row.next_poll_at = None;
+            row.save(&pool.get()?)?;
+            continue;
+        };
+        if row.deadline_at.is_some_and(|deadline| now > deadline) {
+            let on_timeout = spec
+                .on_timeout
+                .unwrap_or(Severity::Warn)
+                .min(cap(Some(spec), &run.trigger));
+            row.status = PostStatus::from_severity(on_timeout).as_str().to_string();
+            row.title = Some(format!(
+                "no final answer in time{}",
+                row.title
+                    .as_deref()
+                    .map(|t| format!(" (last: {t})"))
+                    .unwrap_or_default()
+            ));
+            row.finished_at = Some(now);
+            row.next_poll_at = None;
+            row.save(&pool.get()?)?;
+            continue;
+        }
+        row.attempt += 1;
+        let ask = PostAsk {
+            run_id: run.id,
+            revision_id: run.revision_id,
+            trigger: run.trigger.clone(),
+            parameters: parameters.clone(),
+            attempt: row.attempt,
+            handle: row.handle.clone(),
+        };
+        match poll_post_check(client, config, spec, &ask).await {
+            Ok(poll) => apply_poll(
+                row,
+                poll,
+                cap(Some(spec), &run.trigger),
+                Utc::now().timestamp_millis(),
+            ),
+            Err(why) => {
+                log::warn!(
+                    "Post-check {} of run {} did not answer: {}",
+                    row.check_name,
+                    run.id,
+                    why
+                );
+                row.message = Some(why);
+                row.next_poll_at = Some(now + 30_000);
+            }
+        }
+        row.save(&pool.get()?)?;
+    }
+    let Some((state, message)) = verdict(&rows) else {
+        return Ok(None);
+    };
+    let conn = pool.get()?;
+    if !DeployRun::finish(&conn, run.id, state, message.as_deref())? {
+        return Ok(None);
+    }
+    log::info!("Deploy run {} for {} {}", run.id, run.config_name, state);
+    match state {
+        RunState::Failed => Ok(message),
+        RunState::SucceededWithWarnings => {
+            let name = &run.config_name;
+            discord::notify(&format!(
+                "**{name}**: deploy run {} rolled out with warnings: {}\n{}/deploy-history/{name}",
+                run.id,
+                message.as_deref().unwrap_or("a post-check warned"),
+                discord::CICD_URL
+            ))
+            .await;
+            Ok(None)
+        }
+        _ => Ok(None),
+    }
+}
+
 /// Apply a verdict to a run: end it, or record what it waits for unless
 /// the deadline has passed. Returns the reason when this call failed the
 /// run, so the caller acts on each failure exactly once.
@@ -230,22 +468,18 @@ fn advance(
     conn: &r2d2::PooledConnection<SqliteConnectionManager>,
     run: &DeployRun,
     verdict: Rollout,
+    post: &[CheckSpec],
 ) -> AppResult<Option<String>> {
     let (state, message) = match verdict {
+        Rollout::Done if after_rollout(conn, run, post)? => return Ok(None),
         Rollout::Done => (RunState::Succeeded, None),
         Rollout::Failed(why) => (RunState::Failed, Some(why)),
         Rollout::Waiting(what) => {
             let now = Utc::now().timestamp_millis();
             if run.deadline_at.is_some_and(|deadline| now > deadline) {
-                let minutes = run
-                    .deadline_at
-                    .map(|d| (d - run.created_at) / 60_000)
-                    .unwrap_or_default();
                 (
                     RunState::Failed,
-                    Some(format!(
-                        "did not roll out within {minutes} minutes; still {what}"
-                    )),
+                    Some(format!("did not roll out by its deadline; still {what}")),
                 )
             } else {
                 if run.message.as_deref() != Some(what.as_str()) {
@@ -495,6 +729,7 @@ mod tests {
             &conn,
             &run,
             Rollout::Waiting("waiting for Deployment/web".into()),
+            &[],
         )?;
         let run = DeployRun::get(&conn, run.id)?.expect("exists");
         assert_eq!(run.state, RunState::RollingOut);
@@ -509,12 +744,13 @@ mod tests {
             &conn,
             &overdue,
             Rollout::Waiting("waiting for Deployment/web".into()),
+            &[],
         )?;
         let run = DeployRun::get(&conn, overdue.id)?.expect("exists");
         assert_eq!(run.state, RunState::Failed);
         assert_eq!(
             run.message.as_deref(),
-            Some("did not roll out within 10 minutes; still waiting for Deployment/web")
+            Some("did not roll out by its deadline; still waiting for Deployment/web")
         );
         Ok(())
     }
@@ -542,18 +778,134 @@ mod tests {
         );
     }
 
+    fn row(name: &str, status: &str, title: &str) -> CheckResult {
+        CheckResult {
+            id: 0,
+            run_id: 1,
+            phase: "post".into(),
+            check_name: name.into(),
+            status: status.into(),
+            title: Some(title.into()),
+            message: None,
+            details_url: None,
+            attempt: 1,
+            started_at: 0,
+            finished_at: None,
+            next_poll_at: Some(0),
+            deadline_at: Some(600_000),
+            handle: None,
+        }
+    }
+
+    fn poll(status: PostStatus, retry_after: Option<u64>) -> PostPoll {
+        PostPoll {
+            status,
+            title: Some("t".into()),
+            message: None,
+            details_url: None,
+            retry_after,
+            handle: None,
+        }
+    }
+
+    #[test]
+    fn a_rollout_with_post_checks_monitors_them() -> AppResult<()> {
+        let pool = migrated_memory_pool();
+        let conn = pool.get()?;
+        let run = start(&conn)?;
+        let post = vec![CheckSpec {
+            name: "smoke".into(),
+            job: Some("media/jellyfin-at".into()),
+            ..Default::default()
+        }];
+        assert_eq!(advance(&conn, &run, Rollout::Done, &post)?, None);
+        let run = DeployRun::get(&conn, run.id)?.expect("exists");
+        assert_eq!(run.state, RunState::Monitoring);
+        assert!(run.rolled_out_at.is_some());
+        let rows = CheckResult::post_for_run(&conn, run.id)?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, "PENDING");
+        assert_eq!(
+            rows[0]
+                .deadline_at
+                .zip(Some(rows[0].started_at))
+                .map(|(d, s)| d - s),
+            Some(DEFAULT_POST_TIMEOUT_MS)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn answers_are_capped_by_on_fail_and_by_rollback_runs() {
+        let warn_only = CheckSpec {
+            on_fail: Some(Severity::Warn),
+            ..Default::default()
+        };
+        assert_eq!(cap(None, "web"), Severity::Rollback);
+        assert_eq!(cap(Some(&warn_only), "autodeploy"), Severity::Warn);
+        assert_eq!(cap(None, "rollback"), Severity::Warn);
+
+        let mut r = row("smoke", "PENDING", "");
+        apply_poll(&mut r, poll(PostStatus::Rollback, None), Severity::Warn, 50);
+        assert_eq!(r.status, "WARN");
+        assert_eq!(r.finished_at, Some(50));
+
+        let mut r = row("quiet", "PENDING", "");
+        apply_poll(
+            &mut r,
+            poll(PostStatus::Pending, Some(1)),
+            Severity::Rollback,
+            1000,
+        );
+        assert_eq!(r.status, "PENDING");
+        assert_eq!(r.next_poll_at, Some(6000), "retryAfter is at least 5 s");
+        apply_poll(
+            &mut r,
+            poll(PostStatus::Pending, Some(3600)),
+            Severity::Rollback,
+            1000,
+        );
+        assert_eq!(r.next_poll_at, Some(301_000), "and at most 5 min");
+    }
+
+    #[test]
+    fn the_worst_final_answer_decides() {
+        assert_eq!(
+            verdict(&[row("a", "OK", "fine"), row("b", "PENDING", "")]),
+            None
+        );
+        assert_eq!(
+            verdict(&[row("a", "OK", "fine"), row("b", "OK", "fine")]),
+            Some((RunState::Succeeded, None))
+        );
+        assert_eq!(
+            verdict(&[row("a", "WARN", "slow"), row("b", "OK", "fine")]),
+            Some((
+                RunState::SucceededWithWarnings,
+                Some("post-check a: slow".into())
+            ))
+        );
+        assert_eq!(
+            verdict(&[row("a", "WARN", "slow"), row("b", "ROLLBACK", "job failed")]),
+            Some((
+                RunState::Failed,
+                Some("post-check a: slow; post-check b: job failed".into())
+            ))
+        );
+    }
+
     #[test]
     fn done_and_failed_end_the_run() -> AppResult<()> {
         let pool = migrated_memory_pool();
         let conn = pool.get()?;
         let run = start(&conn)?;
-        advance(&conn, &run, Rollout::Done)?;
+        advance(&conn, &run, Rollout::Done, &[])?;
         assert_eq!(
             DeployRun::get(&conn, run.id)?.map(|r| r.state),
             Some(RunState::Succeeded)
         );
         let run = start(&conn)?;
-        let failed = advance(&conn, &run, Rollout::Failed("crash".into()))?;
+        let failed = advance(&conn, &run, Rollout::Failed("crash".into()), &[])?;
         assert_eq!(failed.as_deref(), Some("crash"));
         let run = DeployRun::get(&conn, run.id)?.expect("exists");
         assert_eq!(run.state, RunState::Failed);

@@ -196,6 +196,54 @@ spec:
                         x-kubernetes-validations:
                           - rule: "has(self.http)"
                             message: "a check needs a target (http)"
+                    post:
+                      type: array
+                      description: "Checks run once a deploy has rolled out. The worst answer decides whether it succeeded, warned or failed."
+                      items:
+                        type: object
+                        required:
+                          - name
+                        properties:
+                          name:
+                            type: string
+                          http:
+                            type: string
+                            description: "URL the check protocol is POSTed to."
+                          job:
+                            type: string
+                            description: "A jobfather JobTemplate, namespace/name, run as the check."
+                            pattern: "^[a-z0-9-]+/[a-z0-9.-]+$"
+                          onFail:
+                            type: string
+                            description: "The most a failing answer counts for. Default rollback."
+                            enum:
+                              - warn
+                              - rollback
+                          onTimeout:
+                            type: string
+                            description: "What no final answer by the timeout counts as. Default warn."
+                            enum:
+                              - ok
+                              - warn
+                              - rollback
+                          timeout:
+                            type: string
+                            description: "How long the check may take to reach a final answer. Default 10m."
+                            pattern: "^[0-9]+(s|m|h)$"
+                          secretRef:
+                            type: object
+                            description: "A Secret in the config's namespace whose key is sent as a bearer token."
+                            required:
+                              - name
+                              - key
+                            properties:
+                              name:
+                                type: string
+                              key:
+                                type: string
+                        x-kubernetes-validations:
+                          - rule: "has(self.http) != has(self.job)"
+                            message: "a post-check has exactly one target (http or job)"
                 team:
                   type: string
                 kind:

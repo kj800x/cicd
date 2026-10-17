@@ -49,6 +49,7 @@
   --status-fail-fg: #a70007;
   --status-fail-bg: #ffeaeb;
   --status-warn-fg: #9a6700;
+  --status-warn-bg: #fff4d6;
   --focus-ring: 0 0 0 3px rgba(9, 105, 218, 0.3);
 }
 
@@ -168,6 +169,17 @@
   gap: 4px;
   margin-bottom: 16px;
   font-size: 13px;
+}
+
+/* A deploy run that rolled out with post-check warnings. */
+.hl-badge--warn {
+  padding: 0 6px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
+  background: var(--status-warn-bg);
+  color: var(--status-warn-fg);
 }
 
 /* A deploy run still rolling out. */

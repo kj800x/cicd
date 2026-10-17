@@ -107,6 +107,10 @@ pub struct DeployChecks {
     /// Checks asked before a deploy is applied; any of them can hold it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pre: Vec<CheckSpec>,
+    /// Checks run once a deploy has rolled out; the worst answer decides
+    /// whether it succeeded, warned or failed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub post: Vec<CheckSpec>,
     /// How often a held autodeploy asks its pre-checks again. Default 5m.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_interval: Option<String>,
@@ -125,13 +129,36 @@ pub struct CheckSpec {
     /// The URL the check protocol is POSTed to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http: Option<String>,
-    /// How long to wait for an answer. Default 3s.
+    /// A jobfather JobTemplate, `namespace/name`, run as a post-check: it
+    /// passes when the job passes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job: Option<String>,
+    /// For a pre-check, how long to wait for an answer (default 3s); for a
+    /// post-check, how long it may take to reach a final answer (default
+    /// 10m).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<String>,
+    /// Post-checks only: the most a failing answer counts for. `warn` turns
+    /// a ROLLBACK into a WARN. Default `rollback`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_fail: Option<Severity>,
+    /// Post-checks only: what a check that has no final answer by its
+    /// timeout counts as. Default `warn`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_timeout: Option<Severity>,
     /// A Secret in the config's namespace whose key is sent as a bearer
     /// token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret_ref: Option<SecretKeyRef>,
+}
+
+/// How bad a post-check's answer is, mildest first.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    Ok,
+    Warn,
+    Rollback,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]

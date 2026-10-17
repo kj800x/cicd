@@ -249,6 +249,13 @@ pub fn migrations() -> Migrations<'static> {
           ALTER TABLE deploy_run ADD COLUMN next_check_at INTEGER;
           ALTER TABLE deploy_run ADD COLUMN notified_at INTEGER;
         "#}),
+        // Post-checks are polled: when to ask next, when to give up, and
+        // what the check started (a jobfather job's name).
+        M::up(indoc! { r#"
+          ALTER TABLE check_result ADD COLUMN next_poll_at INTEGER;
+          ALTER TABLE check_result ADD COLUMN deadline_at INTEGER;
+          ALTER TABLE check_result ADD COLUMN handle TEXT;
+        "#}),
     ])
 }
 
