@@ -27,6 +27,13 @@
 //! times out, errors, answers non-2xx or answers something unreadable
 //! counts as a `SOFT_BLOCK` titled "check X didn't respond": a broken check
 //! holds autodeploys but never locks a person out.
+//!
+//! A post-check is asked once a deploy has rolled out (phase `post`, mode
+//! `monitor`, `to.revision` set) and answers `OK`, `WARN`, `ROLLBACK` or
+//! `PENDING` with `retryAfter` seconds; cicd asks again with the same
+//! `runId` until the answer is final or the check's timeout passes. A
+//! `job` post-check runs a jobfather JobTemplate instead and passes when
+//! jobfather says the job passed.
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -36,7 +43,7 @@ use k8s_openapi::api::core::v1::Secret;
 use kube::{Api, Client, ResourceExt};
 use serde::{Deserialize, Serialize};
 
-use crate::kubernetes::deploy_config::{parse_duration_ms, CheckSpec};
+use crate::kubernetes::deploy_config::{parse_duration_ms, CheckSpec, Severity};
 use crate::kubernetes::DeployConfig;
 
 /// How long a check may take unless its spec says otherwise.
@@ -147,6 +154,8 @@ struct ConfigRef {
 
 #[derive(Serialize)]
 struct Side<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revision: Option<i64>,
     parameters: &'a BTreeMap<String, String>,
 }
 
@@ -157,6 +166,7 @@ struct Response {
     title: Option<String>,
     message: Option<String>,
     details_url: Option<String>,
+    retry_after: Option<u64>,
 }
 
 /// Ask every pre-check of `config` at once. The order of the result
@@ -253,9 +263,11 @@ async fn post(
         trigger: &ask.trigger,
         actor: &ask.actor,
         from: Side {
+            revision: None,
             parameters: &ask.from,
         },
         to: Side {
+            revision: None,
             parameters: &ask.to,
         },
         attempt: ask.attempt,
@@ -302,6 +314,251 @@ async fn read_secret(
         .and_then(|d| d.get(key))
         .ok_or_else(|| format!("Secret {name} has no key {key}"))?;
     String::from_utf8(bytes.0.clone()).map_err(|_| format!("Secret {name} key {key} is not text"))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PostStatus {
+    Ok,
+    Warn,
+    Rollback,
+    Pending,
+}
+
+impl PostStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PostStatus::Ok => "OK",
+            PostStatus::Warn => "WARN",
+            PostStatus::Rollback => "ROLLBACK",
+            PostStatus::Pending => "PENDING",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "OK" => Some(PostStatus::Ok),
+            "WARN" => Some(PostStatus::Warn),
+            "ROLLBACK" => Some(PostStatus::Rollback),
+            "PENDING" => Some(PostStatus::Pending),
+            _ => None,
+        }
+    }
+
+    /// How bad a final answer is; `None` while pending.
+    pub fn severity(self) -> Option<Severity> {
+        match self {
+            PostStatus::Ok => Some(Severity::Ok),
+            PostStatus::Warn => Some(Severity::Warn),
+            PostStatus::Rollback => Some(Severity::Rollback),
+            PostStatus::Pending => None,
+        }
+    }
+
+    pub fn from_severity(severity: Severity) -> Self {
+        match severity {
+            Severity::Ok => PostStatus::Ok,
+            Severity::Warn => PostStatus::Warn,
+            Severity::Rollback => PostStatus::Rollback,
+        }
+    }
+}
+
+/// One answer from a post-check.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PostPoll {
+    pub status: PostStatus,
+    pub title: Option<String>,
+    pub message: Option<String>,
+    pub details_url: Option<String>,
+    /// When a pending check wants to be asked again, in seconds.
+    pub retry_after: Option<u64>,
+    /// What the check started (a jobfather job's name), to remember.
+    pub handle: Option<String>,
+}
+
+/// The run a post-check is asked about.
+#[derive(Clone, Debug, Default)]
+pub struct PostAsk {
+    pub run_id: i64,
+    pub revision_id: Option<i64>,
+    pub trigger: String,
+    pub parameters: BTreeMap<String, String>,
+    pub attempt: i64,
+    /// What an earlier poll started, if anything.
+    pub handle: Option<String>,
+}
+
+/// How long one post-check request may take; the check's own `timeout`
+/// is its overall deadline.
+const POST_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Where jobfather's API is, from inside the cluster.
+fn jobfather_url() -> String {
+    std::env::var("JOBFATHER_URL")
+        .unwrap_or_else(|_| "http://jobfather.cicd.svc".to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+/// Where a person sees a jobfather job.
+const JOBFATHER_UI: &str = "https://jobs.home.coolkev.com";
+
+/// Ask one post-check once. An error is a check that did not answer this
+/// time; the caller keeps asking until the deadline.
+pub async fn poll_post_check(
+    client: &Client,
+    config: &DeployConfig,
+    spec: &CheckSpec,
+    ask: &PostAsk,
+) -> Result<PostPoll, String> {
+    match (&spec.http, &spec.job) {
+        (Some(url), _) => poll_http(client, config, spec, url, ask).await,
+        (None, Some(job)) => poll_job(job, ask).await,
+        (None, None) => Err("the check has neither http nor job".to_string()),
+    }
+}
+
+async fn poll_http(
+    client: &Client,
+    config: &DeployConfig,
+    spec: &CheckSpec,
+    url: &str,
+    ask: &PostAsk,
+) -> Result<PostPoll, String> {
+    let namespace = config.namespace().unwrap_or_else(|| "default".to_string());
+    let empty = BTreeMap::new();
+    let body = Request {
+        version: 1,
+        phase: "post",
+        mode: "monitor",
+        run_id: Some(ask.run_id),
+        check: &spec.name,
+        config: ConfigRef {
+            name: config.name_any(),
+            namespace: namespace.clone(),
+            kind: config.spec.spec.kind.clone(),
+        },
+        trigger: &ask.trigger,
+        actor: &ask.trigger,
+        from: Side {
+            revision: None,
+            parameters: &empty,
+        },
+        to: Side {
+            revision: ask.revision_id,
+            parameters: &ask.parameters,
+        },
+        attempt: ask.attempt,
+        started_at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    };
+    let mut request = reqwest::Client::new()
+        .post(url)
+        .timeout(POST_REQUEST_TIMEOUT)
+        .json(&body);
+    if let Some(secret_ref) = &spec.secret_ref {
+        let token = read_secret(client, &namespace, &secret_ref.name, &secret_ref.key).await?;
+        request = request.bearer_auth(token.trim());
+    }
+    let response = request.send().await.map_err(|e| e.to_string())?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("answered HTTP {status}"));
+    }
+    let response: Response = response
+        .json()
+        .await
+        .map_err(|e| format!("unreadable answer: {e}"))?;
+    let status = PostStatus::parse(&response.status)
+        .ok_or_else(|| format!("unknown status {:?}", response.status))?;
+    Ok(PostPoll {
+        status,
+        title: response.title,
+        message: response.message,
+        details_url: response.details_url,
+        retry_after: response.retry_after,
+        handle: None,
+    })
+}
+
+#[derive(Deserialize)]
+struct StartedJob {
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct JobState {
+    status: String,
+    passed: Option<bool>,
+}
+
+async fn poll_job(job: &str, ask: &PostAsk) -> Result<PostPoll, String> {
+    let (namespace, template) = job
+        .split_once('/')
+        .ok_or_else(|| format!("job {job:?} is not namespace/name"))?;
+    let http = reqwest::Client::new();
+    let Some(name) = &ask.handle else {
+        // First poll: start the job, telling it which deploy it checks.
+        let mut env: BTreeMap<String, String> = ask
+            .parameters
+            .iter()
+            .map(|(k, v)| (format!("CICD_PARAM_{k}"), v.clone()))
+            .collect();
+        env.insert("CICD_RUN_ID".to_string(), ask.run_id.to_string());
+        if let Some(revision) = ask.revision_id {
+            env.insert("CICD_REVISION".to_string(), revision.to_string());
+        }
+        let started: StartedJob = http
+            .post(format!(
+                "{}/api/job-templates/{namespace}/{template}/run",
+                jobfather_url()
+            ))
+            .timeout(POST_REQUEST_TIMEOUT)
+            .json(&serde_json::json!({ "env": env }))
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(|e| format!("could not start {job}: {e}"))?
+            .json()
+            .await
+            .map_err(|e| format!("unreadable answer starting {job}: {e}"))?;
+        return Ok(PostPoll {
+            status: PostStatus::Pending,
+            title: Some(format!("started {}", started.name)),
+            message: None,
+            details_url: Some(format!("{JOBFATHER_UI}/jobs/{namespace}/{}", started.name)),
+            retry_after: Some(15),
+            handle: Some(started.name),
+        });
+    };
+    let state: JobState = http
+        .get(format!("{}/api/jobs/{namespace}/{name}", jobfather_url()))
+        .timeout(POST_REQUEST_TIMEOUT)
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(|e| format!("could not read job {name}: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("unreadable job {name}: {e}"))?;
+    let (status, title) = match state.passed {
+        None => (
+            PostStatus::Pending,
+            format!("job {}", state.status.to_lowercase()),
+        ),
+        Some(true) => (PostStatus::Ok, "job passed".to_string()),
+        Some(false) => (
+            PostStatus::Rollback,
+            format!("job failed ({})", state.status.to_lowercase()),
+        ),
+    };
+    Ok(PostPoll {
+        status,
+        title: Some(title),
+        message: None,
+        details_url: Some(format!("{JOBFATHER_UI}/jobs/{namespace}/{name}")),
+        retry_after: Some(15),
+        handle: Some(name.clone()),
+    })
 }
 
 /// The checks that hold a deploy: every hard block, and every soft block
@@ -402,8 +659,50 @@ pub(crate) mod tests {
             name: name.into(),
             http: Some(url.into()),
             timeout: timeout.map(String::from),
-            secret_ref: None,
+            ..Default::default()
         }
+    }
+    #[tokio::test]
+    async fn a_post_check_reads_pending_and_retry_after() {
+        let (url, seen) = serve(
+            "200 OK",
+            r#"{"status":"PENDING","title":"quiet for 3 of 10 minutes","retryAfter":30}"#,
+            0,
+        )
+        .await;
+        let ask = PostAsk {
+            run_id: 9,
+            revision_id: Some(712),
+            trigger: "autodeploy".into(),
+            parameters: BTreeMap::from([("SHA".into(), "new".into())]),
+            attempt: 1,
+            handle: None,
+        };
+        let spec = check("quiet", &url, None);
+        let poll = poll_post_check(&unused_client(), &config(vec![]), &spec, &ask)
+            .await
+            .expect("an answer");
+        assert_eq!(poll.status, PostStatus::Pending);
+        assert_eq!(poll.retry_after, Some(30));
+        let request = seen.await.expect("server task");
+        let body: serde_json::Value =
+            serde_json::from_str(request.split_once("\r\n\r\n").expect("body").1)
+                .expect("json body");
+        assert_eq!(body["phase"], "post");
+        assert_eq!(body["mode"], "monitor");
+        assert_eq!(body["runId"], 9);
+        assert_eq!(body["to"]["revision"], 712);
+        assert_eq!(body["to"]["parameters"]["SHA"], "new");
+
+        let (bad, _s) = serve("200 OK", r#"{"status":"SOFT_BLOCK"}"#, 0).await;
+        let err = poll_post_check(
+            &unused_client(),
+            &config(vec![]),
+            &check("quiet", &bad, None),
+            &ask,
+        )
+        .await;
+        assert_eq!(err, Err("unknown status \"SOFT_BLOCK\"".to_string()));
     }
 
     /// A client that is never used: these checks carry no secretRef.

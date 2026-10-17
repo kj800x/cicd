@@ -303,7 +303,13 @@ pub fn render_run_badge(run: &DeployRun) -> Markup {
         RunState::RollingOut => {
             html! { span.hl-badge.hl-badge--progress title=(title) { "rolling out" } }
         }
+        RunState::Monitoring => {
+            html! { span.hl-badge.hl-badge--progress title=(title) { "checking" } }
+        }
         RunState::Succeeded => html! { span.hl-badge.hl-badge--ok { "rolled out" } },
+        RunState::SucceededWithWarnings => {
+            html! { span.hl-badge.hl-badge--warn title=(title) { "rolled out · warnings" } }
+        }
         RunState::Failed => {
             html! { span.hl-badge.hl-badge--fail title=(title) { "rollout failed" } }
         }
@@ -321,7 +327,14 @@ pub fn render_run_parts(run: Option<&DeployRun>) -> (Markup, Markup) {
         return (html! {}, html! {});
     };
     let note = match (run.state, &run.message) {
-        (RunState::RollingOut | RunState::Failed | RunState::RolledBack, Some(message)) => {
+        (
+            RunState::RollingOut
+            | RunState::Monitoring
+            | RunState::SucceededWithWarnings
+            | RunState::Failed
+            | RunState::RolledBack,
+            Some(message),
+        ) => {
             html! { div.feed-row__note.feed-row__note--run { (message) } }
         }
         _ => html! {},

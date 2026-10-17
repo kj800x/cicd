@@ -35,8 +35,12 @@ pub enum RunState {
     Waiting,
     /// The revision is recorded; waiting for the cluster to catch up.
     RollingOut,
-    /// Everything the config owns rolled out.
+    /// Rolled out; waiting for the post-checks' final answers.
+    Monitoring,
+    /// Everything the config owns rolled out (and every post-check said OK).
     Succeeded,
+    /// Rolled out, and a post-check warned.
+    SucceededWithWarnings,
     /// The rollout stalled, crash-looped or missed its deadline.
     Failed,
     /// Failed, and cicd rolled the config back to the last run that
@@ -51,7 +55,9 @@ impl RunState {
         match self {
             RunState::Waiting => "WAITING",
             RunState::RollingOut => "ROLLING_OUT",
+            RunState::Monitoring => "MONITORING",
             RunState::Succeeded => "SUCCEEDED",
+            RunState::SucceededWithWarnings => "SUCCEEDED_WITH_WARNINGS",
             RunState::Failed => "FAILED",
             RunState::RolledBack => "ROLLED_BACK",
             RunState::Superseded => "SUPERSEDED",
@@ -72,6 +78,8 @@ impl FromStr for RunState {
         match s {
             "WAITING" => Ok(RunState::Waiting),
             "ROLLING_OUT" => Ok(RunState::RollingOut),
+            "MONITORING" => Ok(RunState::Monitoring),
+            "SUCCEEDED_WITH_WARNINGS" => Ok(RunState::SucceededWithWarnings),
             "SUCCEEDED" => Ok(RunState::Succeeded),
             "FAILED" => Ok(RunState::Failed),
             "ROLLED_BACK" => Ok(RunState::RolledBack),
@@ -112,7 +120,7 @@ pub struct DeployRun {
 const COLUMNS: &str = "id, config_name, trigger, state, revision_id, message, created_at, rolled_out_at, finished_at, deadline_at, superseded_by, acknowledged, next_check_at, notified_at";
 
 /// The states a newer deploy of the same config supersedes.
-const UNFINISHED: &str = "('WAITING', 'ROLLING_OUT')";
+const UNFINISHED: &str = "('WAITING', 'ROLLING_OUT', 'MONITORING')";
 
 impl DeployRun {
     fn from_row(row: &Row) -> rusqlite::Result<Self> {
@@ -416,7 +424,7 @@ impl DeployRun {
             .query_row(
                 &format!(
                     "SELECT {COLUMNS} FROM deploy_run \
-                     WHERE config_name = ?1 AND id < ?2 AND state = ?3 AND revision_id IS NOT NULL \
+                     WHERE config_name = ?1 AND id < ?2 AND state IN (?3, 'SUCCEEDED_WITH_WARNINGS') AND revision_id IS NOT NULL \
                      AND revision_id != COALESCE(?4, -1) \
                      ORDER BY id DESC LIMIT 1"
                 ),
@@ -467,26 +475,46 @@ impl DeployRun {
         state: RunState,
         message: Option<&str>,
     ) -> AppResult<bool> {
-        if !matches!(state, RunState::Succeeded | RunState::Failed) {
+        if !matches!(
+            state,
+            RunState::Succeeded | RunState::SucceededWithWarnings | RunState::Failed
+        ) {
             return Err(AppError::Internal(format!(
                 "a run cannot finish as {state}"
             )));
         }
         let now = Utc::now().timestamp_millis();
-        let rolled_out_at = (state == RunState::Succeeded).then_some(now);
+        let rolled_out_at = (state != RunState::Failed).then_some(now);
         let changed = conn.execute(
-            "UPDATE deploy_run SET state = ?1, message = ?2, finished_at = ?3, rolled_out_at = COALESCE(?4, rolled_out_at) \
-             WHERE id = ?5 AND state = ?6",
+            "UPDATE deploy_run SET state = ?1, message = ?2, finished_at = ?3, rolled_out_at = COALESCE(rolled_out_at, ?4) \
+             WHERE id = ?5 AND state IN ('ROLLING_OUT', 'MONITORING')",
+            params![state.as_str(), message, now, rolled_out_at, id],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// A run rolled out and has post-checks: it monitors until they answer.
+    /// Returns whether this call moved it (a superseded run is left alone).
+    pub fn monitor(conn: &PooledConnection<SqliteConnectionManager>, id: i64) -> AppResult<bool> {
+        let changed = conn.execute(
+            "UPDATE deploy_run SET state = ?1, rolled_out_at = ?2, message = NULL WHERE id = ?3 AND state = ?4",
             params![
-                state.as_str(),
-                message,
-                now,
-                rolled_out_at,
+                RunState::Monitoring.as_str(),
+                Utc::now().timestamp_millis(),
                 id,
                 RunState::RollingOut.as_str()
             ],
         )?;
         Ok(changed == 1)
+    }
+
+    /// Every run waiting on post-checks, oldest first.
+    pub fn monitoring(conn: &PooledConnection<SqliteConnectionManager>) -> AppResult<Vec<Self>> {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {COLUMNS} FROM deploy_run WHERE state = ?1 ORDER BY id"
+        ))?;
+        let rows = stmt.query_map(params![RunState::Monitoring.as_str()], Self::from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 }
 
