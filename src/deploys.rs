@@ -17,6 +17,7 @@ use crate::{
     crab_ext::Octocrabs,
     db::{
         blocker::Blocker,
+        deploy_run::DeployRun,
         git_commit::GitCommit,
         git_repo::GitRepo,
         revision::{NewRevision, Revision},
@@ -512,10 +513,34 @@ pub async fn change_patches(
 
     let conn = pool.get()?;
     match Revision::record(&conn, NewRevision::patch_change(&effective, actor, &reason)) {
-        Ok(rev) => log::info!("Recorded revision {} for {} ({})", rev.id, name, reason),
+        Ok(rev) => {
+            log::info!("Recorded revision {} for {} ({})", rev.id, name, reason);
+            start_run(&conn, &rev, actor);
+        }
         Err(e) => log::error!("Failed to record patch revision for {}: {}", name, e),
     }
     Ok(())
+}
+
+/// Start the deploy run a recorded revision implies (see
+/// [`DeployRun::after_revision`]). Bookkeeping like the revision itself:
+/// a failure is logged, because the deploy has already happened.
+fn start_run(conn: &PooledConnection<SqliteConnectionManager>, revision: &Revision, trigger: &str) {
+    match DeployRun::after_revision(conn, revision, trigger) {
+        Ok(Some(run)) => log::info!(
+            "Deploy run {} for {} (revision {}) is rolling out",
+            run.id,
+            revision.config_name,
+            revision.id
+        ),
+        Ok(None) => {}
+        Err(e) => log::error!(
+            "Failed to start a deploy run for {} (revision {}): {}",
+            revision.config_name,
+            revision.id,
+            e
+        ),
+    }
 }
 
 /// Check that a config's patch list fits: render (or, for an undeployed
@@ -857,7 +882,14 @@ pub async fn run_action(
             new.reason = reason.clone();
         }
         match Revision::record(&conn, new) {
-            Ok(rev) => log::info!("Recorded revision {} for {} ({})", rev.id, name, rev.action),
+            Ok(rev) => {
+                log::info!("Recorded revision {} for {} ({})", rev.id, name, rev.action);
+                let trigger = match action {
+                    Action::Rollback { .. } => "rollback",
+                    _ => actor,
+                };
+                start_run(&conn, &rev, trigger);
+            }
             Err(e) => log::error!("Failed to record revision for {}: {}", name, e),
         }
     }

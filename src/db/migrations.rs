@@ -193,6 +193,37 @@ pub fn migrations() -> Migrations<'static> {
         M::up(indoc! { r#"
           ALTER TABLE revision ADD COLUMN temporary BOOLEAN NOT NULL DEFAULT FALSE;
         "#}),
+        // Deploy runs: the lifecycle of one deploy after its revision is
+        // recorded. See db/deploy_run.rs. Each config's latest revision, unless
+        // it is an undeploy, is seeded as a SUCCEEDED run with trigger
+        // 'backfill': it is what is on the cluster now, and a later failed
+        // run needs a known-good run to roll back to.
+        M::up(indoc! { r#"
+          CREATE TABLE deploy_run (
+              id INTEGER PRIMARY KEY NOT NULL,
+              config_name TEXT NOT NULL,
+              trigger TEXT NOT NULL,
+              state TEXT NOT NULL,
+              revision_id INTEGER,
+              message TEXT,
+              created_at INTEGER NOT NULL,
+              rolled_out_at INTEGER,
+              finished_at INTEGER,
+              deadline_at INTEGER,
+              superseded_by INTEGER,
+              FOREIGN KEY(revision_id) REFERENCES revision(id)
+          );
+          CREATE INDEX IF NOT EXISTS idx_deploy_run_config ON deploy_run(config_name, id);
+          CREATE INDEX IF NOT EXISTS idx_deploy_run_state ON deploy_run(state);
+          CREATE INDEX IF NOT EXISTS idx_deploy_run_revision ON deploy_run(revision_id);
+
+          INSERT INTO deploy_run (config_name, trigger, state, revision_id, created_at, rolled_out_at, finished_at)
+          SELECT r.config_name, 'backfill', 'SUCCEEDED', r.id, r.created_at, r.created_at, r.created_at
+          FROM revision r
+          WHERE r.id = (SELECT MAX(r2.id) FROM revision r2 WHERE r2.config_name = r.config_name)
+            AND r.action != 'undeploy'
+          ORDER BY r.id;
+        "#}),
     ])
 }
 
