@@ -79,6 +79,29 @@ pub struct DeployConfigSpecFields {
     pub specs: Vec<serde_json::Value>,
 }
 
+/// Annotation on every child object: a hash of the object exactly as
+/// cicd applied it. Deploy runs compare it with a fresh render of the
+/// config to tell whether the controller has applied the deploy yet; the
+/// `artifactSha`/`configSha` annotations cannot, since tag, value and
+/// patch changes leave both unchanged.
+pub const MANIFEST_HASH_ANNOTATION: &str = "manifestHash";
+
+/// Set [`MANIFEST_HASH_ANNOTATION`] to the hash of everything else in the
+/// object. Rendering is deterministic, so the controller and the deploy
+/// run driver arrive at the same hash for the same config.
+fn stamp_manifest_hash(obj: &mut DynamicObject) {
+    if let Some(annotations) = obj.metadata.annotations.as_mut() {
+        annotations.remove(MANIFEST_HASH_ANNOTATION);
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(serde_json::to_vec(obj).unwrap_or_default());
+    let hash = format!("{:x}", hasher.finalize());
+    obj.metadata
+        .annotations
+        .get_or_insert_with(BTreeMap::new)
+        .insert(MANIFEST_HASH_ANNOTATION.to_string(), hash[..16].to_string());
+}
+
 /// One manifest template and the `.deploy/<config>/` file it came from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Template {
@@ -503,6 +526,7 @@ impl DeployConfig {
             self.ensure_owner_reference(&mut obj);
             self.ensure_labels(&mut obj);
             self.ensure_annotations(&mut obj);
+            stamp_manifest_hash(&mut obj);
             objects.push(obj);
         }
         Ok(objects)
