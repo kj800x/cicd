@@ -133,6 +133,11 @@ pub enum AppError {
     #[error("Blocked: {0}")]
     Blocked(String),
 
+    /// A pre-check holds the deploy: refused for a person, waiting for an
+    /// autodeploy.
+    #[error("Held: {0}")]
+    Held(String),
+
     /// A service this action depends on (watchtower) cannot be reached.
     #[error("Unavailable: {0}")]
     Unavailable(String),
@@ -183,7 +188,7 @@ impl ResponseError for AppError {
 
             AppError::InvalidInput(_) | AppError::Parse(_) => StatusCode::BAD_REQUEST,
 
-            AppError::Blocked(_) => StatusCode::CONFLICT,
+            AppError::Blocked(_) | AppError::Held(_) => StatusCode::CONFLICT,
             AppError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
 
             AppError::Webhook(_) | AppError::Http(_) => StatusCode::BAD_GATEWAY,

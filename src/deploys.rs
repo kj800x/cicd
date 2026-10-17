@@ -14,9 +14,11 @@ use r2d2_sqlite::SqliteConnectionManager;
 use std::collections::{BTreeMap, HashMap};
 
 use crate::{
+    checks::{self, ask_pre_checks, holding, Ask, PreOutcome, PreStatus},
     crab_ext::Octocrabs,
     db::{
         blocker::Blocker,
+        check_result::CheckResult,
         deploy_run::{DeployRun, DEFAULT_ROLLOUT_DEADLINE_MS},
         git_commit::GitCommit,
         git_repo::GitRepo,
@@ -49,10 +51,17 @@ pub struct SelectionIntent {
     /// and recorded under the tracked channel, and the selection is left
     /// alone, so the next "latest" resolves through watchtower again.
     pub values: BTreeMap<String, String>,
+    /// Soft-blocking pre-checks the person acknowledged, by name: the
+    /// deploy goes ahead despite them, and the run records it.
+    pub acknowledged: Vec<String>,
+    /// The waiting run this deploy is the retry of, when the driver asks a
+    /// held autodeploy again.
+    pub waiting_run: Option<i64>,
 }
 
 impl SelectionIntent {
-    /// From a form: `durability`, `note`, `by`, and `value_<PARAM>` fields.
+    /// From a form: `durability`, `note`, `by`, `value_<PARAM>` and
+    /// `ack_<CHECK>` fields.
     pub fn from_form(form: &HashMap<String, String>) -> Self {
         let durability = match form.get("durability").map(|d| d.trim()) {
             Some("temporary") => Some(Durability::Temporary),
@@ -67,11 +76,23 @@ impl SelectionIntent {
                 (!name.is_empty() && !v.is_empty()).then(|| (name.to_string(), v.to_string()))
             })
             .collect();
+        let mut acknowledged: Vec<String> = form
+            .iter()
+            .filter(|(_, v)| !v.trim().is_empty())
+            .filter_map(|(k, _)| {
+                k.strip_prefix("ack_")
+                    .filter(|n| !n.is_empty())
+                    .map(String::from)
+            })
+            .collect();
+        acknowledged.sort();
         SelectionIntent {
             durability,
             note: form.get("note").cloned(),
             by: form.get("by").cloned(),
             values,
+            acknowledged,
+            waiting_run: None,
         }
     }
 }
@@ -515,7 +536,16 @@ pub async fn change_patches(
     match Revision::record(&conn, NewRevision::patch_change(&effective, actor, &reason)) {
         Ok(rev) => {
             log::info!("Recorded revision {} for {} ({})", rev.id, name, reason);
-            start_run(&conn, &rev, actor, &effective);
+            // Patch changes are not gated by pre-checks (yet): they come from
+            // a person through the patch tools, which cannot acknowledge.
+            start_run(
+                &conn,
+                &rev,
+                actor,
+                &effective,
+                &SelectionIntent::default(),
+                &Gate::default(),
+            );
         }
         Err(e) => log::error!("Failed to record patch revision for {}: {}", name, e),
     }
@@ -530,6 +560,8 @@ fn start_run(
     revision: &Revision,
     trigger: &str,
     config: &DeployConfig,
+    intent: &SelectionIntent,
+    pre_checks: &Gate,
 ) {
     let deadline_ms = config
         .spec
@@ -537,13 +569,29 @@ fn start_run(
         .checks
         .rollout_deadline_ms()
         .unwrap_or(DEFAULT_ROLLOUT_DEADLINE_MS);
-    match DeployRun::after_revision(conn, revision, trigger, deadline_ms) {
-        Ok(Some(run)) => log::info!(
-            "Deploy run {} for {} (revision {}) is rolling out",
-            run.id,
-            revision.config_name,
-            revision.id
-        ),
+    match DeployRun::after_revision_with(
+        conn,
+        revision,
+        trigger,
+        deadline_ms,
+        intent.waiting_run,
+        &pre_checks.overridden,
+    ) {
+        Ok(Some(run)) => {
+            log::info!(
+                "Deploy run {} for {} (revision {}) is rolling out",
+                run.id,
+                revision.config_name,
+                revision.id
+            );
+            if !pre_checks.outcomes.is_empty() {
+                if let Err(e) =
+                    CheckResult::record_pre(conn, run.id, &pre_checks.outcomes, pre_checks.attempt)
+                {
+                    log::error!("Failed to record pre-checks of run {}: {}", run.id, e);
+                }
+            }
+        }
         Ok(None) => {}
         Err(e) => log::error!(
             "Failed to start a deploy run for {} (revision {}): {}",
@@ -552,6 +600,125 @@ fn start_run(
             e
         ),
     }
+}
+
+/// What the pre-checks said about a deploy that may go ahead.
+#[derive(Clone, Debug, Default)]
+pub struct Gate {
+    pub outcomes: Vec<PreOutcome>,
+    /// Which ask this was: 1, or one more than the waiting run's last.
+    pub attempt: i64,
+    /// The soft blocks the deploy goes ahead despite, by name.
+    pub overridden: Vec<String>,
+}
+
+/// Ask `config`'s pre-checks about a deploy of `state` with `values`, and
+/// decide. Hard blocks and soft blocks the person did not acknowledge hold
+/// it: a person is refused with what holds it, and an autodeploy becomes
+/// (or stays) a waiting run that the driver asks again after
+/// `checks.retryInterval`. Both are [`AppError::Held`].
+async fn gate(
+    client: &Client,
+    pool: &Pool<SqliteConnectionManager>,
+    config: &DeployConfig,
+    actor: &str,
+    intent: &SelectionIntent,
+    state: &DeploymentState,
+    values: &ParameterValues,
+) -> AppResult<Gate> {
+    let checks = &config.spec.spec.checks;
+    if checks.pre.is_empty() {
+        return Ok(Gate::default());
+    }
+    let name = kube::ResourceExt::name_any(config);
+    let attempt = match intent.waiting_run {
+        Some(id) => {
+            CheckResult::for_run(&pool.get()?, id)?
+                .iter()
+                .map(|r| r.attempt)
+                .max()
+                .unwrap_or(0)
+                + 1
+        }
+        None => 1,
+    };
+    let from = config
+        .status
+        .as_ref()
+        .map(|s| {
+            s.parameters
+                .iter()
+                .map(|(k, v)| (k.clone(), v.rendered()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut to: BTreeMap<String, String> = values
+        .iter()
+        .map(|(k, v)| (k.clone(), v.rendered()))
+        .collect();
+    if let DeploymentState::DeployedWithArtifact { artifact, .. } = state {
+        to.insert(SHA_PARAMETER.to_string(), artifact.sha.clone());
+    }
+    let ask = Ask {
+        run_id: intent.waiting_run,
+        trigger: actor.to_string(),
+        actor: actor.to_string(),
+        from,
+        to,
+        attempt,
+    };
+    let outcomes = ask_pre_checks(client, config, checks::Mode::Gate, &ask).await;
+    let held = holding(&outcomes, &intent.acknowledged);
+    if held.is_empty() {
+        let overridden = outcomes
+            .iter()
+            .filter(|o| o.status == PreStatus::SoftBlock)
+            .map(|o| o.name.clone())
+            .collect();
+        return Ok(Gate {
+            outcomes,
+            attempt,
+            overridden,
+        });
+    }
+    let summary = held
+        .iter()
+        .map(|o| o.summary())
+        .collect::<Vec<_>>()
+        .join("; ");
+    if actor == crate::web::feed::AUTODEPLOY_ACTOR {
+        let conn = pool.get()?;
+        let next = chrono::Utc::now().timestamp_millis() + checks.retry_interval_ms();
+        let run_id = match intent.waiting_run {
+            Some(id) => {
+                DeployRun::keep_waiting(&conn, id, &summary, next)?;
+                id
+            }
+            None => DeployRun::wait(&conn, &name, actor, &summary, next)?.id,
+        };
+        CheckResult::record_pre(&conn, run_id, &outcomes, attempt)?;
+        return Err(AppError::Held(format!(
+            "{name}'s autodeploy waits on its pre-checks (run {run_id}): {summary}"
+        )));
+    }
+    let soft: Vec<&str> = held
+        .iter()
+        .filter(|o| o.status == PreStatus::SoftBlock)
+        .map(|o| o.name.as_str())
+        .collect();
+    let hint = if soft.len() == held.len() {
+        format!(" Acknowledge {} to deploy anyway.", soft.join(", "))
+    } else if soft.is_empty() {
+        " A hard block cannot be acknowledged.".to_string()
+    } else {
+        format!(
+            " A hard block cannot be acknowledged; {} could be.",
+            soft.join(", ")
+        )
+    };
+    Err(AppError::Held(format!(
+        "{name} is held by its pre-checks: {summary}.{hint}"
+    )))
 }
 
 /// Check that a config's patch list fits: render (or, for an undeployed
@@ -834,6 +1001,13 @@ pub async fn run_action(
             resolve_tag_parameters(Watchtower::global(), &effective, &intent.values).await?,
         );
     }
+    // Pre-checks gate what blockers gate, after everything the deploy
+    // would apply is known and before anything is applied.
+    let pre_checks = if action.is_gated_by_blockers() {
+        gate(client, pool, &effective, actor, intent, &state, &values).await?
+    } else {
+        Gate::default()
+    };
     let deploy_action = to_deploy_action(action, &name, state, values);
 
     deploy_action
@@ -899,7 +1073,7 @@ pub async fn run_action(
                     Action::Rollback { .. } => "rollback",
                     _ => actor,
                 };
-                start_run(&conn, &rev, trigger, &effective);
+                start_run(&conn, &rev, trigger, &effective, intent, &pre_checks);
             }
             Err(e) => log::error!("Failed to record revision for {}: {}", name, e),
         }
@@ -928,6 +1102,125 @@ pub async fn run_action(
 mod tests {
     use super::*;
     use crate::db::test_support::migrated_memory_pool;
+
+    mod pre_check_gate {
+        use super::*;
+        use crate::checks::tests::{check, config, serve, unused_client};
+        use crate::db::deploy_run::RunState;
+
+        const SOFT: &str = r#"{"status":"SOFT_BLOCK","title":"2 active streams"}"#;
+        const HARD: &str = r#"{"status":"HARD_BLOCK","title":"maintenance window"}"#;
+        const OK: &str = r#"{"status":"OK","title":"idle"}"#;
+
+        async fn ask(
+            body: &'static str,
+            pool: &Pool<SqliteConnectionManager>,
+            actor: &str,
+            intent: &SelectionIntent,
+        ) -> AppResult<Gate> {
+            let (url, _server) = serve("200 OK", body, 0).await;
+            let config = config(vec![check("streams", &url, None)]);
+            gate(
+                &unused_client(),
+                pool,
+                &config,
+                actor,
+                intent,
+                &DeploymentState::Undeployed,
+                &ParameterValues::default(),
+            )
+            .await
+        }
+
+        #[tokio::test]
+        async fn a_soft_block_refuses_a_person_until_acknowledged() -> AppResult<()> {
+            let pool = migrated_memory_pool();
+            match ask(SOFT, &pool, "web", &SelectionIntent::default()).await {
+                Err(AppError::Held(message)) => {
+                    assert!(message.contains("streams: 2 active streams"), "{message}");
+                    assert!(
+                        message.contains("Acknowledge streams to deploy anyway"),
+                        "{message}"
+                    );
+                }
+                other => panic!("expected Held, got {other:?}"),
+            }
+            assert!(
+                DeployRun::waiting(&pool.get()?)?.is_empty(),
+                "a person never waits"
+            );
+
+            let acknowledged = SelectionIntent {
+                acknowledged: vec!["streams".into()],
+                ..Default::default()
+            };
+            let gate = ask(SOFT, &pool, "web", &acknowledged).await?;
+            assert_eq!(gate.overridden, vec!["streams".to_string()]);
+            assert_eq!(gate.outcomes.len(), 1);
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn a_hard_block_cannot_be_acknowledged() {
+            let pool = migrated_memory_pool();
+            let intent = SelectionIntent {
+                acknowledged: vec!["streams".into()],
+                ..Default::default()
+            };
+            match ask(HARD, &pool, "mcp", &intent).await {
+                Err(AppError::Held(message)) => {
+                    assert!(
+                        message.contains("A hard block cannot be acknowledged"),
+                        "{message}"
+                    )
+                }
+                other => panic!("expected Held, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn a_held_autodeploy_waits_and_is_asked_again() -> AppResult<()> {
+            let pool = migrated_memory_pool();
+            assert!(matches!(
+                ask(SOFT, &pool, "autodeploy", &SelectionIntent::default()).await,
+                Err(AppError::Held(_))
+            ));
+            let waiting = DeployRun::waiting(&pool.get()?)?;
+            assert_eq!(waiting.len(), 1);
+            let run = &waiting[0];
+            assert_eq!(run.state, RunState::Waiting);
+            assert_eq!(run.message.as_deref(), Some("streams: 2 active streams"));
+            assert!(run.next_check_at.is_some());
+
+            // The retry is still held: same run, second attempt.
+            let retry = SelectionIntent {
+                waiting_run: Some(run.id),
+                ..Default::default()
+            };
+            assert!(matches!(
+                ask(SOFT, &pool, "autodeploy", &retry).await,
+                Err(AppError::Held(_))
+            ));
+            assert_eq!(DeployRun::waiting(&pool.get()?)?.len(), 1);
+            let results = CheckResult::for_run(&pool.get()?, run.id)?;
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].attempt, 2);
+
+            // Then the checks pass: the third ask goes ahead.
+            let gate = ask(OK, &pool, "autodeploy", &retry).await?;
+            assert_eq!(gate.attempt, 3);
+            assert!(gate.overridden.is_empty());
+
+            // A newer autodeploy that is held replaces the waiting run.
+            assert!(ask(SOFT, &pool, "autodeploy", &SelectionIntent::default())
+                .await
+                .is_err());
+            let waiting = DeployRun::waiting(&pool.get()?)?;
+            assert_eq!(waiting.len(), 1);
+            assert_ne!(waiting[0].id, run.id);
+            Ok(())
+        }
+    }
     use crate::kubernetes::repo::ShaMaybeBranch;
 
     #[test]
@@ -1116,6 +1409,7 @@ mod tests {
             note: Some("testing".into()),
             by: Some("kevin".into()),
             values: Default::default(),
+            ..Default::default()
         };
         match selection_change(&pin, Some("master"), &noted) {
             Some((_, Some(s))) => {

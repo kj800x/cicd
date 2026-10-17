@@ -2,8 +2,10 @@
 //! is recorded until cicd knows whether it worked.
 //!
 //! A revision is the immutable record of what was applied; a run is the
-//! mutable story of that deploy afterwards. A run starts in `ROLLING_OUT`
-//! when its revision is recorded, and the driver loop
+//! mutable story of that deploy afterwards. An autodeploy that a
+//! pre-check holds starts as a `WAITING` run with no revision, asked again
+//! on an interval until its checks pass and it deploys. A run is
+//! `ROLLING_OUT` once its revision is recorded, and the driver loop
 //! (`crate::deploy_runs`) moves it on: to `SUCCEEDED` once every object
 //! the config owns has rolled out, or to `FAILED` when a rollout stalls,
 //! crash-loops or misses its deadline. A newer deploy of the same config
@@ -29,6 +31,8 @@ pub const DEFAULT_ROLLOUT_DEADLINE_MS: i64 = 10 * 60 * 1000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunState {
+    /// An autodeploy a pre-check held; it has no revision yet.
+    Waiting,
     /// The revision is recorded; waiting for the cluster to catch up.
     RollingOut,
     /// Everything the config owns rolled out.
@@ -45,6 +49,7 @@ pub enum RunState {
 impl RunState {
     pub fn as_str(&self) -> &'static str {
         match self {
+            RunState::Waiting => "WAITING",
             RunState::RollingOut => "ROLLING_OUT",
             RunState::Succeeded => "SUCCEEDED",
             RunState::Failed => "FAILED",
@@ -65,6 +70,7 @@ impl FromStr for RunState {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
+            "WAITING" => Ok(RunState::Waiting),
             "ROLLING_OUT" => Ok(RunState::RollingOut),
             "SUCCEEDED" => Ok(RunState::Succeeded),
             "FAILED" => Ok(RunState::Failed),
@@ -95,9 +101,18 @@ pub struct DeployRun {
     pub finished_at: Option<i64>,
     pub deadline_at: Option<i64>,
     pub superseded_by: Option<i64>,
+    /// The soft-blocking pre-checks a person acknowledged to deploy anyway.
+    pub acknowledged: Vec<String>,
+    /// When a waiting run asks its pre-checks again.
+    pub next_check_at: Option<i64>,
+    /// When a long wait was reported to Discord.
+    pub notified_at: Option<i64>,
 }
 
-const COLUMNS: &str = "id, config_name, trigger, state, revision_id, message, created_at, rolled_out_at, finished_at, deadline_at, superseded_by";
+const COLUMNS: &str = "id, config_name, trigger, state, revision_id, message, created_at, rolled_out_at, finished_at, deadline_at, superseded_by, acknowledged, next_check_at, notified_at";
+
+/// The states a newer deploy of the same config supersedes.
+const UNFINISHED: &str = "('WAITING', 'ROLLING_OUT')";
 
 impl DeployRun {
     fn from_row(row: &Row) -> rusqlite::Result<Self> {
@@ -116,6 +131,12 @@ impl DeployRun {
             finished_at: row.get(8)?,
             deadline_at: row.get(9)?,
             superseded_by: row.get(10)?,
+            acknowledged: row
+                .get::<_, Option<String>>(11)?
+                .and_then(|json| serde_json::from_str(&json).ok())
+                .unwrap_or_default(),
+            next_check_at: row.get(12)?,
+            notified_at: row.get(13)?,
         })
     }
 
@@ -125,58 +146,193 @@ impl DeployRun {
     /// only supersedes them, since there is nothing left to roll out.
     /// The new run fails if it has not rolled out within `deadline_ms`.
     /// Returns the new run, if one was started.
+    #[cfg(test)]
     pub fn after_revision(
         conn: &PooledConnection<SqliteConnectionManager>,
         revision: &Revision,
         trigger: &str,
         deadline_ms: i64,
     ) -> AppResult<Option<Self>> {
+        Self::after_revision_with(conn, revision, trigger, deadline_ms, None, &[])
+    }
+
+    /// [`DeployRun::after_revision`], continuing the `waiting` run when this
+    /// deploy is that held autodeploy going ahead (it keeps its id and
+    /// history instead of a new run superseding it), and recording which
+    /// soft blocks were `acknowledged`.
+    pub fn after_revision_with(
+        conn: &PooledConnection<SqliteConnectionManager>,
+        revision: &Revision,
+        trigger: &str,
+        deadline_ms: i64,
+        waiting: Option<i64>,
+        acknowledged: &[String],
+    ) -> AppResult<Option<Self>> {
         let now = Utc::now().timestamp_millis();
         let tx = conn.unchecked_transaction()?;
         let deploys = revision.action != "undeploy" && revision.config_sha.is_some();
-        let run = if deploys {
+        let acknowledged_json = (!acknowledged.is_empty())
+            .then(|| serde_json::to_string(acknowledged).unwrap_or_default());
+        let id = if deploys {
             let deadline_at = now + deadline_ms;
-            tx.execute(
-                "INSERT INTO deploy_run (config_name, trigger, state, revision_id, created_at, deadline_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    revision.config_name,
-                    trigger,
-                    RunState::RollingOut.as_str(),
-                    revision.id,
-                    now,
-                    deadline_at
-                ],
-            )?;
-            Some(DeployRun {
-                id: tx.last_insert_rowid(),
-                config_name: revision.config_name.clone(),
-                trigger: trigger.to_string(),
-                state: RunState::RollingOut,
-                revision_id: Some(revision.id),
-                message: None,
-                created_at: now,
-                rolled_out_at: None,
-                finished_at: None,
-                deadline_at: Some(deadline_at),
-                superseded_by: None,
-            })
+            let continued = match waiting {
+                Some(id) => tx.execute(
+                    "UPDATE deploy_run SET state = ?1, revision_id = ?2, deadline_at = ?3, message = NULL, \
+                     next_check_at = NULL, acknowledged = COALESCE(?4, acknowledged) \
+                     WHERE id = ?5 AND config_name = ?6 AND state = ?7",
+                    params![
+                        RunState::RollingOut.as_str(),
+                        revision.id,
+                        deadline_at,
+                        acknowledged_json,
+                        id,
+                        revision.config_name,
+                        RunState::Waiting.as_str()
+                    ],
+                )? == 1,
+                None => false,
+            };
+            if continued {
+                waiting
+            } else {
+                tx.execute(
+                    "INSERT INTO deploy_run (config_name, trigger, state, revision_id, created_at, deadline_at, acknowledged) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        revision.config_name,
+                        trigger,
+                        RunState::RollingOut.as_str(),
+                        revision.id,
+                        now,
+                        deadline_at,
+                        acknowledged_json
+                    ],
+                )?;
+                Some(tx.last_insert_rowid())
+            }
         } else {
             None
         };
         tx.execute(
+            &format!(
+                "UPDATE deploy_run SET state = ?1, superseded_by = ?2, finished_at = ?3 \
+                 WHERE config_name = ?4 AND state IN {UNFINISHED} AND id != COALESCE(?2, -1)"
+            ),
+            params![RunState::Superseded.as_str(), id, now, revision.config_name],
+        )?;
+        let run = match id {
+            Some(id) => tx
+                .query_row(
+                    &format!("SELECT {COLUMNS} FROM deploy_run WHERE id = ?1"),
+                    params![id],
+                    Self::from_row,
+                )
+                .optional()?,
+            None => None,
+        };
+        tx.commit()?;
+        Ok(run)
+    }
+
+    /// Hold an autodeploy: a `WAITING` run that asks its pre-checks again
+    /// at `next_check_at`. A config has at most one: an older waiting run
+    /// is superseded by this one, since this one deploys a newer latest.
+    pub fn wait(
+        conn: &PooledConnection<SqliteConnectionManager>,
+        config_name: &str,
+        trigger: &str,
+        message: &str,
+        next_check_at: i64,
+    ) -> AppResult<Self> {
+        let now = Utc::now().timestamp_millis();
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO deploy_run (config_name, trigger, state, message, created_at, next_check_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                config_name,
+                trigger,
+                RunState::Waiting.as_str(),
+                message,
+                now,
+                next_check_at
+            ],
+        )?;
+        let id = tx.last_insert_rowid();
+        tx.execute(
             "UPDATE deploy_run SET state = ?1, superseded_by = ?2, finished_at = ?3 \
-             WHERE config_name = ?4 AND state = ?5 AND id != COALESCE(?2, -1)",
+             WHERE config_name = ?4 AND state = ?5 AND id != ?2",
             params![
                 RunState::Superseded.as_str(),
-                run.as_ref().map(|r| r.id),
+                id,
                 now,
-                revision.config_name,
-                RunState::RollingOut.as_str()
+                config_name,
+                RunState::Waiting.as_str()
             ],
+        )?;
+        let run = tx.query_row(
+            &format!("SELECT {COLUMNS} FROM deploy_run WHERE id = ?1"),
+            params![id],
+            Self::from_row,
         )?;
         tx.commit()?;
         Ok(run)
+    }
+
+    /// A waiting run was asked again and is still held.
+    pub fn keep_waiting(
+        conn: &PooledConnection<SqliteConnectionManager>,
+        id: i64,
+        message: &str,
+        next_check_at: i64,
+    ) -> AppResult<()> {
+        conn.execute(
+            "UPDATE deploy_run SET message = ?1, next_check_at = ?2 WHERE id = ?3 AND state = ?4",
+            params![message, next_check_at, id, RunState::Waiting.as_str()],
+        )?;
+        Ok(())
+    }
+
+    /// Stop a waiting run without deploying: autodeploy was turned off, a
+    /// blocker was added, or the config is gone.
+    pub fn cancel_waiting(
+        conn: &PooledConnection<SqliteConnectionManager>,
+        id: i64,
+        why: &str,
+    ) -> AppResult<()> {
+        conn.execute(
+            "UPDATE deploy_run SET state = ?1, message = ?2, finished_at = ?3, next_check_at = NULL \
+             WHERE id = ?4 AND state = ?5",
+            params![
+                RunState::Superseded.as_str(),
+                why,
+                Utc::now().timestamp_millis(),
+                id,
+                RunState::Waiting.as_str()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Record that a long wait was reported.
+    pub fn mark_notified(
+        conn: &PooledConnection<SqliteConnectionManager>,
+        id: i64,
+    ) -> AppResult<()> {
+        conn.execute(
+            "UPDATE deploy_run SET notified_at = ?1 WHERE id = ?2",
+            params![Utc::now().timestamp_millis(), id],
+        )?;
+        Ok(())
+    }
+
+    /// Every waiting run, oldest first.
+    pub fn waiting(conn: &PooledConnection<SqliteConnectionManager>) -> AppResult<Vec<Self>> {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {COLUMNS} FROM deploy_run WHERE state = ?1 ORDER BY id"
+        ))?;
+        let rows = stmt.query_map(params![RunState::Waiting.as_str()], Self::from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     #[cfg(test)]
@@ -520,6 +676,62 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs.get(&deployed.id).map(|r| r.id), Some(run.id));
         assert!(DeployRun::for_revisions(&conn, &[])?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn a_waiting_run_continues_as_the_deploy_that_goes_ahead() -> AppResult<()> {
+        let pool = migrated_memory_pool();
+        let conn = pool.get()?;
+        let waiting = DeployRun::wait(&conn, "site", "autodeploy", "streams: busy", 100)?;
+        assert_eq!(waiting.state, RunState::Waiting);
+        DeployRun::keep_waiting(&conn, waiting.id, "streams: still busy", 200)?;
+        assert_eq!(
+            DeployRun::get(&conn, waiting.id)?.and_then(|r| r.next_check_at),
+            Some(200)
+        );
+
+        let rev = revision(&conn, "site", "deploy")?;
+        let run = DeployRun::after_revision_with(
+            &conn,
+            &rev,
+            "autodeploy",
+            DEFAULT_ROLLOUT_DEADLINE_MS,
+            Some(waiting.id),
+            &["streams".to_string()],
+        )?
+        .expect("a deploy starts a run");
+        assert_eq!(run.id, waiting.id, "the waiting run carries on");
+        assert_eq!(run.state, RunState::RollingOut);
+        assert_eq!(run.revision_id, Some(rev.id));
+        assert_eq!(run.message, None);
+        assert_eq!(run.next_check_at, None);
+        assert_eq!(run.acknowledged, vec!["streams".to_string()]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_deploy_supersedes_a_waiting_run_and_cancel_drops_one() -> AppResult<()> {
+        let pool = migrated_memory_pool();
+        let conn = pool.get()?;
+        let waiting = DeployRun::wait(&conn, "site", "autodeploy", "busy", 100)?;
+        let manual = DeployRun::after_revision(
+            &conn,
+            &revision(&conn, "site", "deploy")?,
+            "web",
+            DEFAULT_ROLLOUT_DEADLINE_MS,
+        )?
+        .expect("a deploy starts a run");
+        let waiting = DeployRun::get(&conn, waiting.id)?.expect("exists");
+        assert_eq!(waiting.state, RunState::Superseded);
+        assert_eq!(waiting.superseded_by, Some(manual.id));
+
+        let other = DeployRun::wait(&conn, "site", "autodeploy", "busy", 100)?;
+        DeployRun::cancel_waiting(&conn, other.id, "autodeploy was turned off")?;
+        let other = DeployRun::get(&conn, other.id)?.expect("exists");
+        assert_eq!(other.state, RunState::Superseded);
+        assert_eq!(other.message.as_deref(), Some("autodeploy was turned off"));
+        assert!(DeployRun::waiting(&conn)?.is_empty());
         Ok(())
     }
 

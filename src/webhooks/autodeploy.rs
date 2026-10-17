@@ -184,8 +184,11 @@ impl WebhookHandler for AutodeployHandler {
                     ),
                 ],
             );
-            if let Err(e) = result {
-                log::error!("Autodeploy of {} failed: {}", name, e);
+            match result {
+                Ok(_) => {}
+                // Held by a pre-check: a waiting run now retries it.
+                Err(crate::error::AppError::Held(why)) => log::info!("{}", why),
+                Err(e) => log::error!("Autodeploy of {} failed: {}", name, e),
             }
         }
         Ok(())

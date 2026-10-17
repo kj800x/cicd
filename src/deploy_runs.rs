@@ -15,6 +15,13 @@
 //! rollback never rolls back again; its failure is only reported. Every
 //! failure is posted to Discord.
 //!
+//! Autodeploys a pre-check held wait here too: a `WAITING` run is asked
+//! again every `checks.retryInterval` by replaying "deploy latest" as
+//! autodeploy, and goes ahead (keeping its run) once nothing holds it. It
+//! is dropped if autodeploy is turned off, a blocker is added or the
+//! config becomes a temporary deployment, and reported to Discord once if
+//! it waits longer than `checks.maxWait`.
+//!
 //! Until rollout tracking has earned trust, failures are observed only:
 //! nothing is rolled back or held, and the Discord message says what would
 //! have happened. `CICD_FAILED_RUN_ACTIONS=act` turns the actions on.
@@ -30,7 +37,7 @@ use crate::db::blocker::Blocker;
 use crate::db::deploy_run::{DeployRun, RunState};
 use crate::deploys::SelectionIntent;
 use crate::discord;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::kubernetes::api::ListMode;
 use crate::kubernetes::deploy_config::OnFailure;
 use crate::kubernetes::discovery_cache;
@@ -60,15 +67,22 @@ async fn tick(
     pool: &Pool<SqliteConnectionManager>,
     octocrabs: &Octocrabs,
 ) -> AppResult<()> {
-    let runs = DeployRun::unfinished(&pool.get()?)?;
-    if runs.is_empty() {
+    let (runs, waiting) = {
+        let conn = pool.get()?;
+        (DeployRun::unfinished(&conn)?, DeployRun::waiting(&conn)?)
+    };
+    if runs.is_empty() && waiting.is_empty() {
         return Ok(());
     }
-    // One list per tick, and only while something is rolling out.
+    // One list per tick, and only while something is rolling out or waiting.
     let configs = Api::<DeployConfig>::all(client.clone())
         .list(&Default::default())
         .await?
         .items;
+    for run in waiting {
+        let config = configs.iter().find(|c| c.name_any() == run.config_name);
+        retry_waiting(client, pool, octocrabs, &run, config).await;
+    }
     for run in runs {
         let config = configs.iter().find(|c| c.name_any() == run.config_name);
         let verdict = match config {
@@ -81,6 +95,98 @@ async fn tick(
         }
     }
     Ok(())
+}
+
+/// Ask a waiting autodeploy's pre-checks again if it is due, unless the
+/// reasons it was autodeploying have gone away; report it once if it has
+/// waited too long.
+async fn retry_waiting(
+    client: &Client,
+    pool: &Pool<SqliteConnectionManager>,
+    octocrabs: &Octocrabs,
+    run: &DeployRun,
+    config: Option<&DeployConfig>,
+) {
+    let now = Utc::now().timestamp_millis();
+    let name = &run.config_name;
+    let cancel = |why: &str| match pool.get() {
+        Ok(conn) => {
+            if let Err(e) = DeployRun::cancel_waiting(&conn, run.id, why) {
+                log::error!("Failed to drop waiting run {}: {}", run.id, e);
+            } else {
+                log::info!("Dropped waiting run {} for {}: {}", run.id, name, why);
+            }
+        }
+        Err(e) => log::error!("Failed to drop waiting run {}: {}", run.id, e),
+    };
+    let Some(config) = config else {
+        cancel("the config is gone");
+        return;
+    };
+    if !config.autodeploy() {
+        cancel("autodeploy was turned off");
+        return;
+    }
+    if config.is_temporary_deployment() {
+        cancel("the config became a temporary deployment");
+        return;
+    }
+    if pool
+        .get()
+        .ok()
+        .and_then(|conn| Blocker::active_for(&conn, name).ok())
+        .is_some_and(|b| !b.is_empty())
+    {
+        cancel("a blocker was added");
+        return;
+    }
+
+    let checks = &config.spec.spec.checks;
+    if run.notified_at.is_none() && now - run.created_at > checks.max_wait_ms() {
+        let hours = (now - run.created_at) / 3_600_000;
+        discord::notify(&format!(
+            "**{name}**: autodeploy has waited {hours} h on its pre-checks: {}\n{}/deploy?selected={name}",
+            run.message.as_deref().unwrap_or("held"),
+            discord::CICD_URL
+        ))
+        .await;
+        if let Ok(conn) = pool.get() {
+            let _ = DeployRun::mark_notified(&conn, run.id);
+        }
+    }
+
+    if run.next_check_at.is_some_and(|at| at > now) {
+        return;
+    }
+    let intent = SelectionIntent {
+        waiting_run: Some(run.id),
+        ..Default::default()
+    };
+    match crate::deploys::run_action(
+        &Action::DeployLatest,
+        config,
+        client,
+        octocrabs,
+        pool,
+        crate::web::feed::AUTODEPLOY_ACTOR,
+        &intent,
+    )
+    .await
+    {
+        Ok(_) => log::info!("Waiting run {} for {} went ahead", run.id, name),
+        Err(AppError::Held(why)) => log::info!("{}", why),
+        Err(e) => {
+            log::warn!("Retry of waiting run {} for {} failed: {}", run.id, name, e);
+            if let Ok(conn) = pool.get() {
+                let _ = DeployRun::keep_waiting(
+                    &conn,
+                    run.id,
+                    &format!("the last retry failed: {e}"),
+                    now + checks.retry_interval_ms(),
+                );
+            }
+        }
+    }
 }
 
 /// Judge a config's rollout from a fresh render and the namespace's objects

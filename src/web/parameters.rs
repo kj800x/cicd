@@ -75,7 +75,9 @@ pub async fn set_parameter(
     match result {
         Ok(_) => {}
         Err(AppError::InvalidInput(message)) => return HttpResponse::BadRequest().body(message),
-        Err(AppError::Blocked(message)) => return HttpResponse::Conflict().body(message),
+        Err(AppError::Blocked(message)) | Err(AppError::Held(message)) => {
+            return HttpResponse::Conflict().body(message)
+        }
         Err(AppError::Unavailable(message)) => {
             return HttpResponse::ServiceUnavailable().body(message)
         }
