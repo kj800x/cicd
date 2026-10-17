@@ -9,6 +9,7 @@
 
 use crate::db::blocker::Blocker;
 use crate::db::deploy_config::DeployConfig as DbDeployConfig;
+use crate::db::deploy_run::DeployRun;
 use crate::db::git_repo::GitRepo;
 use crate::db::revision::{Revision, RevisionParameter};
 use crate::db::revision_diff::Change;
@@ -185,6 +186,16 @@ fn render_empty(subject: &str) -> Markup {
     }
 }
 
+/// Feed entries with the deploy run each revision started.
+fn feed_entries(
+    conn: &PooledConnection<SqliteConnectionManager>,
+    revisions: Vec<Revision>,
+) -> Vec<Entry> {
+    let mut entries = feed::entries(revisions);
+    feed::attach_runs(conn, &mut entries);
+    entries
+}
+
 /// The feed for the all-configs and one-team scopes.
 pub fn render_feed_page(
     conn: &PooledConnection<SqliteConnectionManager>,
@@ -221,7 +232,7 @@ pub fn render_feed_page(
                         (render_empty(&subject))
                     } @else {
                         div #history-feed hx-get=(scope.fragment_url()) hx-trigger="every 5s" hx-swap="morph:innerHTML" {
-                            (feed::render_feed(feed::group_bursts(feed::entries(revisions))))
+                            (feed::render_feed(feed::group_bursts(feed_entries(conn, revisions))))
                         }
                     }
                 }
@@ -319,6 +330,7 @@ fn render_state_band(config: &DeployConfig, blockers: &[Blocker]) -> Markup {
 /// roll-back button when this revision can be replayed.
 fn render_config_row(entry: &Entry, current: bool, can_roll_back: bool) -> Markup {
     let rev = &entry.rev;
+    let (badge, note) = feed::render_run_parts(entry.run.as_ref());
     html! {
         div class=(format!("feed-row feed-row--config {} {}", entry.tone.class_name(), if current { "feed-row--current" } else { "" })) {
             div {
@@ -329,8 +341,10 @@ fn render_config_row(entry: &Entry, current: bool, can_roll_back: bool) -> Marku
                 div.feed-row__sentence {
                     (entry.render_sentence(true))
                     span.muted { " · " (formatting::format_when(rev.created_at)) }
+                    (badge)
                 }
                 div.feed-row__changes { (entry.render_changes()) }
+                (note)
                 @if entry.rollback_to.is_some() {
                     div.feed-row__note { "Blocker added — deploys refused until cleared" }
                 }
@@ -346,12 +360,15 @@ fn render_config_row(entry: &Entry, current: bool, can_roll_back: bool) -> Marku
 }
 
 /// The rows for one config, bursts and day groups included.
-pub fn render_config_feed(revisions: Vec<Revision>) -> Markup {
+pub fn render_config_feed(
+    conn: &PooledConnection<SqliteConnectionManager>,
+    revisions: Vec<Revision>,
+) -> Markup {
     let current = revisions
         .first()
         .filter(|r| r.action != "undeploy")
         .map(|r| r.id);
-    let entries = feed::entries(revisions);
+    let entries = feed_entries(conn, revisions);
     let items = feed::group_bursts(entries);
     let groups = feed::group_days(items);
     html! {
@@ -417,7 +434,7 @@ pub fn render_config_page(
                                 (render_empty(name))
                             } @else {
                                 div #history-feed hx-get=(format!("/deploy-history-fragment?name={name}")) hx-trigger="every 5s" hx-swap="morph:innerHTML" {
-                                    (render_config_feed(revisions))
+                                    (render_config_feed(conn, revisions))
                                 }
                                 @if !rollable && any_deploy {
                                     div.history-footnote { "Only the current revision is a deploy; nothing older to roll back to." }
@@ -572,6 +589,12 @@ pub fn render_revision_page(
     let mut params = revision.parameters.clone();
     params.sort_by_key(|p| (p.name != SHA_PARAMETER, p.name.clone()));
     let patches = patches_of(revision);
+    let run = DeployRun::for_revisions(conn, &[revision.id])
+        .unwrap_or_else(|e| {
+            log::warn!("Failed to load the run of revision {}: {}", revision.id, e);
+            Default::default()
+        })
+        .remove(&revision.id);
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -608,6 +631,9 @@ pub fn render_revision_page(
                             @if let Some(reason) = &entry.reason {
                                 div.revision__reason { "Reason: " span { "\u{201c}" (reason) "\u{201d}" } }
                             }
+                        }
+                        @if let Some(run) = &run {
+                            (render_run_section(run))
                         }
                         @if revision.action != "undeploy" {
                             div.eyebrow { "Parameters" }
@@ -667,6 +693,33 @@ pub fn render_revision_page(
                     }
                 }
             }
+        }
+    }
+}
+
+/// What happened to the deploy after it was recorded: the run's outcome,
+/// what started it, when it rolled out or ended, and its last word.
+fn render_run_section(run: &DeployRun) -> Markup {
+    let when = |at: Option<i64>| match at {
+        Some(at) => formatting::format_datetime(at),
+        None => "—".to_string(),
+    };
+    html! {
+        div.eyebrow { "Deploy run" }
+        div.fact-grid {
+            div { div.eyebrow { "Outcome" } div.fact {
+                @if run.trigger == "backfill" {
+                    span.muted { "on the cluster when runs were added" }
+                } @else {
+                    (feed::render_run_badge(run))
+                }
+            } }
+            div { div.eyebrow { "Trigger" } div.fact.mono { (run.trigger) } }
+            div { div.eyebrow { "Rolled out" } div.fact.mono { (when(run.rolled_out_at)) } }
+            div { div.eyebrow { "Ended" } div.fact.mono { (when(run.finished_at)) } }
+        }
+        @if let Some(message) = &run.message {
+            div.revision__reason { (message) }
         }
     }
 }
@@ -774,8 +827,8 @@ pub async fn deploy_history_fragment(
     );
     let t = std::time::Instant::now();
     let markup = match scope {
-        Scope::Config(_) => render_config_feed(revisions),
-        _ => feed::render_feed(feed::group_bursts(feed::entries(revisions))),
+        Scope::Config(_) => render_config_feed(&conn, revisions),
+        _ => feed::render_feed(feed::group_bursts(feed_entries(&conn, revisions))),
     };
     log::debug!("history fragment: rendered in {:?}", t.elapsed());
     page(markup)

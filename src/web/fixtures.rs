@@ -575,6 +575,40 @@ async fn write_pages() -> AppResult<()> {
         ids.push(recorded.id);
     }
 
+    // One deploy run per revision that deploys, in the states history
+    // shows: the newest plex autodeploy still rolling out, the temporary
+    // alldex-rs deploy failed, the grafana rollback rolled out, and the
+    // rest as seeded when runs were added.
+    let run = |revision: i64, trigger: &str, state: &str, message: Option<&str>| {
+        conn.execute(
+            "INSERT INTO deploy_run (config_name, trigger, state, revision_id, message, created_at, rolled_out_at, finished_at) \
+             SELECT config_name, ?2, ?3, id, ?4, created_at, CASE WHEN ?3 = 'SUCCEEDED' THEN created_at + 95000 END, \
+                    CASE WHEN ?3 != 'ROLLING_OUT' THEN created_at + 95000 END \
+             FROM revision WHERE id = ?1",
+            rusqlite::params![revision, trigger, state, message],
+        )
+    };
+    for (i, id) in ids.iter().enumerate() {
+        match i {
+            4 | 6 => run(*id, "autodeploy", "SUCCEEDED", None)?,
+            5 => run(*id, "autodeploy", "SUPERSEDED", None)?,
+            7 => run(
+                *id,
+                "autodeploy",
+                "ROLLING_OUT",
+                Some("Deployment/plex: 0 of 1 updated replicas available"),
+            )?,
+            8 => run(
+                *id,
+                "web",
+                "FAILED",
+                Some("Deployment/alldex-rs: pod alldex-rs-7d9f-x2k4 container app is CrashLoopBackOff"),
+            )?,
+            9 => run(*id, "rollback", "SUCCEEDED", None)?,
+            _ => run(*id, "backfill", "SUCCEEDED", None)?,
+        };
+    }
+
     // Redeploy previous needs the revisions: alldex-rs's latest is the
     // temporary branch deploy, so the previous deployment is master.
     let redeploy = render_deploy(
