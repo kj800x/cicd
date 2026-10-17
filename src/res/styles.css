@@ -148,6 +148,28 @@
   color: var(--status-warn-fg);
 }
 
+/* The deploy page's pre-check strip. */
+.pre-check-ack {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  margin-top: 6px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.pre-checks__again {
+  margin: -6px 0 12px;
+  font-size: 13px;
+}
+
+.check-results {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 16px;
+  font-size: 13px;
+}
+
 /* A deploy run still rolling out. */
 .hl-badge--progress {
   padding: 0 6px;

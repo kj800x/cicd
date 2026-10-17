@@ -16,6 +16,7 @@ mod home;
 mod index;
 pub mod parameters;
 pub mod patches;
+pub mod pre_checks;
 pub mod preview;
 mod resource_logs;
 mod resource_status;

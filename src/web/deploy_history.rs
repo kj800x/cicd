@@ -8,6 +8,7 @@
 //! page; a revision is immutable, so nothing there is editable.
 
 use crate::db::blocker::Blocker;
+use crate::db::check_result::CheckResult;
 use crate::db::deploy_config::DeployConfig as DbDeployConfig;
 use crate::db::deploy_run::DeployRun;
 use crate::db::git_repo::GitRepo;
@@ -401,6 +402,10 @@ pub fn render_config_page(
         vec![]
     });
     let orphaned = live.is_some_and(DeployConfig::is_orphaned);
+    let waiting = DeployRun::waiting(conn)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|r| r.config_name == name);
     let any_deploy = revisions.iter().any(|r| r.action == "deploy");
     let rollable = revisions.iter().skip(1).any(|r| r.action == "deploy")
         || revisions
@@ -424,6 +429,13 @@ pub fn render_config_page(
                                 a href=(format!("/deploy?selected={name}")) { "Deploy page" }
                             }
                         }
+                    }
+                    @if let Some(run) = &waiting {
+                        (crate::web::preview::render_alert(
+                            "warning",
+                            html! { i class="fa fa-hourglass-half" {} " Autodeploy waiting on pre-checks since " (formatting::format_ago_short(run.created_at)) },
+                            html! { (run.message.as_deref().unwrap_or("held")) },
+                        ))
                     }
                     @if let Some(config) = live {
                         (render_state_band(config, blockers))
@@ -633,7 +645,7 @@ pub fn render_revision_page(
                             }
                         }
                         @if let Some(run) = &run {
-                            (render_run_section(run))
+                            (render_run_section(run, &CheckResult::for_run(conn, run.id).unwrap_or_default()))
                         }
                         @if revision.action != "undeploy" {
                             div.eyebrow { "Parameters" }
@@ -699,7 +711,7 @@ pub fn render_revision_page(
 
 /// What happened to the deploy after it was recorded: the run's outcome,
 /// what started it, when it rolled out or ended, and its last word.
-fn render_run_section(run: &DeployRun) -> Markup {
+fn render_run_section(run: &DeployRun, checks: &[CheckResult]) -> Markup {
     let when = |at: Option<i64>| match at {
         Some(at) => formatting::format_datetime(at),
         None => "—".to_string(),
@@ -720,6 +732,23 @@ fn render_run_section(run: &DeployRun) -> Markup {
         }
         @if let Some(message) = &run.message {
             div.revision__reason { (message) }
+        }
+        @if !checks.is_empty() {
+            div.eyebrow { "Pre-checks" }
+            div.check-results {
+                @for c in checks {
+                    @let tone = match c.status.as_str() { "OK" => "hl-badge--ok", _ => "hl-badge--fail" };
+                    div.check-result {
+                        span.mono { (c.check_name) }
+                        " " span class=(format!("hl-badge {tone}")) { (c.status) }
+                        @if run.acknowledged.contains(&c.check_name) { " " span.hl-badge.hl-badge--standing { "acknowledged" } }
+                        @if let Some(title) = &c.title { " " (title) }
+                        @if let Some(message) = &c.message { span.muted { " · " (message) } }
+                        @if let Some(url) = &c.details_url { " · " a href=(url) target="_blank" { "details" } }
+                        @if c.attempt > 1 { span.faint { " · asked " (c.attempt) " times" } }
+                    }
+                }
+            }
         }
     }
 }

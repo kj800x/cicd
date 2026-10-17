@@ -20,6 +20,7 @@ use r2d2_sqlite::SqliteConnectionManager;
 use crate::build_status::BuildStatus;
 use crate::db::blocker::Blocker;
 use crate::db::deploy_config::DeployConfig as DbDeployConfig;
+use crate::db::deploy_run::DeployRun;
 use crate::db::git_branch::GitBranch;
 use crate::db::git_commit_build::GitCommitBuild;
 use crate::db::git_repo::GitRepo;
@@ -130,6 +131,8 @@ pub struct Standing {
 pub struct HomeData {
     pub configs: Vec<DeployConfig>,
     pub blockers: Vec<Blocker>,
+    /// Autodeploys a pre-check holds, oldest first.
+    pub waiting: Vec<DeployRun>,
     pub unhealthy: Vec<Unhealthy>,
     pub healthy_count: usize,
     pub drift: Vec<Drift>,
@@ -662,6 +665,11 @@ pub async fn gather(
         .into_iter()
         .filter(|b| names.contains(&b.config_name))
         .collect();
+    let waiting: Vec<DeployRun> = DeployRun::waiting(conn)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| names.contains(&r.config_name))
+        .collect();
     // Stage timings at debug level: RUST_LOG=cicd::web::home=debug.
     let t = std::time::Instant::now();
     let (unhealthy, healthy_count) = match client {
@@ -695,6 +703,7 @@ pub async fn gather(
     HomeData {
         configs,
         blockers,
+        waiting,
         unhealthy,
         healthy_count,
         drift,
@@ -892,6 +901,20 @@ pub fn render_home_body(data: &HomeData, strips: Markup, cluster_reachable: bool
                                 @if let Some(by) = temporary_by(config) { " · " span.mono { (by) } }
                             }
                             div.nag-row__action { a.secondary-button href=(format!("/deploy?selected={name}&action=end-temporary")) { "End temporary deployment" } }
+                        }
+                    }
+                }))
+            }
+            @if !data.waiting.is_empty() {
+                (section(html! { i class="fa fa-hourglass-half" {} "Waiting autodeploys" }, Some(html! { span.muted { "held by pre-checks" } }), false, html! {
+                    @for run in &data.waiting {
+                        div.nag-row.nag-row--warn {
+                            a.nag-row__config href=(format!("/deploy?selected={}", run.config_name)) { (run.config_name) }
+                            span.nag-row__text { (run.message.as_deref().unwrap_or("held")) }
+                            span.nag-row__meta {
+                                "since " (formatting::format_ago_short(run.created_at))
+                                @if let Some(next) = run.next_check_at { " · asks again " (formatting::format_when(next)) }
+                            }
                         }
                     }
                 }))
