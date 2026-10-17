@@ -72,7 +72,8 @@ pub fn tool_definitions() -> Vec<Tool> {
                     "durability": { "type": "string", "enum": ["temporary", "standing"], "description": "How long the override is meant to last. Temporary marks the config as a temporary deployment. Defaults: temporary for a branch, standing for a sha." },
                     "note": { "type": "string", "description": "Why this override exists" },
                     "by": { "type": "string", "description": "Who is making it" },
-                    "values": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Only when a deploy was refused because watchtower is unreachable: the tag to use for each tracked tag parameter, for this deploy only. Recorded on the revision; the selection is not changed." }
+                    "values": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Only when a deploy was refused because watchtower is unreachable: the tag to use for each tracked tag parameter, for this deploy only. Recorded on the revision; the selection is not changed." },
+                    "acknowledged": { "type": "array", "items": { "type": "string" }, "description": "Only when a deploy was refused by a pre-check's soft block AND the person said to deploy anyway: the names of the soft-blocking checks to go past. Recorded on the run. Hard blocks cannot be acknowledged." }
                 },
                 "required": ["name"]
             }),
@@ -703,6 +704,17 @@ async fn handle_deploy(
                     .collect()
             })
             .unwrap_or_default(),
+        acknowledged: arguments
+            .get("acknowledged")
+            .and_then(|v| v.as_array())
+            .map(|names| {
+                names
+                    .iter()
+                    .filter_map(|n| n.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        waiting_run: None,
     };
     execute_deploy_action_with(&action, name, &config, client, pool, octocrabs, &intent).await
 }
@@ -828,6 +840,7 @@ async fn handle_set_parameter(
             .and_then(|v| v.as_str())
             .map(String::from),
         values: Default::default(),
+        ..Default::default()
     };
     execute_deploy_action_with(&action, name, &config, client, pool, octocrabs, &intent).await
 }
@@ -1074,6 +1087,11 @@ async fn execute_deploy_action_with(
         Err(crate::error::AppError::Unavailable(message)) => {
             return ToolCallResult::error(format!(
                 "Deploy refused: {message} (pass `values` to deploy a typed tag this once)"
+            ));
+        }
+        Err(crate::error::AppError::Held(message)) => {
+            return ToolCallResult::error(format!(
+                "Deploy refused: {message} Pass `acknowledged` with the soft-blocking check names only if the person said to deploy anyway."
             ));
         }
         Err(e) => return ToolCallResult::error(format!("Failed to execute action: {}", e)),

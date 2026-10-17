@@ -318,7 +318,7 @@ pub fn holding<'a>(outcomes: &'a [PreOutcome], acknowledged: &[String]) -> Vec<&
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::kubernetes::deploy_config::{
         DeployChecks, DeployConfigSpec, DeployConfigSpecFields,
@@ -329,7 +329,7 @@ mod tests {
 
     /// A one-shot HTTP server that answers every request with `status` and
     /// `body`, and hands back the request it saw.
-    async fn serve(
+    pub(crate) async fn serve(
         status: &'static str,
         body: &'static str,
         delay_ms: u64,
@@ -371,7 +371,7 @@ mod tests {
         (url, handle)
     }
 
-    fn config(checks: Vec<CheckSpec>) -> DeployConfig {
+    pub(crate) fn config(checks: Vec<CheckSpec>) -> DeployConfig {
         let mut dc = DeployConfig::new(
             "jellyfin",
             DeployConfigSpec {
@@ -397,7 +397,7 @@ mod tests {
         dc
     }
 
-    fn check(name: &str, url: &str, timeout: Option<&str>) -> CheckSpec {
+    pub(crate) fn check(name: &str, url: &str, timeout: Option<&str>) -> CheckSpec {
         CheckSpec {
             name: name.into(),
             http: Some(url.into()),
@@ -407,7 +407,7 @@ mod tests {
     }
 
     /// A client that is never used: these checks carry no secretRef.
-    fn unused_client() -> Client {
+    pub(crate) fn unused_client() -> Client {
         let config = kube::Config::new("http://127.0.0.1:1".parse().expect("uri"));
         Client::try_from(config).expect("client")
     }

@@ -1219,7 +1219,7 @@ pub async fn deploy_config(
     );
     match result {
         Ok(_) => {}
-        Err(AppError::Blocked(message)) => {
+        Err(AppError::Blocked(message)) | Err(AppError::Held(message)) => {
             return HttpResponse::Conflict()
                 .content_type("text/html; charset=utf-8")
                 .body(message);

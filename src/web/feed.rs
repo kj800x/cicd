@@ -297,6 +297,9 @@ pub fn render_run_badge(run: &DeployRun) -> Markup {
     let title = run.message.as_deref().unwrap_or_default();
     match run.state {
         _ if run.trigger == "backfill" => html! {},
+        RunState::Waiting => {
+            html! { span.hl-badge.hl-badge--progress title=(title) { "waiting" } }
+        }
         RunState::RollingOut => {
             html! { span.hl-badge.hl-badge--progress title=(title) { "rolling out" } }
         }
