@@ -626,7 +626,7 @@ async fn gate(
     state: &DeploymentState,
     values: &ParameterValues,
 ) -> AppResult<Gate> {
-    let checks = &config.spec.spec.checks;
+    let checks = config.checks();
     if checks.pre.is_empty() {
         return Ok(Gate::default());
     }

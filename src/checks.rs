@@ -28,6 +28,10 @@
 //! counts as a `SOFT_BLOCK` titled "check X didn't respond": a broken check
 //! holds autodeploys but never locks a person out.
 //!
+//! A pre-check may also answer `NOTE`: shown with the deploy, never holds
+//! it. An `advisory` check (the cluster's default checks are) never holds
+//! either: whatever it says other than OK, silence included, is a NOTE.
+//!
 //! Verify and watch checks (together, post-checks here) are asked once a
 //! deploy has rolled out (phase `verify` or `watch`, mode `monitor`,
 //! `to.revision` and `rolledOutAt` set) and answer `OK`, `WARN`,
@@ -70,6 +74,8 @@ impl Mode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PreStatus {
     Ok,
+    /// Worth showing, never holds a deploy: "an alert is already firing".
+    Note,
     SoftBlock,
     HardBlock,
 }
@@ -78,6 +84,7 @@ impl PreStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             PreStatus::Ok => "OK",
+            PreStatus::Note => "NOTE",
             PreStatus::SoftBlock => "SOFT_BLOCK",
             PreStatus::HardBlock => "HARD_BLOCK",
         }
@@ -86,6 +93,7 @@ impl PreStatus {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "OK" => Some(PreStatus::Ok),
+            "NOTE" => Some(PreStatus::Note),
             "SOFT_BLOCK" => Some(PreStatus::SoftBlock),
             "HARD_BLOCK" => Some(PreStatus::HardBlock),
             _ => None,
@@ -182,7 +190,7 @@ pub async fn ask_pre_checks(
     mode: Mode,
     ask: &Ask,
 ) -> Vec<PreOutcome> {
-    let specs = &config.spec.spec.checks.pre;
+    let specs = config.checks().pre;
     join_all(
         specs
             .iter()
@@ -201,7 +209,7 @@ async fn ask_pre_check(
     let started_at = Utc::now().timestamp_millis();
     let answer = post(client, config, spec, mode, ask).await;
     let finished_at = Utc::now().timestamp_millis();
-    match answer {
+    let mut outcome = match answer {
         Ok(response) => match PreStatus::parse(&response.status) {
             Some(status) => PreOutcome {
                 name: spec.name.clone(),
@@ -220,7 +228,11 @@ async fn ask_pre_check(
             ),
         },
         Err(why) => no_answer(spec, why, started_at, finished_at),
+    };
+    if spec.advisory && outcome.status != PreStatus::Ok {
+        outcome.status = PreStatus::Note;
     }
+    outcome
 }
 
 fn no_answer(spec: &CheckSpec, why: String, started_at: i64, finished_at: i64) -> PreOutcome {
@@ -581,7 +593,7 @@ pub fn holding<'a>(outcomes: &'a [PreOutcome], acknowledged: &[String]) -> Vec<&
     outcomes
         .iter()
         .filter(|o| match o.status {
-            PreStatus::Ok => false,
+            PreStatus::Ok | PreStatus::Note => false,
             PreStatus::SoftBlock => !acknowledged.iter().any(|a| a == &o.name),
             PreStatus::HardBlock => true,
         })
@@ -813,6 +825,46 @@ pub(crate) mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn an_advisory_check_only_ever_notes() {
+        let (note, _a) = serve("200 OK", r#"{"status":"NOTE","title":"already firing"}"#, 0).await;
+        let (soft, _b) = serve("200 OK", r#"{"status":"SOFT_BLOCK"}"#, 0).await;
+        let (ok, _c) = serve("200 OK", r#"{"status":"OK"}"#, 0).await;
+        let advisory = |name: &str, url: &str| CheckSpec {
+            advisory: true,
+            ..check(name, url, None)
+        };
+        let checks = vec![
+            check("note", &note, None),
+            advisory("soft", &soft),
+            advisory("nowhere", "http://127.0.0.1:1/check"),
+            advisory("ok", &ok),
+        ];
+        let outcomes = ask_pre_checks(
+            &unused_client(),
+            &config(checks),
+            Mode::Gate,
+            &Ask::default(),
+        )
+        .await;
+        let statuses: Vec<PreStatus> = outcomes.iter().map(|o| o.status).collect();
+        assert_eq!(
+            statuses,
+            vec![
+                PreStatus::Note,
+                PreStatus::Note,
+                PreStatus::Note,
+                PreStatus::Ok
+            ]
+        );
+        assert_eq!(outcomes[0].title.as_deref(), Some("already firing"));
+        assert_eq!(
+            outcomes[2].title.as_deref(),
+            Some("check nowhere didn't respond")
+        );
+        assert!(holding(&outcomes, &[]).is_empty());
+    }
+
     #[test]
     fn hard_blocks_and_unacknowledged_soft_blocks_hold() {
         let outcome = |name: &str, status| PreOutcome {
@@ -826,6 +878,7 @@ pub(crate) mod tests {
         };
         let outcomes = vec![
             outcome("ok", PreStatus::Ok),
+            outcome("note", PreStatus::Note),
             outcome("soft", PreStatus::SoftBlock),
             outcome("hard", PreStatus::HardBlock),
         ];

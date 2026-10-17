@@ -75,8 +75,8 @@ pub async fn pre_checks_fragment(
         .body(render(&namespace, &name, &outcomes, waiting.as_ref()).into_string())
 }
 
-/// The strip: a waiting autodeploy, then each check that would hold a
-/// deploy, or one line when every check is OK.
+/// The strip: a waiting autodeploy, each check that would hold a deploy,
+/// each note, or one line when every check is OK.
 pub fn render(
     namespace: &str,
     name: &str,
@@ -85,7 +85,15 @@ pub fn render(
 ) -> Markup {
     let holding: Vec<&PreOutcome> = outcomes
         .iter()
-        .filter(|o| o.status != PreStatus::Ok)
+        .filter(|o| !matches!(o.status, PreStatus::Ok | PreStatus::Note))
+        .collect();
+    let notes: Vec<&PreOutcome> = outcomes
+        .iter()
+        .filter(|o| o.status == PreStatus::Note)
+        .collect();
+    let ok: Vec<&PreOutcome> = outcomes
+        .iter()
+        .filter(|o| o.status == PreStatus::Ok)
         .collect();
     let again = html! {
         button.link-button type="button" hx-get=(fragment_url(namespace, name)) hx-target="#pre-checks" hx-swap="innerHTML" { "Ask again" }
@@ -123,10 +131,17 @@ pub fn render(
                 },
             ))
         }
-        @if holding.is_empty() && !outcomes.is_empty() {
+        @for o in &notes {
+            (render_strip("neutral", html! {
+                i class="fa fa-info-circle" {} " " (o.name) ": " (o.title.as_deref().unwrap_or("note"))
+                @if let Some(message) = &o.message { span.muted { " · " (message) } }
+                @if let Some(url) = &o.details_url { " · " a href=(url) target="_blank" { "Details" } }
+            }))
+        }
+        @if holding.is_empty() && !ok.is_empty() {
             (render_strip("neutral", html! {
                 "Pre-checks OK: "
-                @for (i, o) in outcomes.iter().enumerate() {
+                @for (i, o) in ok.iter().enumerate() {
                     @if i > 0 { ", " }
                     (o.name)
                     @if let Some(title) = &o.title { span.muted { " (" (title) ")" } }
@@ -172,6 +187,24 @@ mod tests {
         assert!(html.contains(r#"form="deployForm""#));
         assert!(!html.contains("ack_window"));
         assert!(html.contains("Deploys are refused until it clears"));
+    }
+
+    #[test]
+    fn a_note_is_shown_and_never_asks_to_be_acknowledged() {
+        let html = render(
+            "media",
+            "jellyfin",
+            &[
+                outcome("alerts", PreStatus::Note, "already firing: JellyfinDown"),
+                outcome("streams", PreStatus::Ok, "idle"),
+            ],
+            None,
+        )
+        .into_string();
+        assert!(html.contains("alerts: already firing: JellyfinDown"));
+        assert!(!html.contains("ack_alerts"));
+        assert!(html.contains("Pre-checks OK: "));
+        assert!(html.contains("streams"));
     }
 
     #[test]
