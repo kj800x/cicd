@@ -595,7 +595,7 @@ async fn write_pages() -> AppResult<()> {
                 *id,
                 "autodeploy",
                 "SUCCEEDED_WITH_WARNINGS",
-                Some("post-check no-alerts: PaperlessQueueBacklog fired after 4 min"),
+                Some("watch check no-alerts: PaperlessQueueBacklog fired after 4 min"),
             )?,
             5 => run(*id, "autodeploy", "SUPERSEDED", None)?,
             7 => run(
@@ -614,7 +614,7 @@ async fn write_pages() -> AppResult<()> {
                 *id,
                 "rollback",
                 "SUCCEEDED_WITH_WARNINGS",
-                Some("post-check no-alerts: no final answer in time"),
+                Some("watch check no-alerts: no final answer in time"),
             )?,
             _ => run(*id, "backfill", "SUCCEEDED", None)?,
         };
@@ -679,22 +679,37 @@ async fn write_pages() -> AppResult<()> {
             ],
             1,
         )?;
-        crate::db::check_result::CheckResult::start_post(
+        crate::db::check_result::CheckResult::start(
             &conn,
             grafana_run,
-            &[("smoke".into(), 600_000), ("no-alerts".into(), 900_000)],
+            "verify",
+            &[("smoke".into(), 600_000)],
             now_ms() - 5 * 60_000,
         )?;
-        let mut posts = crate::db::check_result::CheckResult::post_for_run(&conn, grafana_run)?;
-        posts[0].status = "OK".into();
-        posts[0].title = Some("job passed".into());
-        posts[0].details_url =
+        crate::db::check_result::CheckResult::start(
+            &conn,
+            grafana_run,
+            "watch",
+            &[("no-alerts".into(), 900_000)],
+            now_ms() - 4 * 60_000,
+        )?;
+        conn.execute(
+            "UPDATE deploy_run SET watch_state = 'WARN' WHERE id = ?1",
+            [grafana_run],
+        )?;
+        let mut verify =
+            crate::db::check_result::CheckResult::for_run_phase(&conn, grafana_run, "verify")?;
+        verify[0].status = "OK".into();
+        verify[0].title = Some("job passed".into());
+        verify[0].details_url =
             Some("https://jobs.home.coolkev.com/jobs/monitoring/grafana-at-x1".into());
-        posts[0].attempt = 6;
-        posts[1].status = "WARN".into();
-        posts[1].title = Some("no final answer in time (last: quiet for 9 of 10 minutes)".into());
-        posts[1].attempt = 20;
-        for p in &posts {
+        verify[0].attempt = 6;
+        let mut watch =
+            crate::db::check_result::CheckResult::for_run_phase(&conn, grafana_run, "watch")?;
+        watch[0].status = "WARN".into();
+        watch[0].title = Some("no final answer in time (last: quiet for 9 of 10 minutes)".into());
+        watch[0].attempt = 20;
+        for p in verify.iter().chain(&watch) {
             p.save(&conn)?;
         }
     }

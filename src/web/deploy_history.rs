@@ -733,7 +733,7 @@ fn render_run_section(run: &DeployRun, checks: &[CheckResult]) -> Markup {
         @if let Some(message) = &run.message {
             div.revision__reason { (message) }
         }
-        @for (phase, heading) in [("pre", "Pre-checks"), ("post", "Post-checks")] {
+        @for (phase, heading) in [("pre", "Pre-checks"), ("verify", "Verify"), ("watch", "Watch")] {
             @let rows: Vec<&CheckResult> = checks.iter().filter(|c| c.phase == phase).collect();
             @if !rows.is_empty() {
                 div.eyebrow { (heading) }
@@ -761,6 +761,7 @@ fn check_tone(status: &str) -> &'static str {
         "OK" => "hl-badge--ok",
         "WARN" | "SOFT_BLOCK" => "hl-badge--warn",
         "PENDING" => "hl-badge--progress",
+        "ENDED" => "hl-badge--standing",
         _ => "hl-badge--fail",
     }
 }
