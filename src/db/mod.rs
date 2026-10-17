@@ -3,6 +3,7 @@ use std::ops::Deref;
 pub mod blocker;
 pub mod deploy_config;
 pub mod deploy_config_version;
+pub mod deploy_run;
 pub mod functions;
 pub mod git_branch;
 pub mod git_commit;
