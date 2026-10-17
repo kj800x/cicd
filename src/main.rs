@@ -32,6 +32,7 @@ pub mod prelude {
 mod build_status;
 mod crab_ext;
 mod db;
+mod deploy_runs;
 mod deploys;
 mod error;
 mod github_deployments;
@@ -300,6 +301,7 @@ async fn main() -> std::io::Result<()> {
         _ = Box::pin(poll_github_rate_limits(octocrabs.clone())) => {},
         _ = Box::pin(reconcile_watchtower_periodically(client.clone())) => {},
         _ = Box::pin(kubernetes::object_cache::run(client.clone())) => {},
+        _ = Box::pin(deploy_runs::run(client.clone(), pool.clone())) => {},
         _ = Box::pin(webhooks::tag_events::TagEventPoller::new(
             pool.clone(),
             client.clone(),

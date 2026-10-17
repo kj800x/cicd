@@ -8,6 +8,7 @@ pub mod object_cache;
 pub mod parameters;
 pub mod patches;
 pub mod repo;
+pub mod rollout;
 pub mod selections;
 pub mod spec_editing;
 pub mod tags;
