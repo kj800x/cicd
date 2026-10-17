@@ -4,7 +4,10 @@
 //! here so a revision reads the same everywhere.
 
 use maud::{html, Markup};
+use r2d2::PooledConnection;
+use r2d2_sqlite::SqliteConnectionManager;
 
+use crate::db::deploy_run::{DeployRun, RunState};
 use crate::db::revision::Revision;
 use crate::db::revision_diff::{self, Change};
 use crate::kubernetes::selections::Durability;
@@ -46,6 +49,8 @@ pub struct Entry {
     /// The reason a person typed, if the revision carries one.
     pub reason: Option<String>,
     pub changes: Vec<Change>,
+    /// The deploy run the revision started, once [`attach_runs`] looked.
+    pub run: Option<DeployRun>,
 }
 
 /// `rollback to revision 812` or `rollback to revision 812: why` as the
@@ -81,6 +86,7 @@ impl Entry {
             rollback_to,
             reason: shown_reason.filter(|r| !r.is_empty()),
             changes,
+            run: None,
         }
     }
 
@@ -285,15 +291,65 @@ fn burst_span(entries: &[Entry]) -> String {
     )
 }
 
+/// How a deploy run reads as a badge. Runs seeded from history when runs
+/// were added say nothing, since nobody watched those rollouts.
+pub fn render_run_badge(run: &DeployRun) -> Markup {
+    let title = run.message.as_deref().unwrap_or_default();
+    match run.state {
+        _ if run.trigger == "backfill" => html! {},
+        RunState::RollingOut => {
+            html! { span.hl-badge.hl-badge--progress title=(title) { "rolling out" } }
+        }
+        RunState::Succeeded => html! { span.hl-badge.hl-badge--ok { "rolled out" } },
+        RunState::Failed => {
+            html! { span.hl-badge.hl-badge--fail title=(title) { "rollout failed" } }
+        }
+        RunState::RolledBack => {
+            html! { span.hl-badge.hl-badge--fail title=(title) { "failed · rolled back" } }
+        }
+        RunState::Superseded => html! { span.hl-badge.hl-badge--standing { "superseded" } },
+    }
+}
+
+/// The run's badge after a row's sentence, and what it is waiting for or
+/// why it failed under the row's changes.
+pub fn render_run_parts(run: Option<&DeployRun>) -> (Markup, Markup) {
+    let Some(run) = run else {
+        return (html! {}, html! {});
+    };
+    let note = match (run.state, &run.message) {
+        (RunState::RollingOut | RunState::Failed | RunState::RolledBack, Some(message)) => {
+            html! { div.feed-row__note.feed-row__note--run { (message) } }
+        }
+        _ => html! {},
+    };
+    (html! { " " (render_run_badge(run)) }, note)
+}
+
+/// Look up the run each entry's revision started.
+pub fn attach_runs(conn: &PooledConnection<SqliteConnectionManager>, entries: &mut [Entry]) {
+    let ids: Vec<i64> = entries.iter().map(|e| e.rev.id).collect();
+    match DeployRun::for_revisions(conn, &ids) {
+        Ok(mut runs) => {
+            for entry in entries {
+                entry.run = runs.remove(&entry.rev.id);
+            }
+        }
+        Err(e) => log::warn!("Failed to load deploy runs for the feed: {}", e),
+    }
+}
+
 /// One full feed row: time · config · sentence and changes · Detail.
 pub fn render_row(entry: &Entry) -> Markup {
+    let (badge, note) = render_run_parts(entry.run.as_ref());
     html! {
         div class=(format!("feed-row {}", entry.tone.class_name())) {
             span.feed-row__time { (formatting::format_time_of_day(entry.rev.created_at)) }
             a.feed-row__config href=(format!("/deploy-history/{}", entry.rev.config_name)) { (entry.rev.config_name) }
             div.feed-row__body {
-                div.feed-row__sentence { (entry.render_sentence(true)) }
+                div.feed-row__sentence { (entry.render_sentence(true)) (badge) }
                 div.feed-row__changes { (entry.render_changes()) }
+                (note)
                 @if entry.rollback_to.is_some() {
                     div.feed-row__note { "Blocker added — deploys refused until cleared" }
                 }
@@ -321,6 +377,7 @@ pub fn render_burst(entries: &[Entry]) -> Markup {
                         span.feed-row__time { (formatting::format_time_of_day(e.rev.created_at)) }
                         a.feed-burst__config href=(format!("/deploy-history/{}", e.rev.config_name)) { (e.rev.config_name) }
                         span.feed-burst__change { (e.first_change().unwrap_or_else(|| "no change".to_string())) }
+                        @if let Some(run) = &e.run { " " (render_run_badge(run)) }
                     }
                 }
             }

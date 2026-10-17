@@ -148,6 +148,17 @@
   color: var(--status-warn-fg);
 }
 
+/* A deploy run still rolling out. */
+.hl-badge--progress {
+  padding: 0 6px;
+  border-radius: 10px;
+  border: 1px dashed var(--status-warn-fg);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 16px;
+  color: var(--status-warn-fg);
+}
+
 /* Page strip: full bleed under the nav, no margins, no radius. The
    temporary and held strips are the two uses. */
 .page-strip {

@@ -11,6 +11,7 @@
 //!
 //! Everything lives here rather than in memory, so a cicd restart
 //! (including one caused by deploying cicd) picks up where it left off.
+use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 
@@ -178,6 +179,7 @@ impl DeployRun {
         Ok(run)
     }
 
+    #[cfg(test)]
     pub fn get(
         conn: &PooledConnection<SqliteConnectionManager>,
         id: i64,
@@ -201,23 +203,37 @@ impl DeployRun {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// The run a revision started, if any.
-    pub fn for_revision(
+    /// The run each of `revision_ids` started, keyed by revision id.
+    /// Revisions that started no run (undeploys, revisions from before runs
+    /// existed) are absent.
+    pub fn for_revisions(
         conn: &PooledConnection<SqliteConnectionManager>,
-        revision_id: i64,
-    ) -> AppResult<Option<Self>> {
-        Ok(conn
-            .query_row(
-                &format!(
-                    "SELECT {COLUMNS} FROM deploy_run WHERE revision_id = ?1 ORDER BY id DESC LIMIT 1"
-                ),
-                params![revision_id],
-                Self::from_row,
-            )
-            .optional()?)
+        revision_ids: &[i64],
+    ) -> AppResult<HashMap<i64, Self>> {
+        let mut runs = HashMap::new();
+        if revision_ids.is_empty() {
+            return Ok(runs);
+        }
+        let placeholders = vec!["?"; revision_ids.len()].join(", ");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {COLUMNS} FROM deploy_run WHERE revision_id IN ({placeholders}) ORDER BY id"
+        ))?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(revision_ids.iter()),
+            Self::from_row,
+        )?;
+        for run in rows {
+            let run = run?;
+            if let Some(revision_id) = run.revision_id {
+                // Ordered by id, so the newest run for a revision wins.
+                runs.insert(revision_id, run);
+            }
+        }
+        Ok(runs)
     }
 
     /// A config's most recent runs, newest first.
+    #[cfg(test)]
     pub fn list_for(
         conn: &PooledConnection<SqliteConnectionManager>,
         config_name: &str,
@@ -488,6 +504,22 @@ mod tests {
             DeployRun::get(&conn, good.id)?.map(|r| r.state),
             Some(RunState::Succeeded)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn runs_are_found_by_revision() -> AppResult<()> {
+        let pool = migrated_memory_pool();
+        let conn = pool.get()?;
+        let deployed = revision(&conn, "site", "deploy")?;
+        let undeployed = revision(&conn, "site", "undeploy")?;
+        let run = DeployRun::after_revision(&conn, &deployed, "web", DEFAULT_ROLLOUT_DEADLINE_MS)?
+            .expect("a deploy starts a run");
+        DeployRun::after_revision(&conn, &undeployed, "web", DEFAULT_ROLLOUT_DEADLINE_MS)?;
+        let runs = DeployRun::for_revisions(&conn, &[deployed.id, undeployed.id, 999])?;
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs.get(&deployed.id).map(|r| r.id), Some(run.id));
+        assert!(DeployRun::for_revisions(&conn, &[])?.is_empty());
         Ok(())
     }
 
