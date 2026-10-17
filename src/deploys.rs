@@ -17,7 +17,7 @@ use crate::{
     crab_ext::Octocrabs,
     db::{
         blocker::Blocker,
-        deploy_run::DeployRun,
+        deploy_run::{DeployRun, DEFAULT_ROLLOUT_DEADLINE_MS},
         git_commit::GitCommit,
         git_repo::GitRepo,
         revision::{NewRevision, Revision},
@@ -515,7 +515,7 @@ pub async fn change_patches(
     match Revision::record(&conn, NewRevision::patch_change(&effective, actor, &reason)) {
         Ok(rev) => {
             log::info!("Recorded revision {} for {} ({})", rev.id, name, reason);
-            start_run(&conn, &rev, actor);
+            start_run(&conn, &rev, actor, &effective);
         }
         Err(e) => log::error!("Failed to record patch revision for {}: {}", name, e),
     }
@@ -525,8 +525,19 @@ pub async fn change_patches(
 /// Start the deploy run a recorded revision implies (see
 /// [`DeployRun::after_revision`]). Bookkeeping like the revision itself:
 /// a failure is logged, because the deploy has already happened.
-fn start_run(conn: &PooledConnection<SqliteConnectionManager>, revision: &Revision, trigger: &str) {
-    match DeployRun::after_revision(conn, revision, trigger) {
+fn start_run(
+    conn: &PooledConnection<SqliteConnectionManager>,
+    revision: &Revision,
+    trigger: &str,
+    config: &DeployConfig,
+) {
+    let deadline_ms = config
+        .spec
+        .spec
+        .checks
+        .rollout_deadline_ms()
+        .unwrap_or(DEFAULT_ROLLOUT_DEADLINE_MS);
+    match DeployRun::after_revision(conn, revision, trigger, deadline_ms) {
         Ok(Some(run)) => log::info!(
             "Deploy run {} for {} (revision {}) is rolling out",
             run.id,
@@ -888,7 +899,7 @@ pub async fn run_action(
                     Action::Rollback { .. } => "rollback",
                     _ => actor,
                 };
-                start_run(&conn, &rev, trigger);
+                start_run(&conn, &rev, trigger, &effective);
             }
             Err(e) => log::error!("Failed to record revision for {}: {}", name, e),
         }
@@ -1219,6 +1230,7 @@ mod tests {
             "site",
             DeployConfigSpec {
                 spec: DeployConfigSpecFields {
+                    checks: Default::default(),
                     team: "t".into(),
                     kind: "service".into(),
                     parameters: ParameterSource::sha_map(Some(

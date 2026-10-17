@@ -22,7 +22,8 @@ use rusqlite::{params, OptionalExtension, Row};
 use crate::db::revision::Revision;
 use crate::error::{AppError, AppResult};
 
-/// How long a run may stay in `ROLLING_OUT` before it fails.
+/// How long a run may stay in `ROLLING_OUT` before it fails, unless the
+/// config sets `checks.rolloutDeadline`.
 pub const DEFAULT_ROLLOUT_DEADLINE_MS: i64 = 10 * 60 * 1000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,6 +34,9 @@ pub enum RunState {
     Succeeded,
     /// The rollout stalled, crash-looped or missed its deadline.
     Failed,
+    /// Failed, and cicd rolled the config back to the last run that
+    /// succeeded.
+    RolledBack,
     /// A newer deploy of the same config replaced this run before it ended.
     Superseded,
 }
@@ -43,6 +47,7 @@ impl RunState {
             RunState::RollingOut => "ROLLING_OUT",
             RunState::Succeeded => "SUCCEEDED",
             RunState::Failed => "FAILED",
+            RunState::RolledBack => "ROLLED_BACK",
             RunState::Superseded => "SUPERSEDED",
         }
     }
@@ -62,6 +67,7 @@ impl FromStr for RunState {
             "ROLLING_OUT" => Ok(RunState::RollingOut),
             "SUCCEEDED" => Ok(RunState::Succeeded),
             "FAILED" => Ok(RunState::Failed),
+            "ROLLED_BACK" => Ok(RunState::RolledBack),
             "SUPERSEDED" => Ok(RunState::Superseded),
             other => Err(AppError::Internal(format!(
                 "unknown deploy run state {other}"
@@ -116,17 +122,19 @@ impl DeployRun {
     /// change) starts a run in `ROLLING_OUT` that supersedes the config's
     /// unfinished runs; an undeploy, or a revision with nothing deployed,
     /// only supersedes them, since there is nothing left to roll out.
+    /// The new run fails if it has not rolled out within `deadline_ms`.
     /// Returns the new run, if one was started.
     pub fn after_revision(
         conn: &PooledConnection<SqliteConnectionManager>,
         revision: &Revision,
         trigger: &str,
+        deadline_ms: i64,
     ) -> AppResult<Option<Self>> {
         let now = Utc::now().timestamp_millis();
         let tx = conn.unchecked_transaction()?;
         let deploys = revision.action != "undeploy" && revision.config_sha.is_some();
         let run = if deploys {
-            let deadline_at = now + DEFAULT_ROLLOUT_DEADLINE_MS;
+            let deadline_at = now + deadline_ms;
             tx.execute(
                 "INSERT INTO deploy_run (config_name, trigger, state, revision_id, created_at, deadline_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -222,6 +230,47 @@ impl DeployRun {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// The newest run of a config, older than `before`, that succeeded with
+    /// a revision other than `not_revision`: what a failed run rolls back
+    /// to. A run that redeployed the failed revision is skipped, since that
+    /// revision is the one that just failed.
+    pub fn last_good(
+        conn: &PooledConnection<SqliteConnectionManager>,
+        config_name: &str,
+        before: i64,
+        not_revision: Option<i64>,
+    ) -> AppResult<Option<Self>> {
+        Ok(conn
+            .query_row(
+                &format!(
+                    "SELECT {COLUMNS} FROM deploy_run \
+                     WHERE config_name = ?1 AND id < ?2 AND state = ?3 AND revision_id IS NOT NULL \
+                     AND revision_id != COALESCE(?4, -1) \
+                     ORDER BY id DESC LIMIT 1"
+                ),
+                params![
+                    config_name,
+                    before,
+                    RunState::Succeeded.as_str(),
+                    not_revision
+                ],
+                Self::from_row,
+            )
+            .optional()?)
+    }
+
+    /// Mark a failed run as rolled back, once the rollback is under way.
+    pub fn mark_rolled_back(
+        conn: &PooledConnection<SqliteConnectionManager>,
+        id: i64,
+    ) -> AppResult<()> {
+        conn.execute(
+            "UPDATE deploy_run SET state = ?1 WHERE id = ?2 AND state = ?3",
+            params![RunState::RolledBack.as_str(), id, RunState::Failed.as_str()],
+        )?;
+        Ok(())
+    }
+
     /// Record what a rolling-out run is waiting for. Only touches a run
     /// that is still rolling out, so a run that ended meanwhile keeps its
     /// final message.
@@ -301,16 +350,30 @@ mod tests {
     fn a_deploy_starts_a_run_and_supersedes_the_unfinished_one() -> AppResult<()> {
         let pool = migrated_memory_pool();
         let conn = pool.get()?;
-        let first = DeployRun::after_revision(&conn, &revision(&conn, "site", "deploy")?, "web")?
-            .expect("a deploy starts a run");
+        let first = DeployRun::after_revision(
+            &conn,
+            &revision(&conn, "site", "deploy")?,
+            "web",
+            DEFAULT_ROLLOUT_DEADLINE_MS,
+        )?
+        .expect("a deploy starts a run");
         assert_eq!(first.state, RunState::RollingOut);
         assert!(first.deadline_at.is_some());
 
-        let other = DeployRun::after_revision(&conn, &revision(&conn, "other", "deploy")?, "mcp")?
-            .expect("a deploy starts a run");
-        let second =
-            DeployRun::after_revision(&conn, &revision(&conn, "site", "deploy")?, "autodeploy")?
-                .expect("a deploy starts a run");
+        let other = DeployRun::after_revision(
+            &conn,
+            &revision(&conn, "other", "deploy")?,
+            "mcp",
+            DEFAULT_ROLLOUT_DEADLINE_MS,
+        )?
+        .expect("a deploy starts a run");
+        let second = DeployRun::after_revision(
+            &conn,
+            &revision(&conn, "site", "deploy")?,
+            "autodeploy",
+            DEFAULT_ROLLOUT_DEADLINE_MS,
+        )?
+        .expect("a deploy starts a run");
 
         let first = DeployRun::get(&conn, first.id)?.expect("still there");
         assert_eq!(first.state, RunState::Superseded);
@@ -335,9 +398,19 @@ mod tests {
     fn an_undeploy_only_supersedes() -> AppResult<()> {
         let pool = migrated_memory_pool();
         let conn = pool.get()?;
-        let run = DeployRun::after_revision(&conn, &revision(&conn, "site", "deploy")?, "web")?
-            .expect("a deploy starts a run");
-        let none = DeployRun::after_revision(&conn, &revision(&conn, "site", "undeploy")?, "web")?;
+        let run = DeployRun::after_revision(
+            &conn,
+            &revision(&conn, "site", "deploy")?,
+            "web",
+            DEFAULT_ROLLOUT_DEADLINE_MS,
+        )?
+        .expect("a deploy starts a run");
+        let none = DeployRun::after_revision(
+            &conn,
+            &revision(&conn, "site", "undeploy")?,
+            "web",
+            DEFAULT_ROLLOUT_DEADLINE_MS,
+        )?;
         assert!(none.is_none());
         let run = DeployRun::get(&conn, run.id)?.expect("still there");
         assert_eq!(run.state, RunState::Superseded);
@@ -349,8 +422,13 @@ mod tests {
     fn finish_ends_only_a_rolling_out_run() -> AppResult<()> {
         let pool = migrated_memory_pool();
         let conn = pool.get()?;
-        let run = DeployRun::after_revision(&conn, &revision(&conn, "site", "deploy")?, "web")?
-            .expect("a deploy starts a run");
+        let run = DeployRun::after_revision(
+            &conn,
+            &revision(&conn, "site", "deploy")?,
+            "web",
+            DEFAULT_ROLLOUT_DEADLINE_MS,
+        )?
+        .expect("a deploy starts a run");
         DeployRun::set_progress(&conn, run.id, "waiting for Deployment/site")?;
         assert!(DeployRun::finish(&conn, run.id, RunState::Succeeded, None)?);
         let done = DeployRun::get(&conn, run.id)?.expect("still there");
@@ -370,6 +448,46 @@ mod tests {
         assert_eq!(done.state, RunState::Succeeded);
         assert_eq!(done.message, None);
         assert!(DeployRun::finish(&conn, run.id, RunState::Superseded, None).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn last_good_skips_failures_and_the_failed_revision() -> AppResult<()> {
+        let pool = migrated_memory_pool();
+        let conn = pool.get()?;
+        let start = |action: &str| -> AppResult<DeployRun> {
+            Ok(DeployRun::after_revision(
+                &conn,
+                &revision(&conn, "site", action)?,
+                "web",
+                DEFAULT_ROLLOUT_DEADLINE_MS,
+            )?
+            .expect("a deploy starts a run"))
+        };
+        let good = start("deploy")?;
+        DeployRun::finish(&conn, good.id, RunState::Succeeded, None)?;
+        let bad = start("deploy")?;
+        DeployRun::finish(&conn, bad.id, RunState::Failed, Some("crash"))?;
+        let failing = start("deploy")?;
+
+        let target = DeployRun::last_good(&conn, "site", failing.id, failing.revision_id)?;
+        assert_eq!(target.map(|r| r.id), Some(good.id));
+        // The good run's own revision is excluded when it is the one that
+        // failed (a redeploy of it).
+        assert!(DeployRun::last_good(&conn, "site", failing.id, good.revision_id)?.is_none());
+        assert!(DeployRun::last_good(&conn, "site", good.id, None)?.is_none());
+
+        DeployRun::mark_rolled_back(&conn, bad.id)?;
+        DeployRun::mark_rolled_back(&conn, good.id)?;
+        assert_eq!(
+            DeployRun::get(&conn, bad.id)?.map(|r| r.state),
+            Some(RunState::RolledBack)
+        );
+        // Only a failed run can be marked rolled back.
+        assert_eq!(
+            DeployRun::get(&conn, good.id)?.map(|r| r.state),
+            Some(RunState::Succeeded)
+        );
         Ok(())
     }
 

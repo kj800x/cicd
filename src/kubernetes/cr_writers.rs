@@ -8,7 +8,7 @@
 //!
 //! | manager           | owns                                              |
 //! |-------------------|---------------------------------------------------|
-//! | cicd-config-sync  | spec.parameters, spec.config, spec.kind, spec.team; status.orphaned |
+//! | cicd-config-sync  | spec.parameters, spec.config, spec.kind, spec.team, spec.checks; status.orphaned |
 //! | cicd-deploy       | spec.specs; status.parameters, status.config      |
 //! | cicd-selections   | spec.selections (the whole map)                   |
 //! | cicd-patches      | spec.patches (the whole list)                     |
@@ -100,6 +100,9 @@ pub fn config_sync_spec(fields: &DeployConfigSpecFields) -> Value {
     });
     if !fields.parameters.is_empty() {
         spec["parameters"] = json!(fields.parameters);
+    }
+    if !fields.checks.is_empty() {
+        spec["checks"] = json!(fields.checks);
     }
     spec
 }
@@ -236,6 +239,7 @@ mod tests {
         let mut selections = Selections::default();
         selections.insert("SHA".into(), Selection::pin("abc", Durability::Standing));
         DeployConfigSpecFields {
+            checks: Default::default(),
             team: "t".into(),
             kind: "service".into(),
             parameters: ParameterSource::sha_map(Some(RepositoryBranch {
@@ -266,6 +270,13 @@ mod tests {
                 "{owned_elsewhere} must not be claimed"
             );
         }
+        assert!(spec.get("checks").is_none(), "empty checks are omitted");
+        let mut with_checks = fields();
+        with_checks.checks.on_failure = Some(crate::kubernetes::deploy_config::OnFailure::Hold);
+        assert_eq!(
+            config_sync_spec(&with_checks)["checks"]["onFailure"],
+            "hold"
+        );
         // No parameters at all omits the map; the server rejects an owned
         // empty map, and omission removes every entry anyway.
         let mut none = fields();
@@ -378,6 +389,7 @@ mod live {
             );
         }
         DeployConfigSpecFields {
+            checks: Default::default(),
             team: "t".into(),
             kind: "service".into(),
             parameters,

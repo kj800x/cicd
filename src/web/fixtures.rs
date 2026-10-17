@@ -178,6 +178,7 @@ fn config(name: &str) -> DeployConfig {
         name,
         DeployConfigSpec {
             spec: DeployConfigSpecFields {
+                checks: Default::default(),
                 team: "cluster-infra".into(),
                 kind: "service".into(),
                 parameters,
