@@ -94,7 +94,7 @@ pub enum OnFailure {
     Hold,
 }
 
-/// `checks` in a `.deploy` file. Both fields are optional; the defaults
+/// `checks` in a `.deploy` file. Every field is optional; the defaults
 /// live with their readers.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -104,6 +104,55 @@ pub struct DeployChecks {
     /// A duration such as `10m`, `90s` or `1h`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rollout_deadline: Option<String>,
+    /// Checks asked before a deploy is applied; any of them can hold it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pre: Vec<CheckSpec>,
+    /// How often a held autodeploy asks its pre-checks again. Default 5m.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_interval: Option<String>,
+    /// How long a held autodeploy waits before Discord hears about it
+    /// (once; it keeps waiting). Default 24h.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_wait: Option<String>,
+}
+
+/// One check: a name and where to ask.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckSpec {
+    /// Used for acknowledgements, the UI, history and notifications.
+    pub name: String,
+    /// The URL the check protocol is POSTed to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http: Option<String>,
+    /// How long to wait for an answer. Default 3s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<String>,
+    /// A Secret in the config's namespace whose key is sent as a bearer
+    /// token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_ref: Option<SecretKeyRef>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SecretKeyRef {
+    pub name: String,
+    pub key: String,
+}
+
+/// A duration such as `90s`, `10m` or `1h` in milliseconds, or `None`
+/// when it is not a positive whole number of seconds, minutes or hours.
+pub fn parse_duration_ms(text: &str) -> Option<i64> {
+    let text = text.trim();
+    let (number, unit) = text.split_at(text.len().checked_sub(1)?);
+    let n: i64 = number.parse().ok()?;
+    let unit_ms = match unit {
+        "s" => 1_000,
+        "m" => 60_000,
+        "h" => 3_600_000,
+        _ => return None,
+    };
+    n.checked_mul(unit_ms).filter(|ms| *ms > 0)
 }
 
 impl DeployChecks {
@@ -114,16 +163,23 @@ impl DeployChecks {
     /// The rollout deadline in milliseconds, or `None` when it is absent
     /// or not a whole number of seconds, minutes or hours.
     pub fn rollout_deadline_ms(&self) -> Option<i64> {
-        let text = self.rollout_deadline.as_deref()?.trim();
-        let (number, unit) = text.split_at(text.len().checked_sub(1)?);
-        let n: i64 = number.parse().ok()?;
-        let unit_ms = match unit {
-            "s" => 1_000,
-            "m" => 60_000,
-            "h" => 3_600_000,
-            _ => return None,
-        };
-        n.checked_mul(unit_ms).filter(|ms| *ms > 0)
+        parse_duration_ms(self.rollout_deadline.as_deref()?)
+    }
+
+    /// How often a held autodeploy asks again, in milliseconds.
+    pub fn retry_interval_ms(&self) -> i64 {
+        self.retry_interval
+            .as_deref()
+            .and_then(parse_duration_ms)
+            .unwrap_or(5 * 60_000)
+    }
+
+    /// How long a held autodeploy waits before it is reported.
+    pub fn max_wait_ms(&self) -> i64 {
+        self.max_wait
+            .as_deref()
+            .and_then(parse_duration_ms)
+            .unwrap_or(24 * 3_600_000)
     }
 }
 
@@ -654,8 +710,8 @@ mod tests {
     #[test]
     fn checks_parse_their_rollout_deadline() {
         let checks = |deadline: &str| DeployChecks {
-            on_failure: None,
             rollout_deadline: Some(deadline.to_string()),
+            ..Default::default()
         };
         assert_eq!(checks("90s").rollout_deadline_ms(), Some(90_000));
         assert_eq!(checks("10m").rollout_deadline_ms(), Some(600_000));
@@ -672,6 +728,21 @@ mod tests {
         .expect("valid checks");
         assert_eq!(parsed.on_failure, Some(OnFailure::Rollback));
         assert_eq!(parsed.rollout_deadline_ms(), Some(300_000));
+        assert_eq!(parsed.retry_interval_ms(), 5 * 60_000);
+        assert_eq!(parsed.max_wait_ms(), 24 * 3_600_000);
+
+        let pre: DeployChecks = serde_json::from_value(serde_json::json!({
+            "retryInterval": "1m",
+            "pre": [{"name": "streams", "http": "https://c/x", "timeout": "5s",
+                     "secretRef": {"name": "s", "key": "token"}}]
+        }))
+        .expect("valid checks");
+        assert_eq!(pre.retry_interval_ms(), 60_000);
+        assert_eq!(pre.pre[0].name, "streams");
+        assert_eq!(
+            pre.pre[0].secret_ref.as_ref().map(|r| r.key.as_str()),
+            Some("token")
+        );
     }
 
     fn repo(owner: &str, repo: &str) -> Repository {
