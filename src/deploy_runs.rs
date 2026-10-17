@@ -161,6 +161,40 @@ mod tests {
         Ok(DeployRun::after_revision(conn, &revision, "web")?.expect("a deploy starts a run"))
     }
 
+    /// Judge every deployed config on the cluster, as the driver would.
+    /// Everything that is rolled out should read as done; anything else is
+    /// printed with its reason. Needs a kubeconfig:
+    /// `cargo test live_judge -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore]
+    async fn live_judge_every_config() -> AppResult<()> {
+        let client = Client::try_default().await?;
+        let configs = Api::<DeployConfig>::all(client.clone())
+            .list(&Default::default())
+            .await?
+            .items;
+        let mut not_done = 0;
+        for config in &configs {
+            if config
+                .status
+                .as_ref()
+                .and_then(|s| s.config.as_ref())
+                .is_none()
+            {
+                continue;
+            }
+            match judge(&client, config).await {
+                Rollout::Done => {}
+                other => {
+                    not_done += 1;
+                    println!("{}: {:?}", config.name_any(), other);
+                }
+            }
+        }
+        println!("{} configs judged, {} not done", configs.len(), not_done);
+        Ok(())
+    }
+
     #[test]
     fn waiting_records_progress_until_the_deadline() -> AppResult<()> {
         let pool = migrated_memory_pool();

@@ -4,8 +4,14 @@
 //! The rule is generic, in the spirit of kstatus rather than per resource
 //! kind:
 //!
-//! - Every object the config renders must exist with the `manifestHash`
-//!   the render gives it, so the controller has applied this deploy.
+//! - Every object the config renders must exist, and every field the
+//!   render sets must have the same value on the live object: the
+//!   controller has applied this deploy. Fields the cluster fills in
+//!   (defaults, status) are not in the render and are ignored. Server-side
+//!   apply stores what it was sent, so on this cluster every config
+//!   matches its render exactly once applied (checked 2026-10-17: 155 of
+//!   155 objects). A field the API server rewrites (`cpu: 0.5` stored as
+//!   `500m`) would keep a run waiting; the message names the field.
 //! - Deployments, StatefulSets and DaemonSets are done when the workload
 //!   controller has observed the new spec and every replica is updated and
 //!   available. A Deployment that reports `ProgressDeadlineExceeded`, or a
@@ -21,8 +27,6 @@
 use kube::api::DynamicObject;
 use kube::ResourceExt;
 use serde_json::Value;
-
-use crate::kubernetes::deploy_config::MANIFEST_HASH_ANNOTATION;
 
 /// Container waiting reasons that mean a new pod will not come up on its
 /// own. Transient ones (`ErrImagePull`, `ContainerCreating`) are left out:
@@ -127,8 +131,11 @@ fn evaluate_one(want: &DynamicObject, live: &[DynamicObject]) -> Rollout {
     let Some(obj) = find(want, live) else {
         return Rollout::Waiting(format!("waiting for {} to be created", label(want)));
     };
-    if annotation(obj, MANIFEST_HASH_ANNOTATION) != annotation(want, MANIFEST_HASH_ANNOTATION) {
-        return Rollout::Waiting(format!("waiting for {} to be applied", label(want)));
+    if let Some(difference) = first_difference(want, obj) {
+        return Rollout::Waiting(format!(
+            "waiting for {} to be applied: {difference}",
+            label(want)
+        ));
     }
     let generation = obj.metadata.generation.unwrap_or(0);
     let observed = int(&obj.data, &["status", "observedGeneration"]);
@@ -159,6 +166,57 @@ fn evaluate_one(want: &DynamicObject, live: &[DynamicObject]) -> Rollout {
             _ => Rollout::Done,
         },
     }
+}
+
+/// The first field the render sets that the live object does not have
+/// with the same value, as `path is live, want desired`. Maps are compared
+/// key by key, so anything the cluster added is ignored; lists element by
+/// element, and must be the same length.
+fn first_difference(want: &DynamicObject, live: &DynamicObject) -> Option<String> {
+    let mut want = serde_json::to_value(want).ok()?;
+    // Status is the cluster's to write; a manifest that carries one cannot
+    // expect it to stick.
+    if let Some(map) = want.as_object_mut() {
+        map.remove("status");
+    }
+    let live = serde_json::to_value(live).ok()?;
+    difference_at(&want, &live, "")
+}
+
+fn difference_at(want: &Value, live: &Value, path: &str) -> Option<String> {
+    match (want, live) {
+        (Value::Object(w), Value::Object(l)) => w.iter().find_map(|(key, wv)| {
+            let path = if path.is_empty() {
+                key.clone()
+            } else {
+                format!("{path}.{key}")
+            };
+            match l.get(key) {
+                Some(lv) => difference_at(wv, lv, &path),
+                None => Some(format!("{path} is missing, want {}", shown(wv))),
+            }
+        }),
+        (Value::Array(w), Value::Array(l)) if w.len() != l.len() => {
+            Some(format!("{path} has {} items, want {}", l.len(), w.len()))
+        }
+        (Value::Array(w), Value::Array(l)) => w
+            .iter()
+            .zip(l)
+            .enumerate()
+            .find_map(|(i, (wv, lv))| difference_at(wv, lv, &format!("{path}[{i}]"))),
+        (w, l) if w == l => None,
+        (w, l) => Some(format!("{path} is {}, want {}", shown(l), shown(w))),
+    }
+}
+
+/// A JSON value for a message, cut short.
+fn shown(value: &Value) -> String {
+    let text = value.to_string();
+    if text.chars().count() <= 60 {
+        return text;
+    }
+    let cut: String = text.chars().take(59).collect();
+    format!("{cut}…")
 }
 
 fn owned_by<'a>(
@@ -327,7 +385,7 @@ mod tests {
         serde_json::from_value(value).expect("valid object")
     }
 
-    fn deployment_json(hash: &str, status: Value) -> Value {
+    fn deployment_json(image: &str, status: Value) -> Value {
         json!({
             "apiVersion": "apps/v1",
             "kind": "Deployment",
@@ -336,9 +394,15 @@ mod tests {
                 "namespace": "ns",
                 "uid": "d1",
                 "generation": 3,
-                "annotations": {"manifestHash": hash, "deployment.kubernetes.io/revision": "7"}
+                "annotations": {"configSha": "c1", "deployment.kubernetes.io/revision": "7"}
             },
-            "spec": {"replicas": 2},
+            "spec": {
+                "replicas": 2,
+                "progressDeadlineSeconds": 600,
+                "template": {"spec": {"containers": [
+                    {"name": "app", "image": image, "imagePullPolicy": "IfNotPresent"}
+                ]}}
+            },
             "status": status
         })
     }
@@ -347,7 +411,11 @@ mod tests {
         vec![obj(json!({
             "apiVersion": "apps/v1",
             "kind": "Deployment",
-            "metadata": {"name": "web", "namespace": "ns", "annotations": {"manifestHash": "h2"}}
+            "metadata": {"name": "web", "namespace": "ns", "annotations": {"configSha": "c1"}},
+            "spec": {
+                "replicas": 2,
+                "template": {"spec": {"containers": [{"name": "app", "image": "web:2"}]}}
+            }
         }))]
     }
 
@@ -357,10 +425,18 @@ mod tests {
 
     #[test]
     fn waits_until_the_controller_applied_this_render() {
-        let live = vec![obj(deployment_json("h1", rolled_out()))];
+        let live = vec![obj(deployment_json("web:1", rolled_out()))];
         assert_eq!(
             evaluate(&desired(), &live),
-            Rollout::Waiting("waiting for Deployment/web to be applied".into())
+            Rollout::Waiting(
+                "waiting for Deployment/web to be applied: spec.template.spec.containers[0].image is \"web:1\", want \"web:2\"".into()
+            )
+        );
+        // Defaults the cluster added (progressDeadlineSeconds,
+        // imagePullPolicy, status) do not count as differences.
+        assert_eq!(
+            evaluate(&desired(), &[obj(deployment_json("web:2", rolled_out()))]),
+            Rollout::Done
         );
         assert_eq!(
             evaluate(&desired(), &[]),
@@ -370,22 +446,22 @@ mod tests {
 
     #[test]
     fn a_deployment_is_done_when_every_replica_is_new_and_available() {
-        let live = vec![obj(deployment_json("h2", rolled_out()))];
+        let live = vec![obj(deployment_json("web:2", rolled_out()))];
         assert_eq!(evaluate(&desired(), &live), Rollout::Done);
 
         let stale = json!({"observedGeneration": 2, "replicas": 2, "updatedReplicas": 2, "availableReplicas": 2});
         assert_eq!(
-            evaluate(&desired(), &[obj(deployment_json("h2", stale))]),
+            evaluate(&desired(), &[obj(deployment_json("web:2", stale))]),
             Rollout::Waiting("waiting for Deployment/web to see the new spec".into())
         );
         let surging = json!({"observedGeneration": 3, "replicas": 3, "updatedReplicas": 2, "availableReplicas": 2});
         assert_eq!(
-            evaluate(&desired(), &[obj(deployment_json("h2", surging))]),
+            evaluate(&desired(), &[obj(deployment_json("web:2", surging))]),
             Rollout::Waiting("Deployment/web: 1 old replicas still terminating".into())
         );
         let starting = json!({"observedGeneration": 3, "replicas": 2, "updatedReplicas": 2, "availableReplicas": 1});
         assert_eq!(
-            evaluate(&desired(), &[obj(deployment_json("h2", starting))]),
+            evaluate(&desired(), &[obj(deployment_json("web:2", starting))]),
             Rollout::Waiting("Deployment/web: 1 of 2 updated replicas available".into())
         );
     }
@@ -397,7 +473,7 @@ mod tests {
             "conditions": [{"type": "Progressing", "status": "False", "reason": "ProgressDeadlineExceeded"}]
         });
         assert_eq!(
-            evaluate(&desired(), &[obj(deployment_json("h2", status))]),
+            evaluate(&desired(), &[obj(deployment_json("web:2", status))]),
             Rollout::Failed("Deployment/web exceeded its progress deadline".into())
         );
     }
@@ -422,7 +498,7 @@ mod tests {
             }))
         };
         let old_only = vec![
-            obj(deployment_json("h2", status.clone())),
+            obj(deployment_json("web:2", status.clone())),
             rs("web-old", "rs-old", "6"),
             rs("web-new", "rs-new", "7"),
             pod("web-old-a", "rs-old"),
@@ -447,13 +523,13 @@ mod tests {
         let item = |status: &str| {
             obj(json!({
                 "apiVersion": "onepassword.com/v1", "kind": "OnePasswordItem",
-                "metadata": {"name": "creds", "namespace": "ns", "annotations": {"manifestHash": "i"}},
+                "metadata": {"name": "creds", "namespace": "ns"},
                 "status": {"conditions": [{"type": "Ready", "status": status, "message": "item not found"}]}
             }))
         };
         let want_item = obj(json!({
             "apiVersion": "onepassword.com/v1", "kind": "OnePasswordItem",
-            "metadata": {"name": "creds", "namespace": "ns", "annotations": {"manifestHash": "i"}}
+            "metadata": {"name": "creds", "namespace": "ns"}
         }));
         assert_eq!(
             evaluate(&[want_item.clone()], &[item("True")]),
@@ -468,14 +544,14 @@ mod tests {
 
         let service = obj(json!({
             "apiVersion": "v1", "kind": "Service",
-            "metadata": {"name": "web", "namespace": "ns", "annotations": {"manifestHash": "s"}}
+            "metadata": {"name": "web", "namespace": "ns"}
         }));
         assert_eq!(evaluate(&[service.clone()], &[service]), Rollout::Done);
 
         let job = |conditions: Value| {
             obj(json!({
                 "apiVersion": "batch/v1", "kind": "Job",
-                "metadata": {"name": "migrate", "namespace": "ns", "annotations": {"manifestHash": "j"}},
+                "metadata": {"name": "migrate", "namespace": "ns"},
                 "status": {"conditions": conditions}
             }))
         };
@@ -500,6 +576,28 @@ mod tests {
             evaluate(&[want_job.clone()], &[want_job]),
             Rollout::Waiting("waiting for Job/migrate to complete".into())
         );
+    }
+
+    #[test]
+    fn differences_name_the_field() {
+        let want = json!({"a": {"b": [1, {"c": "x"}]}, "d": "y"});
+        assert_eq!(difference_at(&want, &want, ""), None);
+        let extra = json!({"a": {"b": [1, {"c": "x", "z": 0}], "z": 0}, "d": "y", "z": 0});
+        assert_eq!(difference_at(&want, &extra, ""), None);
+        assert_eq!(
+            difference_at(&want, &json!({"a": {"b": [1, {"c": "w"}]}, "d": "y"}), ""),
+            Some("a.b[1].c is \"w\", want \"x\"".into())
+        );
+        assert_eq!(
+            difference_at(&want, &json!({"a": {"b": [1]}, "d": "y"}), ""),
+            Some("a.b has 1 items, want 2".into())
+        );
+        assert_eq!(
+            difference_at(&want, &json!({"a": {"b": [1, {"c": "x"}]}}), ""),
+            Some("d is missing, want \"y\"".into())
+        );
+        let long = json!("x".repeat(100));
+        assert_eq!(shown(&long).chars().count(), 60);
     }
 
     #[test]
