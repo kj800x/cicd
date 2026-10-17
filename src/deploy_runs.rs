@@ -17,6 +17,7 @@ use r2d2_sqlite::SqliteConnectionManager;
 use crate::db::deploy_run::{DeployRun, RunState};
 use crate::error::AppResult;
 use crate::kubernetes::api::ListMode;
+use crate::kubernetes::discovery_cache;
 use crate::kubernetes::rollout::{self, Rollout};
 use crate::kubernetes::{list_namespace_objects, DeployConfig};
 
@@ -66,6 +67,21 @@ async fn judge(client: &Client, config: &DeployConfig) -> Rollout {
         // The controller cannot apply what does not render either; the
         // deadline decides when to give up.
         Err(e) => return Rollout::Waiting(format!("the config does not render: {e}")),
+    };
+    // Only namespaced objects are in the namespace listing; a cluster-scoped
+    // one would wait forever. Without discovery, judge everything.
+    let desired: Vec<_> = match discovery_cache::namespaced_kinds(client).await {
+        Ok(kinds) => desired
+            .into_iter()
+            .filter(|obj| {
+                obj.types.as_ref().is_none_or(|t| {
+                    kinds
+                        .iter()
+                        .any(|(ar, _)| ar.kind == t.kind && ar.api_version == t.api_version)
+                })
+            })
+            .collect(),
+        Err(_) => desired,
     };
     let ns = config.namespace().unwrap_or_else(|| "default".to_string());
     match list_namespace_objects(client, &ns, ListMode::All).await {
