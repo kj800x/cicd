@@ -590,7 +590,13 @@ async fn write_pages() -> AppResult<()> {
     };
     for (i, id) in ids.iter().enumerate() {
         match i {
-            4 | 6 => run(*id, "autodeploy", "SUCCEEDED", None)?,
+            4 => run(*id, "autodeploy", "SUCCEEDED", None)?,
+            6 => run(
+                *id,
+                "autodeploy",
+                "SUCCEEDED_WITH_WARNINGS",
+                Some("post-check no-alerts: PaperlessQueueBacklog fired after 4 min"),
+            )?,
             5 => run(*id, "autodeploy", "SUPERSEDED", None)?,
             7 => run(
                 *id,
@@ -604,7 +610,12 @@ async fn write_pages() -> AppResult<()> {
                 "FAILED",
                 Some("Deployment/alldex-rs: pod alldex-rs-7d9f-x2k4 container app is CrashLoopBackOff"),
             )?,
-            9 => run(*id, "rollback", "SUCCEEDED", None)?,
+            9 => run(
+                *id,
+                "rollback",
+                "SUCCEEDED_WITH_WARNINGS",
+                Some("post-check no-alerts: no final answer in time"),
+            )?,
             _ => run(*id, "backfill", "SUCCEEDED", None)?,
         };
     }
@@ -668,6 +679,24 @@ async fn write_pages() -> AppResult<()> {
             ],
             1,
         )?;
+        crate::db::check_result::CheckResult::start_post(
+            &conn,
+            grafana_run,
+            &[("smoke".into(), 600_000), ("no-alerts".into(), 900_000)],
+            now_ms() - 5 * 60_000,
+        )?;
+        let mut posts = crate::db::check_result::CheckResult::post_for_run(&conn, grafana_run)?;
+        posts[0].status = "OK".into();
+        posts[0].title = Some("job passed".into());
+        posts[0].details_url =
+            Some("https://jobs.home.coolkev.com/jobs/monitoring/grafana-at-x1".into());
+        posts[0].attempt = 6;
+        posts[1].status = "WARN".into();
+        posts[1].title = Some("no final answer in time (last: quiet for 9 of 10 minutes)".into());
+        posts[1].attempt = 20;
+        for p in &posts {
+            p.save(&conn)?;
+        }
     }
     let pre_check_strip = crate::web::pre_checks::render(
         "media",
