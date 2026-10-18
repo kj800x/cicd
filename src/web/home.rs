@@ -1,7 +1,8 @@
 //! Home: everything that needs a human, and nothing else.
 //!
 //! Each section renders only when it has rows, so the page is the size of
-//! the problem: blocked configs, temporary deployments, unhealthy deploys,
+//! the problem: deploys in progress (and deploys still being watched),
+//! blocked configs, temporary deployments, unhealthy deploys,
 //! commits still building that will be drift once they finish, configs
 //! that have drifted from latest, configs whose tag pattern is behind
 //! what the image publishes, then the recent activity and the standing
@@ -19,6 +20,7 @@ use r2d2_sqlite::SqliteConnectionManager;
 
 use crate::build_status::BuildStatus;
 use crate::db::blocker::Blocker;
+use crate::db::check_result::CheckResult;
 use crate::db::deploy_config::DeployConfig as DbDeployConfig;
 use crate::db::deploy_run::DeployRun;
 use crate::db::git_branch::GitBranch;
@@ -128,8 +130,18 @@ pub struct Standing {
 }
 
 /// Everything the page shows, gathered once.
+/// A deploy run still moving, and what it waits for.
+pub struct ActiveRun {
+    pub run: DeployRun,
+    pub text: String,
+}
+
 pub struct HomeData {
     pub configs: Vec<DeployConfig>,
+    /// Runs rolling out or verifying, oldest first.
+    pub deploying: Vec<ActiveRun>,
+    /// Deployed runs whose watch checks are running, oldest first.
+    pub watching: Vec<ActiveRun>,
     pub blockers: Vec<Blocker>,
     /// Autodeploys a pre-check holds, oldest first.
     pub waiting: Vec<DeployRun>,
@@ -670,6 +682,23 @@ pub async fn gather(
         .into_iter()
         .filter(|r| names.contains(&r.config_name))
         .collect();
+    let active = |runs: Vec<DeployRun>| -> Vec<ActiveRun> {
+        let mut runs: Vec<ActiveRun> = runs
+            .into_iter()
+            .filter(|r| names.contains(&r.config_name))
+            .map(|run| {
+                let rows = CheckResult::for_run(conn, run.id).unwrap_or_default();
+                let text = feed::describe_active(&run, &rows);
+                ActiveRun { run, text }
+            })
+            .collect();
+        runs.sort_by_key(|a| a.run.id);
+        runs
+    };
+    let mut in_progress = DeployRun::unfinished(conn).unwrap_or_default();
+    in_progress.extend(DeployRun::verifying(conn).unwrap_or_default());
+    let deploying = active(in_progress);
+    let watching = active(DeployRun::watching(conn).unwrap_or_default());
     // Stage timings at debug level: RUST_LOG=cicd::web::home=debug.
     let t = std::time::Instant::now();
     let (unhealthy, healthy_count) = match client {
@@ -702,6 +731,8 @@ pub async fn gather(
     let all_teams = DbDeployConfig::all_teams(conn).unwrap_or_default();
     HomeData {
         configs,
+        deploying,
+        watching,
         blockers,
         waiting,
         unhealthy,
@@ -874,6 +905,29 @@ pub fn render_home_body(data: &HomeData, strips: Markup, cluster_reachable: bool
             }
         }
         div.nags {
+            @if !data.deploying.is_empty() || !data.watching.is_empty() {
+                (section(
+                    html! { @if data.deploying.is_empty() { "Watching recent deploys" } @else { "Deploying now" } },
+                    Some(html! { a href="/deploy-history" { "Deploy history" } }),
+                    data.deploying.is_empty(),
+                    html! {
+                        @for a in &data.deploying {
+                            div.nag-row {
+                                a.nag-row__config href=(format!("/deploy?selected={}", a.run.config_name)) { (a.run.config_name) }
+                                span.nag-row__text { (a.text) }
+                                span.nag-row__meta { (formatting::format_ago_short(a.run.created_at)) " · " span.mono { (a.run.trigger) } }
+                            }
+                        }
+                        @for a in &data.watching {
+                            div.nag-row.nag-row--quiet {
+                                a.nag-row__config href=(format!("/deploy-history/{}", a.run.config_name)) { (a.run.config_name) }
+                                span.nag-row__text { (a.text) }
+                                span.nag-row__meta { "deployed " (formatting::format_ago_short(a.run.rolled_out_at.unwrap_or(a.run.created_at))) }
+                            }
+                        }
+                    },
+                ))
+            }
             @if !data.blockers.is_empty() {
                 (section(html! { i class="fa fa-hand-paper-o" {} "Blocked configs" }, Some(html! { a href="/blockers" { "Blockers" } }), false, html! {
                     @for b in &data.blockers {

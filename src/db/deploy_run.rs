@@ -453,6 +453,31 @@ impl DeployRun {
         Ok(runs)
     }
 
+    /// A config's newest run that has a revision: the deploy that is in
+    /// place, or on its way.
+    pub fn latest_deploy(
+        conn: &PooledConnection<SqliteConnectionManager>,
+        config_name: &str,
+    ) -> AppResult<Option<Self>> {
+        Ok(conn
+            .query_row(
+                &format!(
+                    "SELECT {COLUMNS} FROM deploy_run WHERE config_name = ?1 AND revision_id IS NOT NULL \
+                     ORDER BY id DESC LIMIT 1"
+                ),
+                params![config_name],
+                Self::from_row,
+            )
+            .optional()?)
+    }
+
+    /// Whether the run is still moving: rolling out, verifying, or
+    /// deployed and being watched.
+    pub fn is_active(&self) -> bool {
+        matches!(self.state, RunState::RollingOut | RunState::Verifying)
+            || self.watch_state == Some(WatchState::Watching)
+    }
+
     /// A config's most recent runs, newest first.
     #[cfg(test)]
     pub fn list_for(
