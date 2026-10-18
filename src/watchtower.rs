@@ -14,7 +14,7 @@ use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{AppError, AppResult};
+use crate::error::{format_error_chain, AppError, AppResult};
 use crate::kubernetes::parameters::ImageRef;
 
 /// In-cluster service by default; override for local development.
@@ -127,6 +127,11 @@ impl Watchtower {
             base: base.trim_end_matches('/').to_string(),
             http: reqwest::Client::builder()
                 .timeout(timeout)
+                // Watchtower (actix-web) closes a connection idle for 5s,
+                // and the home page polls every 5s: a pooled connection
+                // reused at that moment fails mid-send. Drop idle ones
+                // well before the server does.
+                .pool_idle_timeout(std::time::Duration::from_secs(2))
                 .build()
                 .unwrap_or_default(),
         }
@@ -151,8 +156,14 @@ impl Watchtower {
         })
     }
 
+    /// The error with its causes: reqwest's own message only says the
+    /// request failed, not whether it timed out or the connection closed.
     fn unavailable(&self, e: reqwest::Error) -> AppError {
-        AppError::Unavailable(format!("watchtower at {} is unreachable: {e}", self.base))
+        AppError::Unavailable(format!(
+            "watchtower at {} is unreachable: {}",
+            self.base,
+            format_error_chain(&e)
+        ))
     }
 
     /// The image's repo with its tags, or `None` when watchtower does not
