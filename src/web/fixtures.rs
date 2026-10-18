@@ -821,8 +821,45 @@ async fn write_pages() -> AppResult<()> {
     activity.truncate(6);
     let mut home_configs = all.clone();
     home_configs.push(advanced_state());
+    // A rollout in progress, a verify check running and a watched deploy.
+    let rolling = crate::db::deploy_run::DeployRun::unfinished(&conn)?;
+    let mut deploying: Vec<home::ActiveRun> = rolling
+        .iter()
+        .map(|run| home::ActiveRun {
+            text: feed::describe_active(run, &[]),
+            run: run.clone(),
+        })
+        .collect();
+    if let Some(run) = rolling.first() {
+        deploying.push(home::ActiveRun {
+            run: crate::db::deploy_run::DeployRun {
+                config_name: "alldex-rs".into(),
+                state: crate::db::deploy_run::RunState::Verifying,
+                created_at: now_ms() - 3 * 60_000,
+                trigger: "web".into(),
+                ..run.clone()
+            },
+            text: "verifying · alldex-at: job running".into(),
+        });
+    }
+    let watching: Vec<home::ActiveRun> = rolling
+        .first()
+        .map(|run| home::ActiveRun {
+            run: crate::db::deploy_run::DeployRun {
+                config_name: "jellyfin".into(),
+                state: crate::db::deploy_run::RunState::Succeeded,
+                watch_state: Some(crate::db::deploy_run::WatchState::Watching),
+                rolled_out_at: Some(now_ms() - 6 * 60_000),
+                ..run.clone()
+            },
+            text: "watching · alerts: quiet for 6 of 15 min".into(),
+        })
+        .into_iter()
+        .collect();
     let data = home::HomeData {
         configs: home_configs.clone(),
+        deploying,
+        watching,
         blockers: Blocker::all_active(&conn)?,
         waiting: vec![waiting.clone()],
         unhealthy: vec![home::Unhealthy { name: "lerke".into(), message: "Deployment lerke: Ready 0 / 2 · CrashLoopBackOff".into(), since: Some(now_ms() - 11 * 3_600_000) }],
@@ -885,6 +922,8 @@ async fn write_pages() -> AppResult<()> {
     )?;
     let quiet = home::HomeData {
         configs: home_configs.clone(),
+        deploying: vec![],
+        watching: vec![],
         blockers: vec![],
         waiting: vec![],
         unhealthy: vec![],

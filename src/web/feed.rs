@@ -7,7 +7,8 @@ use maud::{html, Markup};
 use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
 
-use crate::db::deploy_run::{DeployRun, RunState};
+use crate::db::check_result::CheckResult;
+use crate::db::deploy_run::{DeployRun, RunState, WatchState};
 use crate::db::revision::Revision;
 use crate::db::revision_diff::{self, Change};
 use crate::kubernetes::selections::Durability;
@@ -306,6 +307,9 @@ pub fn render_run_badge(run: &DeployRun) -> Markup {
         RunState::Verifying => {
             html! { span.hl-badge.hl-badge--progress title=(title) { "verifying" } }
         }
+        RunState::Succeeded if run.watch_state == Some(WatchState::Watching) => {
+            html! { span.hl-badge.hl-badge--ok title="deployed; watch checks are running" { "rolled out · watching" } }
+        }
         RunState::Succeeded => html! { span.hl-badge.hl-badge--ok { "rolled out" } },
         RunState::SucceededWithWarnings => {
             html! { span.hl-badge.hl-badge--warn title=(title) { "rolled out · warnings" } }
@@ -317,6 +321,38 @@ pub fn render_run_badge(run: &DeployRun) -> Markup {
             html! { span.hl-badge.hl-badge--fail title=(title) { "failed · rolled back" } }
         }
         RunState::Superseded => html! { span.hl-badge.hl-badge--standing { "superseded" } },
+    }
+}
+
+/// What a run still in motion is waiting for, in a line: the rollout's
+/// progress, or the pending checks of its verify or watch phase (`rows`)
+/// with their latest titles.
+pub fn describe_active(run: &DeployRun, rows: &[CheckResult]) -> String {
+    let pending = |phase: &str| {
+        let waits: Vec<String> = rows
+            .iter()
+            .filter(|r| r.phase == phase && r.status == "PENDING")
+            .map(|r| match &r.title {
+                Some(title) => format!("{}: {title}", r.check_name),
+                None => r.check_name.clone(),
+            })
+            .collect();
+        if waits.is_empty() {
+            "finishing".to_string()
+        } else {
+            waits.join("; ")
+        }
+    };
+    match run.state {
+        RunState::RollingOut => run
+            .message
+            .clone()
+            .unwrap_or_else(|| "rolling out".to_string()),
+        RunState::Verifying => format!("verifying · {}", pending("verify")),
+        _ if run.watch_state == Some(WatchState::Watching) => {
+            format!("watching · {}", pending("watch"))
+        }
+        _ => run.state.to_string(),
     }
 }
 
@@ -547,5 +583,69 @@ mod tests {
         assert!(entry.changes.is_empty());
         assert!(entry.render_changes().into_string().contains("no change"));
         assert_eq!(entry.first_change(), None);
+    }
+
+    #[test]
+    fn an_active_run_says_what_it_waits_for() {
+        let run = DeployRun {
+            id: 1,
+            config_name: "site".into(),
+            trigger: "web".into(),
+            state: RunState::RollingOut,
+            revision_id: Some(1),
+            message: Some("Deployment/site: 0 of 1 new replicas ready".into()),
+            created_at: 0,
+            rolled_out_at: None,
+            finished_at: None,
+            deadline_at: None,
+            superseded_by: None,
+            acknowledged: vec![],
+            next_check_at: None,
+            notified_at: None,
+            watch_state: None,
+        };
+        assert_eq!(
+            describe_active(&run, &[]),
+            "Deployment/site: 0 of 1 new replicas ready"
+        );
+        let row = |phase: &str, name: &str, status: &str, title: &str| CheckResult {
+            id: 0,
+            run_id: 1,
+            phase: phase.into(),
+            check_name: name.into(),
+            status: status.into(),
+            title: Some(title.into()),
+            message: None,
+            details_url: None,
+            attempt: 1,
+            started_at: 0,
+            finished_at: None,
+            next_poll_at: None,
+            deadline_at: None,
+            handle: None,
+        };
+        let rows = vec![
+            row("verify", "smoke", "OK", "job passed"),
+            row("verify", "at", "PENDING", "job running"),
+            row("watch", "alerts", "PENDING", "quiet for 3 of 15 min"),
+        ];
+        let verifying = DeployRun {
+            state: RunState::Verifying,
+            ..run.clone()
+        };
+        assert_eq!(
+            describe_active(&verifying, &rows),
+            "verifying · at: job running"
+        );
+        let watching = DeployRun {
+            state: RunState::Succeeded,
+            watch_state: Some(WatchState::Watching),
+            ..run
+        };
+        assert_eq!(
+            describe_active(&watching, &rows),
+            "watching · alerts: quiet for 3 of 15 min"
+        );
+        assert!(watching.is_active());
     }
 }

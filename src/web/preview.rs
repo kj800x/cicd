@@ -686,6 +686,39 @@ fn render_row(row: &ParamRow) -> Markup {
     }
 }
 
+/// One line for the config's newest deploy while it is still moving:
+/// rolling out, verifying, or deployed and being watched.
+fn render_active_run(
+    conn: &PooledConnection<SqliteConnectionManager>,
+    name: &str,
+) -> Option<Markup> {
+    let run = crate::db::deploy_run::DeployRun::latest_deploy(conn, name)
+        .ok()
+        .flatten()
+        .filter(|r| r.is_active())?;
+    let rows = crate::db::check_result::CheckResult::for_run(conn, run.id).unwrap_or_default();
+    let what = crate::web::feed::describe_active(&run, &rows);
+    let watching = !matches!(
+        run.state,
+        crate::db::deploy_run::RunState::RollingOut | crate::db::deploy_run::RunState::Verifying
+    );
+    Some(render_strip(
+        "neutral",
+        html! {
+            @if watching {
+                span.status-indicator.status-success {} " Deployed "
+                (crate::web::formatting::format_ago_short(run.rolled_out_at.unwrap_or(run.created_at)))
+                " · " (what)
+            } @else {
+                span.status-indicator.status-pending {} " Deploy run " (run.id) " "
+                (what)
+                " · started " (crate::web::formatting::format_ago_short(run.created_at))
+            }
+            " · " a href=(format!("/deploy-history/{name}")) { "History" }
+        },
+    ))
+}
+
 pub(crate) fn render_alert(tone: &str, title: Markup, body: Markup) -> Markup {
     html! {
         div class=(format!("alert alert-{tone}")) {
@@ -811,6 +844,9 @@ pub async fn render_preview_content(
             html! { "Orphaned" },
             html! { "The manifests are gone from the config repo. Only undeploy is offered." },
         ));
+    }
+    if let Some(line) = render_active_run(conn, &name) {
+        alerts.push(line);
     }
     for alert in deploy_status(config, namespaced_objs).await {
         alerts.push(alert);
@@ -1094,5 +1130,53 @@ mod tests {
         let t = Shown::plain("1.27.4-alpine");
         assert_eq!(t.short, "1.27.4-alpine");
         assert!(t.href.is_none());
+    }
+
+    #[test]
+    fn the_newest_deploy_shows_while_it_is_moving() -> crate::error::AppResult<()> {
+        use crate::db::deploy_run::{DeployRun, RunState};
+        use crate::db::revision::{NewRevision, Revision};
+        let pool = crate::db::test_support::migrated_memory_pool();
+        let conn = pool.get()?;
+        assert!(render_active_run(&conn, "site").is_none());
+        let revision = Revision::record(
+            &conn,
+            NewRevision {
+                config_name: "site".into(),
+                actor: "web".into(),
+                action: "deploy".into(),
+                reason: None,
+                config_sha: Some("c1".into()),
+                config_branch: None,
+                config_version_hash: None,
+                patches: None,
+                temporary: false,
+                parameters: vec![],
+            },
+        )?;
+        let run = DeployRun::after_revision(&conn, &revision, "web", 600_000)?.expect("a run");
+        DeployRun::set_progress(&conn, run.id, "Deployment/site: 0 of 1 new replicas ready")?;
+        let html = render_active_run(&conn, "site")
+            .expect("a line")
+            .into_string();
+        assert!(html.contains("Deploy run"), "{html}");
+        assert!(html.contains("0 of 1 new replicas ready"));
+
+        DeployRun::finish(&conn, run.id, RunState::Succeeded, None)?;
+        assert!(render_active_run(&conn, "site").is_none(), "settled");
+        DeployRun::start_watch(&conn, run.id)?;
+        crate::db::check_result::CheckResult::start(
+            &conn,
+            run.id,
+            "watch",
+            &[("alerts".into(), 600_000)],
+            0,
+        )?;
+        let html = render_active_run(&conn, "site")
+            .expect("a line")
+            .into_string();
+        assert!(html.contains("Deployed"), "{html}");
+        assert!(html.contains("watching · alerts"));
+        Ok(())
     }
 }
