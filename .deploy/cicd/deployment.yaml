@@ -53,6 +53,14 @@ spec:
                 secretKeyRef:
                   key: DISCORD_CHANNEL_ID
                   name: cicd-auth
+            # Every config's default checks: a note when one of its alerts is
+            # already firing, and a 30-minute-or-so watch for new ones
+            # (deploy-checks sizes the window from the Grafana rules
+            # labelled deploy_config: <config>). Skip with checks.skip: [alerts].
+            - name: CICD_DEFAULT_CHECKS
+              value: >-
+                {"pre": [{"name": "alerts", "http": "http://deploy-checks.cicd.svc/lerke/firing", "advisory": true}],
+                "watch": [{"name": "alerts", "http": "http://deploy-checks.cicd.svc/lerke/quiet"}]}
           image: ghcr.io/kj800x/cicd:commit-$SHA
           name: cicd
           ports:
