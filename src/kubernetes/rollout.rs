@@ -273,11 +273,12 @@ fn deployment(obj: &DynamicObject, live: &[DynamicObject]) -> Rollout {
     // The new pods are those of the ReplicaSet carrying the Deployment's
     // current revision.
     let revision = annotation(obj, "deployment.kubernetes.io/revision");
-    let new_pods = owned_by(obj, live, "ReplicaSet")
+    let new_sets: Vec<&DynamicObject> = owned_by(obj, live, "ReplicaSet")
         .filter(|rs| {
             revision.is_some() && annotation(rs, "deployment.kubernetes.io/revision") == revision
         })
-        .flat_map(|rs| owned_by(rs, live, "Pod"));
+        .collect();
+    let new_pods = new_sets.iter().flat_map(|rs| owned_by(rs, live, "Pod"));
     if let Some(stuck) = stuck_pod(new_pods) {
         return Rollout::Failed(format!("{}: {}", label(obj), stuck));
     }
@@ -289,6 +290,22 @@ fn deployment(obj: &DynamicObject, live: &[DynamicObject]) -> Rollout {
     if updated < wanted {
         return Rollout::Waiting(format!(
             "{}: {updated} of {wanted} replicas updated",
+            label(obj)
+        ));
+    }
+    // How many new replicas are available: the new ReplicaSet says; without
+    // it, assume the old ones still around are the available ones.
+    let new_available = if new_sets.is_empty() {
+        (available - (total - updated)).max(0)
+    } else {
+        new_sets
+            .iter()
+            .map(|rs| int(&rs.data, &["status", "availableReplicas"]).unwrap_or(0))
+            .sum()
+    };
+    if new_available < updated {
+        return Rollout::Waiting(format!(
+            "{}: {new_available} of {updated} new replicas ready",
             label(obj)
         ));
     }
@@ -454,15 +471,48 @@ mod tests {
             evaluate(&desired(), &[obj(deployment_json("web:2", stale))]),
             Rollout::Waiting("waiting for Deployment/web to see the new spec".into())
         );
-        let surging = json!({"observedGeneration": 3, "replicas": 3, "updatedReplicas": 2, "availableReplicas": 2});
+        let terminating = json!({"observedGeneration": 3, "replicas": 3, "updatedReplicas": 2, "availableReplicas": 3});
+        assert_eq!(
+            evaluate(&desired(), &[obj(deployment_json("web:2", terminating))]),
+            Rollout::Waiting("Deployment/web: 1 old replicas still terminating".into())
+        );
+        // The old replica is still serving while the new one is not ready:
+        // that is what the rollout waits for, not the old one going away.
+        let surging = json!({"observedGeneration": 3, "replicas": 3, "updatedReplicas": 2, "availableReplicas": 1});
         assert_eq!(
             evaluate(&desired(), &[obj(deployment_json("web:2", surging))]),
-            Rollout::Waiting("Deployment/web: 1 old replicas still terminating".into())
+            Rollout::Waiting("Deployment/web: 0 of 2 new replicas ready".into())
         );
         let starting = json!({"observedGeneration": 3, "replicas": 2, "updatedReplicas": 2, "availableReplicas": 1});
         assert_eq!(
             evaluate(&desired(), &[obj(deployment_json("web:2", starting))]),
-            Rollout::Waiting("Deployment/web: 1 of 2 updated replicas available".into())
+            Rollout::Waiting("Deployment/web: 1 of 2 new replicas ready".into())
+        );
+    }
+
+    #[test]
+    fn the_new_replica_set_says_how_many_new_replicas_are_ready() {
+        // Two new replicas are available and an unavailable old one is
+        // still going away; the totals alone would read as one new one
+        // not ready.
+        let status = json!({"observedGeneration": 3, "replicas": 3, "updatedReplicas": 2, "availableReplicas": 2});
+        let rs = |name: &str, uid: &str, revision: &str, available: i64| {
+            obj(json!({
+                "apiVersion": "apps/v1", "kind": "ReplicaSet",
+                "metadata": {"name": name, "namespace": "ns", "uid": uid,
+                    "annotations": {"deployment.kubernetes.io/revision": revision},
+                    "ownerReferences": [{"apiVersion": "apps/v1", "kind": "Deployment", "name": "web", "uid": "d1"}]},
+                "status": {"availableReplicas": available}
+            }))
+        };
+        let live = vec![
+            obj(deployment_json("web:2", status)),
+            rs("web-old", "rs-old", "6", 0),
+            rs("web-new", "rs-new", "7", 2),
+        ];
+        assert_eq!(
+            evaluate(&desired(), &live),
+            Rollout::Waiting("Deployment/web: 1 old replicas still terminating".into())
         );
     }
 
