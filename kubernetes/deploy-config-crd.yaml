@@ -162,6 +162,11 @@ spec:
                       type: string
                       description: "How long a held autodeploy waits before it is reported to Discord (once; it keeps waiting). Default 24h."
                       pattern: "^[0-9]+(s|m|h)$"
+                    skip:
+                      type: array
+                      description: "Default checks (CICD_DEFAULT_CHECKS) this config does without, by name."
+                      items:
+                        type: string
                     pre:
                       type: array
                       description: "Checks asked before a deploy is applied. Any of them can hold it."
@@ -179,6 +184,9 @@ spec:
                             type: string
                             description: "How long to wait for an answer. Default 3s."
                             pattern: "^[0-9]+(s|m|h)$"
+                          advisory:
+                            type: boolean
+                            description: "Never hold a deploy: any answer other than OK, no answer included, is shown as a NOTE."
                           secretRef:
                             type: object
                             description: "A Secret in the config's namespace whose key is sent as a bearer token."

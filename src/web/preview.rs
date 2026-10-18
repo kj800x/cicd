@@ -158,7 +158,7 @@ pub async fn render_page_preview(
                     (render_autodeploy_badge(config.autodeploy()))
                 }
             }
-            @if prepared.action.is_gated_by_blockers() && !config.spec.spec.checks.pre.is_empty() {
+            @if prepared.action.is_gated_by_blockers() && !config.checks().pre.is_empty() {
                 (crate::web::pre_checks::render_slot(&namespace, &name))
             }
             div.preview-content-poll-wrapper

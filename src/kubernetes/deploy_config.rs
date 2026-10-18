@@ -125,6 +125,10 @@ pub struct DeployChecks {
     /// (once; it keeps waiting). Default 24h.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_wait: Option<String>,
+    /// Default checks (`CICD_DEFAULT_CHECKS`) this config does without, by
+    /// name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skip: Vec<String>,
 }
 
 /// One check: a name and where to ask.
@@ -159,6 +163,10 @@ pub struct CheckSpec {
     /// token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret_ref: Option<SecretKeyRef>,
+    /// Pre-checks only: never hold a deploy. Any answer other than OK, a
+    /// check that does not answer included, is shown as a NOTE.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub advisory: bool,
 }
 
 /// How bad a verify or watch check's answer is, mildest first.
@@ -174,6 +182,33 @@ pub enum Severity {
 pub struct SecretKeyRef {
     pub name: String,
     pub key: String,
+}
+
+/// The checks every config gets unless it skips them, from
+/// `CICD_DEFAULT_CHECKS`: JSON shaped like a `.deploy` file's `checks`
+/// (only `pre`, `verify` and `watch` are read). Read once.
+pub fn default_checks() -> &'static DeployChecks {
+    static DEFAULTS: std::sync::OnceLock<DeployChecks> = std::sync::OnceLock::new();
+    DEFAULTS.get_or_init(|| {
+        let Ok(json) = std::env::var("CICD_DEFAULT_CHECKS") else {
+            return DeployChecks::default();
+        };
+        if json.trim().is_empty() {
+            return DeployChecks::default();
+        }
+        match serde_json::from_str::<DeployChecks>(&json) {
+            Ok(checks) => DeployChecks {
+                pre: checks.pre,
+                verify: checks.verify,
+                watch: checks.watch,
+                ..Default::default()
+            },
+            Err(e) => {
+                log::error!("CICD_DEFAULT_CHECKS is not valid checks JSON, ignoring it: {e}");
+                DeployChecks::default()
+            }
+        }
+    })
 }
 
 /// A duration such as `90s`, `10m` or `1h` in milliseconds, or `None`
@@ -194,6 +229,29 @@ pub fn parse_duration_ms(text: &str) -> Option<i64> {
 impl DeployChecks {
     pub fn is_empty(&self) -> bool {
         self == &DeployChecks::default()
+    }
+
+    /// These checks with `defaults` added: each default check the config
+    /// neither skips nor defines itself under the same name goes after the
+    /// config's own.
+    pub fn with_defaults(&self, defaults: &DeployChecks) -> DeployChecks {
+        let add = |own: &[CheckSpec], defaults: &[CheckSpec]| -> Vec<CheckSpec> {
+            let mut all = own.to_vec();
+            all.extend(
+                defaults
+                    .iter()
+                    .filter(|d| !self.skip.contains(&d.name))
+                    .filter(|d| !own.iter().any(|o| o.name == d.name))
+                    .cloned(),
+            );
+            all
+        };
+        DeployChecks {
+            pre: add(&self.pre, &defaults.pre),
+            verify: add(&self.verify, &defaults.verify),
+            watch: add(&self.watch, &defaults.watch),
+            ..self.clone()
+        }
     }
 
     /// The rollout deadline in milliseconds, or `None` when it is absent
@@ -285,6 +343,12 @@ pub struct DeployConfigSpec {
 pub type DeployConfig = TestDeployConfig;
 
 impl DeployConfig {
+    /// The checks around this config's deploys: its own `checks` and the
+    /// cluster's default checks it does not skip.
+    pub fn checks(&self) -> DeployChecks {
+        self.spec.spec.checks.with_defaults(default_checks())
+    }
+
     pub fn autodeploy(&self) -> bool {
         self.status
             .as_ref()
@@ -1175,5 +1239,46 @@ mod tests {
         // A tag deployed as a pin, with the explicit pin since cleared,
         // tracks its default range again.
         assert_eq!(dc.selection("NGINX").mode(), Mode::Default);
+    }
+
+    #[test]
+    fn default_checks_join_unless_skipped_or_defined() {
+        let check = |name: &str, url: &str| CheckSpec {
+            name: name.into(),
+            http: Some(url.into()),
+            ..Default::default()
+        };
+        let defaults = DeployChecks {
+            pre: vec![CheckSpec {
+                advisory: true,
+                ..check("alerts", "http://d/firing")
+            }],
+            watch: vec![check("alerts", "http://d/quiet")],
+            verify: vec![check("smoke", "http://d/smoke")],
+            ..Default::default()
+        };
+        let own: DeployChecks = serde_json::from_value(serde_json::json!({
+            "pre": [{"name": "streams", "http": "http://j/streams"}],
+            "post": [{"name": "smoke", "http": "http://j/smoke"}],
+            "skip": ["alerts"]
+        }))
+        .expect("checks");
+        assert_eq!(own.verify.len(), 1, "post is read as verify");
+        let all = own.with_defaults(&defaults);
+        let names = |specs: &[CheckSpec]| specs.iter().map(|s| s.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&all.pre), vec!["streams"]);
+        assert!(all.watch.is_empty());
+        assert_eq!(
+            all.verify[0].http.as_deref(),
+            Some("http://j/smoke"),
+            "own wins"
+        );
+        assert_eq!(all.verify.len(), 1);
+
+        let plain = DeployChecks::default().with_defaults(&defaults);
+        assert_eq!(names(&plain.pre), vec!["alerts"]);
+        assert!(plain.pre[0].advisory);
+        assert_eq!(names(&plain.watch), vec!["alerts"]);
+        assert!(plain.skip.is_empty());
     }
 }

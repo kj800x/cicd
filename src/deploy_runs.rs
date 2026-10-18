@@ -101,9 +101,8 @@ async fn tick(
             Some(config) => judge(client, config).await,
             None => Rollout::Failed(gone(&run.config_name)),
         };
-        let none = DeployChecks::default();
-        let checks = config.map(|c| &c.spec.spec.checks).unwrap_or(&none);
-        let failed = advance(&pool.get()?, &run, verdict, checks)?;
+        let checks = config.map(DeployConfig::checks).unwrap_or_default();
+        let failed = advance(&pool.get()?, &run, verdict, &checks)?;
         if let Some(why) = failed {
             on_failure(client, pool, octocrabs, &run, config, &why).await;
         }
@@ -462,7 +461,8 @@ async fn poll_due(
             parameters,
         )
     };
-    let specs = phase.specs(&config.spec.spec.checks);
+    let checks = config.checks();
+    let specs = phase.specs(&checks);
     for row in rows.iter_mut() {
         if row.status != PostStatus::Pending.as_str() || row.next_poll_at.is_some_and(|at| at > now)
         {
@@ -553,7 +553,7 @@ async fn verify(
     }
     log::info!("Deploy run {} for {} {}", run.id, run.config_name, state);
     if state != RunState::Failed {
-        begin_watch(&conn, run, &config.spec.spec.checks)?;
+        begin_watch(&conn, run, &config.checks())?;
     }
     match state {
         RunState::Failed => Ok(message),

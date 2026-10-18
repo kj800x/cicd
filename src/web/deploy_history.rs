@@ -761,7 +761,7 @@ fn check_tone(status: &str) -> &'static str {
         "OK" => "hl-badge--ok",
         "WARN" | "SOFT_BLOCK" => "hl-badge--warn",
         "PENDING" => "hl-badge--progress",
-        "ENDED" => "hl-badge--standing",
+        "ENDED" | "NOTE" => "hl-badge--standing",
         _ => "hl-badge--fail",
     }
 }
