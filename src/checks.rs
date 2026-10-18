@@ -28,12 +28,13 @@
 //! counts as a `SOFT_BLOCK` titled "check X didn't respond": a broken check
 //! holds autodeploys but never locks a person out.
 //!
-//! A post-check is asked once a deploy has rolled out (phase `post`, mode
-//! `monitor`, `to.revision` set) and answers `OK`, `WARN`, `ROLLBACK` or
-//! `PENDING` with `retryAfter` seconds; cicd asks again with the same
-//! `runId` until the answer is final or the check's timeout passes. A
-//! `job` post-check runs a jobfather JobTemplate instead and passes when
-//! jobfather says the job passed.
+//! Verify and watch checks (together, post-checks here) are asked once a
+//! deploy has rolled out (phase `verify` or `watch`, mode `monitor`,
+//! `to.revision` and `rolledOutAt` set) and answer `OK`, `WARN`,
+//! `ROLLBACK` or `PENDING` with `retryAfter` seconds; cicd asks again with
+//! the same `runId` until the answer is final or the check's timeout
+//! passes. A `job` check runs a jobfather JobTemplate instead and passes
+//! when jobfather says the job passed.
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -143,6 +144,10 @@ struct Request<'a> {
     to: Side<'a>,
     attempt: i64,
     started_at: String,
+    /// Verify and watch checks: when the run rolled out, where a window
+    /// such as "no new alerts for 15 minutes" starts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rolled_out_at: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -272,6 +277,7 @@ async fn post(
         },
         attempt: ask.attempt,
         started_at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        rolled_out_at: None,
     };
     let mut request = reqwest::Client::new()
         .post(url)
@@ -376,10 +382,14 @@ pub struct PostPoll {
     pub handle: Option<String>,
 }
 
-/// The run a post-check is asked about.
+/// The run a verify or watch check is asked about.
 #[derive(Clone, Debug, Default)]
 pub struct PostAsk {
+    /// `verify` or `watch`.
+    pub phase: &'static str,
     pub run_id: i64,
+    /// When the run rolled out, in milliseconds.
+    pub rolled_out_at: Option<i64>,
     pub revision_id: Option<i64>,
     pub trigger: String,
     pub parameters: BTreeMap<String, String>,
@@ -429,7 +439,7 @@ async fn poll_http(
     let empty = BTreeMap::new();
     let body = Request {
         version: 1,
-        phase: "post",
+        phase: ask.phase,
         mode: "monitor",
         run_id: Some(ask.run_id),
         check: &spec.name,
@@ -450,6 +460,10 @@ async fn poll_http(
         },
         attempt: ask.attempt,
         started_at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        rolled_out_at: ask
+            .rolled_out_at
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
     };
     let mut request = reqwest::Client::new()
         .post(url)
@@ -663,7 +677,7 @@ pub(crate) mod tests {
         }
     }
     #[tokio::test]
-    async fn a_post_check_reads_pending_and_retry_after() {
+    async fn a_watch_check_reads_pending_and_retry_after() {
         let (url, seen) = serve(
             "200 OK",
             r#"{"status":"PENDING","title":"quiet for 3 of 10 minutes","retryAfter":30}"#,
@@ -671,7 +685,9 @@ pub(crate) mod tests {
         )
         .await;
         let ask = PostAsk {
+            phase: "watch",
             run_id: 9,
+            rolled_out_at: Some(1_760_724_000_000),
             revision_id: Some(712),
             trigger: "autodeploy".into(),
             parameters: BTreeMap::from([("SHA".into(), "new".into())]),
@@ -688,7 +704,8 @@ pub(crate) mod tests {
         let body: serde_json::Value =
             serde_json::from_str(request.split_once("\r\n\r\n").expect("body").1)
                 .expect("json body");
-        assert_eq!(body["phase"], "post");
+        assert_eq!(body["phase"], "watch");
+        assert_eq!(body["rolledOutAt"], "2025-10-17T18:00:00Z");
         assert_eq!(body["mode"], "monitor");
         assert_eq!(body["runId"], 9);
         assert_eq!(body["to"]["revision"], 712);

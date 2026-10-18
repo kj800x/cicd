@@ -3,9 +3,10 @@
 //!
 //! A run keeps the latest answer of each check per phase: a held
 //! autodeploy that asks again replaces its pre-check rows, and `attempt`
-//! counts the asks. Post-check rows start `PENDING` when a run starts
-//! monitoring and are updated in place as the driver polls them, until
-//! each has a final answer or reaches its deadline.
+//! counts the asks. Verify and watch rows start `PENDING` when a run starts
+//! verifying or watching and are updated in place as the driver polls
+//! them, until each has a final answer or reaches its deadline. A watch
+//! check that a newer deploy cut short ends as `ENDED`.
 use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{params, Row};
@@ -17,7 +18,7 @@ use crate::error::AppResult;
 pub struct CheckResult {
     pub id: i64,
     pub run_id: i64,
-    /// `pre` or `post`.
+    /// `pre`, `verify` or `watch`.
     pub phase: String,
     pub check_name: String,
     /// The protocol status, e.g. `SOFT_BLOCK`.
@@ -28,11 +29,12 @@ pub struct CheckResult {
     pub attempt: i64,
     pub started_at: i64,
     pub finished_at: Option<i64>,
-    /// Post-checks: when to ask again while `PENDING`.
+    /// Verify and watch checks: when to ask again while `PENDING`.
     pub next_poll_at: Option<i64>,
-    /// Post-checks: when a `PENDING` check gives up.
+    /// Verify and watch checks: when a `PENDING` check gives up.
     pub deadline_at: Option<i64>,
-    /// Post-checks: what the check started, e.g. a jobfather job's name.
+    /// Verify and watch checks: what the check started, e.g. a jobfather
+    /// job's name.
     pub handle: Option<String>,
 }
 
@@ -92,11 +94,13 @@ impl CheckResult {
         Ok(())
     }
 
-    /// Start a run's post-checks: one `PENDING` row per check, due now,
-    /// each giving up at `now` plus its deadline in milliseconds.
-    pub fn start_post(
+    /// Start a run's `phase` (`verify` or `watch`) checks: one `PENDING`
+    /// row per check, due now, each giving up at `now` plus its deadline in
+    /// milliseconds.
+    pub fn start(
         conn: &PooledConnection<SqliteConnectionManager>,
         run_id: i64,
+        phase: &str,
         checks: &[(String, i64)],
         now: i64,
     ) -> AppResult<()> {
@@ -104,27 +108,28 @@ impl CheckResult {
         for (name, deadline_ms) in checks {
             tx.execute(
                 "INSERT INTO check_result (run_id, phase, check_name, status, attempt, started_at, next_poll_at, deadline_at) \
-                 VALUES (?1, 'post', ?2, 'PENDING', 0, ?3, ?3, ?4)",
-                params![run_id, name, now, now + deadline_ms],
+                 VALUES (?1, ?2, ?3, 'PENDING', 0, ?4, ?4, ?5)",
+                params![run_id, phase, name, now, now + deadline_ms],
             )?;
         }
         tx.commit()?;
         Ok(())
     }
 
-    /// A run's post-check rows, in config order.
-    pub fn post_for_run(
+    /// A run's rows of one phase, in config order.
+    pub fn for_run_phase(
         conn: &PooledConnection<SqliteConnectionManager>,
         run_id: i64,
+        phase: &str,
     ) -> AppResult<Vec<Self>> {
         let mut stmt = conn.prepare(&format!(
-            "SELECT {COLUMNS} FROM check_result WHERE run_id = ?1 AND phase = 'post' ORDER BY id"
+            "SELECT {COLUMNS} FROM check_result WHERE run_id = ?1 AND phase = ?2 ORDER BY id"
         ))?;
-        let rows = stmt.query_map(params![run_id], Self::from_row)?;
+        let rows = stmt.query_map(params![run_id, phase], Self::from_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Write back a polled post-check.
+    /// Write back a polled verify or watch check.
     pub fn save(&self, conn: &PooledConnection<SqliteConnectionManager>) -> AppResult<()> {
         conn.execute(
             "UPDATE check_result SET status = ?1, title = ?2, message = ?3, details_url = ?4, attempt = ?5, \
@@ -144,14 +149,15 @@ impl CheckResult {
         Ok(())
     }
 
-    /// Every result of a run, pre-checks first, in the order they were
-    /// recorded.
+    /// Every result of a run, pre-checks first, then verify, then watch,
+    /// each in the order they were recorded.
     pub fn for_run(
         conn: &PooledConnection<SqliteConnectionManager>,
         run_id: i64,
     ) -> AppResult<Vec<Self>> {
         let mut stmt = conn.prepare(&format!(
-            "SELECT {COLUMNS} FROM check_result WHERE run_id = ?1 ORDER BY phase DESC, id"
+            "SELECT {COLUMNS} FROM check_result WHERE run_id = ?1 \
+             ORDER BY CASE phase WHEN 'pre' THEN 0 WHEN 'verify' THEN 1 ELSE 2 END, id"
         ))?;
         let rows = stmt.query_map(params![run_id], Self::from_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -165,20 +171,21 @@ mod tests {
     use crate::db::test_support::migrated_memory_pool;
 
     #[test]
-    fn post_checks_start_pending_and_are_saved_in_place() -> AppResult<()> {
+    fn verify_checks_start_pending_and_are_saved_in_place() -> AppResult<()> {
         let pool = migrated_memory_pool();
         let conn = pool.get()?;
         conn.execute(
-            "INSERT INTO deploy_run (id, config_name, trigger, state, created_at) VALUES (1, 'site', 'web', 'MONITORING', 0)",
+            "INSERT INTO deploy_run (id, config_name, trigger, state, created_at) VALUES (1, 'site', 'web', 'VERIFYING', 0)",
             [],
         )?;
-        CheckResult::start_post(
+        CheckResult::start(
             &conn,
             1,
+            "verify",
             &[("smoke".into(), 600_000), ("quiet".into(), 60_000)],
             1000,
         )?;
-        let mut rows = CheckResult::post_for_run(&conn, 1)?;
+        let mut rows = CheckResult::for_run_phase(&conn, 1, "verify")?;
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].check_name, "smoke");
         assert_eq!(rows[0].status, "PENDING");
@@ -191,11 +198,11 @@ mod tests {
         row.attempt = 3;
         row.finished_at = Some(2000);
         row.save(&conn)?;
-        let rows = CheckResult::post_for_run(&conn, 1)?;
+        let rows = CheckResult::for_run_phase(&conn, 1, "verify")?;
         assert_eq!(rows[0].status, "OK");
         assert_eq!(rows[0].handle.as_deref(), Some("smoke-abc"));
         assert_eq!(rows[0].attempt, 3);
-        // Pre-check rows are untouched by post-checks and listed first.
+        // Pre-check rows are untouched by verify checks and listed first.
         assert_eq!(CheckResult::for_run(&conn, 1)?.len(), 2);
         Ok(())
     }

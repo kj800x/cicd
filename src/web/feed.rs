@@ -303,8 +303,8 @@ pub fn render_run_badge(run: &DeployRun) -> Markup {
         RunState::RollingOut => {
             html! { span.hl-badge.hl-badge--progress title=(title) { "rolling out" } }
         }
-        RunState::Monitoring => {
-            html! { span.hl-badge.hl-badge--progress title=(title) { "checking" } }
+        RunState::Verifying => {
+            html! { span.hl-badge.hl-badge--progress title=(title) { "verifying" } }
         }
         RunState::Succeeded => html! { span.hl-badge.hl-badge--ok { "rolled out" } },
         RunState::SucceededWithWarnings => {
@@ -329,7 +329,7 @@ pub fn render_run_parts(run: Option<&DeployRun>) -> (Markup, Markup) {
     let note = match (run.state, &run.message) {
         (
             RunState::RollingOut
-            | RunState::Monitoring
+            | RunState::Verifying
             | RunState::SucceededWithWarnings
             | RunState::Failed
             | RunState::RolledBack,

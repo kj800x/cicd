@@ -6,10 +6,16 @@
 //! pre-check holds starts as a `WAITING` run with no revision, asked again
 //! on an interval until its checks pass and it deploys. A run is
 //! `ROLLING_OUT` once its revision is recorded, and the driver loop
-//! (`crate::deploy_runs`) moves it on: to `SUCCEEDED` once every object
-//! the config owns has rolled out, or to `FAILED` when a rollout stalls,
-//! crash-loops or misses its deadline. A newer deploy of the same config
-//! moves every run still in progress to `SUPERSEDED`.
+//! (`crate::deploy_runs`) moves it on: through `VERIFYING` while its verify
+//! checks run, to `SUCCEEDED` once every object the config owns has rolled
+//! out and the checks passed, or to `FAILED` when a rollout stalls,
+//! crash-loops, misses its deadline or a check fails. A newer deploy of the
+//! same config moves every run still in progress to `SUPERSEDED`.
+//!
+//! A run that succeeded may still be watched: its watch checks (an alert
+//! window, a slow acceptance test) run after the deploy, recorded in
+//! `watch_state` rather than the run's state, since the run is deployed. A
+//! newer deploy ends the watch early.
 //!
 //! Everything lives here rather than in memory, so a cicd restart
 //! (including one caused by deploying cicd) picks up where it left off.
@@ -35,11 +41,12 @@ pub enum RunState {
     Waiting,
     /// The revision is recorded; waiting for the cluster to catch up.
     RollingOut,
-    /// Rolled out; waiting for the post-checks' final answers.
-    Monitoring,
-    /// Everything the config owns rolled out (and every post-check said OK).
+    /// Rolled out; waiting for the verify checks' final answers.
+    Verifying,
+    /// Everything the config owns rolled out (and every verify check said
+    /// OK).
     Succeeded,
-    /// Rolled out, and a post-check warned.
+    /// Rolled out, and a verify or watch check warned.
     SucceededWithWarnings,
     /// The rollout stalled, crash-looped or missed its deadline.
     Failed,
@@ -55,7 +62,7 @@ impl RunState {
         match self {
             RunState::Waiting => "WAITING",
             RunState::RollingOut => "ROLLING_OUT",
-            RunState::Monitoring => "MONITORING",
+            RunState::Verifying => "VERIFYING",
             RunState::Succeeded => "SUCCEEDED",
             RunState::SucceededWithWarnings => "SUCCEEDED_WITH_WARNINGS",
             RunState::Failed => "FAILED",
@@ -78,7 +85,7 @@ impl FromStr for RunState {
         match s {
             "WAITING" => Ok(RunState::Waiting),
             "ROLLING_OUT" => Ok(RunState::RollingOut),
-            "MONITORING" => Ok(RunState::Monitoring),
+            "VERIFYING" | "MONITORING" => Ok(RunState::Verifying),
             "SUCCEEDED_WITH_WARNINGS" => Ok(RunState::SucceededWithWarnings),
             "SUCCEEDED" => Ok(RunState::Succeeded),
             "FAILED" => Ok(RunState::Failed),
@@ -87,6 +94,45 @@ impl FromStr for RunState {
             other => Err(AppError::Internal(format!(
                 "unknown deploy run state {other}"
             ))),
+        }
+    }
+}
+
+/// How a succeeded run's watch checks went.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WatchState {
+    /// Watch checks are still running.
+    Watching,
+    /// Every watch check said OK.
+    Ok,
+    /// A watch check warned.
+    Warn,
+    /// A watch check asked for a rollback.
+    Rollback,
+    /// A newer deploy, an undeploy or the config going away ended the watch
+    /// before the checks answered.
+    Ended,
+}
+
+impl WatchState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WatchState::Watching => "WATCHING",
+            WatchState::Ok => "OK",
+            WatchState::Warn => "WARN",
+            WatchState::Rollback => "ROLLBACK",
+            WatchState::Ended => "ENDED",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "WATCHING" => Some(WatchState::Watching),
+            "OK" => Some(WatchState::Ok),
+            "WARN" => Some(WatchState::Warn),
+            "ROLLBACK" => Some(WatchState::Rollback),
+            "ENDED" => Some(WatchState::Ended),
+            _ => None,
         }
     }
 }
@@ -115,12 +161,14 @@ pub struct DeployRun {
     pub next_check_at: Option<i64>,
     /// When a long wait was reported to Discord.
     pub notified_at: Option<i64>,
+    /// How the run's watch checks went; `None` when it has none.
+    pub watch_state: Option<WatchState>,
 }
 
-const COLUMNS: &str = "id, config_name, trigger, state, revision_id, message, created_at, rolled_out_at, finished_at, deadline_at, superseded_by, acknowledged, next_check_at, notified_at";
+const COLUMNS: &str = "id, config_name, trigger, state, revision_id, message, created_at, rolled_out_at, finished_at, deadline_at, superseded_by, acknowledged, next_check_at, notified_at, watch_state";
 
 /// The states a newer deploy of the same config supersedes.
-const UNFINISHED: &str = "('WAITING', 'ROLLING_OUT', 'MONITORING')";
+const UNFINISHED: &str = "('WAITING', 'ROLLING_OUT', 'VERIFYING')";
 
 impl DeployRun {
     fn from_row(row: &Row) -> rusqlite::Result<Self> {
@@ -145,6 +193,10 @@ impl DeployRun {
                 .unwrap_or_default(),
             next_check_at: row.get(12)?,
             notified_at: row.get(13)?,
+            watch_state: row
+                .get::<_, Option<String>>(14)?
+                .as_deref()
+                .and_then(WatchState::parse),
         })
     }
 
@@ -228,6 +280,11 @@ impl DeployRun {
             ),
             params![RunState::Superseded.as_str(), id, now, revision.config_name],
         )?;
+        let ended = match id {
+            Some(id) => format!("ended: superseded by run {id}"),
+            None => "ended: undeployed".to_string(),
+        };
+        Self::end_watches(&tx, &revision.config_name, id, &ended, now)?;
         let run = match id {
             Some(id) => tx
                 .query_row(
@@ -425,6 +482,7 @@ impl DeployRun {
                 &format!(
                     "SELECT {COLUMNS} FROM deploy_run \
                      WHERE config_name = ?1 AND id < ?2 AND state IN (?3, 'SUCCEEDED_WITH_WARNINGS') AND revision_id IS NOT NULL \
+                     AND COALESCE(watch_state, '') != 'ROLLBACK' \
                      AND revision_id != COALESCE(?4, -1) \
                      ORDER BY id DESC LIMIT 1"
                 ),
@@ -466,7 +524,7 @@ impl DeployRun {
         Ok(())
     }
 
-    /// End a rolling-out run as `SUCCEEDED` or `FAILED`. Returns whether
+    /// End a rolling-out or verifying run as `SUCCEEDED` or `FAILED`. Returns whether
     /// this call ended it: a run that was superseded meanwhile is left
     /// alone, so the caller does not act on a stale verdict.
     pub fn finish(
@@ -487,19 +545,20 @@ impl DeployRun {
         let rolled_out_at = (state != RunState::Failed).then_some(now);
         let changed = conn.execute(
             "UPDATE deploy_run SET state = ?1, message = ?2, finished_at = ?3, rolled_out_at = COALESCE(rolled_out_at, ?4) \
-             WHERE id = ?5 AND state IN ('ROLLING_OUT', 'MONITORING')",
+             WHERE id = ?5 AND state IN ('ROLLING_OUT', 'VERIFYING')",
             params![state.as_str(), message, now, rolled_out_at, id],
         )?;
         Ok(changed == 1)
     }
 
-    /// A run rolled out and has post-checks: it monitors until they answer.
-    /// Returns whether this call moved it (a superseded run is left alone).
-    pub fn monitor(conn: &PooledConnection<SqliteConnectionManager>, id: i64) -> AppResult<bool> {
+    /// A run rolled out and has verify checks: it verifies until they
+    /// answer. Returns whether this call moved it (a superseded run is left
+    /// alone).
+    pub fn verify(conn: &PooledConnection<SqliteConnectionManager>, id: i64) -> AppResult<bool> {
         let changed = conn.execute(
             "UPDATE deploy_run SET state = ?1, rolled_out_at = ?2, message = NULL WHERE id = ?3 AND state = ?4",
             params![
-                RunState::Monitoring.as_str(),
+                RunState::Verifying.as_str(),
                 Utc::now().timestamp_millis(),
                 id,
                 RunState::RollingOut.as_str()
@@ -508,13 +567,122 @@ impl DeployRun {
         Ok(changed == 1)
     }
 
-    /// Every run waiting on post-checks, oldest first.
-    pub fn monitoring(conn: &PooledConnection<SqliteConnectionManager>) -> AppResult<Vec<Self>> {
+    /// Every run waiting on verify checks, oldest first.
+    pub fn verifying(conn: &PooledConnection<SqliteConnectionManager>) -> AppResult<Vec<Self>> {
         let mut stmt = conn.prepare(&format!(
             "SELECT {COLUMNS} FROM deploy_run WHERE state = ?1 ORDER BY id"
         ))?;
-        let rows = stmt.query_map(params![RunState::Monitoring.as_str()], Self::from_row)?;
+        let rows = stmt.query_map(params![RunState::Verifying.as_str()], Self::from_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// A succeeded run starts watching. Returns whether this call started
+    /// it (a run that was superseded or already watched is left alone).
+    pub fn start_watch(
+        conn: &PooledConnection<SqliteConnectionManager>,
+        id: i64,
+    ) -> AppResult<bool> {
+        let changed = conn.execute(
+            "UPDATE deploy_run SET watch_state = ?1 WHERE id = ?2 AND watch_state IS NULL \
+             AND state IN ('SUCCEEDED', 'SUCCEEDED_WITH_WARNINGS')",
+            params![WatchState::Watching.as_str(), id],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Every run being watched, oldest first.
+    pub fn watching(conn: &PooledConnection<SqliteConnectionManager>) -> AppResult<Vec<Self>> {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {COLUMNS} FROM deploy_run WHERE watch_state = ?1 ORDER BY id"
+        ))?;
+        let rows = stmt.query_map(params![WatchState::Watching.as_str()], Self::from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// End a run's watch with the worst answer of its checks. A warning
+    /// marks a run that succeeded cleanly as succeeded with warnings; a
+    /// rollback fails it, so the caller can follow `onFailure`. `message`
+    /// is added to the run's own. Returns whether this call ended it (a
+    /// watch a newer deploy ended meanwhile is left alone).
+    pub fn finish_watch(
+        conn: &PooledConnection<SqliteConnectionManager>,
+        id: i64,
+        outcome: WatchState,
+        message: Option<&str>,
+    ) -> AppResult<bool> {
+        let state = match outcome {
+            WatchState::Ok => None,
+            WatchState::Warn => Some(RunState::SucceededWithWarnings),
+            WatchState::Rollback => Some(RunState::Failed),
+            WatchState::Watching | WatchState::Ended => {
+                return Err(AppError::Internal(format!(
+                    "a watch cannot finish as {}",
+                    outcome.as_str()
+                )))
+            }
+        };
+        let changed = conn.execute(
+            "UPDATE deploy_run SET watch_state = ?1, state = COALESCE(?2, state), \
+             message = CASE WHEN ?3 IS NULL THEN message WHEN message IS NULL THEN ?3 ELSE message || '; ' || ?3 END \
+             WHERE id = ?4 AND watch_state = ?5",
+            params![
+                outcome.as_str(),
+                state.map(|s| s.as_str()),
+                message,
+                id,
+                WatchState::Watching.as_str()
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// End a watch early, e.g. when its config is gone.
+    pub fn end_watch(
+        conn: &PooledConnection<SqliteConnectionManager>,
+        id: i64,
+        why: &str,
+    ) -> AppResult<()> {
+        let tx = conn.unchecked_transaction()?;
+        let config_name: Option<String> = tx
+            .query_row(
+                "SELECT config_name FROM deploy_run WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(config_name) = config_name {
+            Self::end_watches(&tx, &config_name, None, why, Utc::now().timestamp_millis())?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// End every watch of `config_name` other than run `except`'s: their
+    /// pending watch checks end with `why`.
+    fn end_watches(
+        tx: &rusqlite::Transaction,
+        config_name: &str,
+        except: Option<i64>,
+        why: &str,
+        now: i64,
+    ) -> AppResult<()> {
+        tx.execute(
+            "UPDATE check_result SET status = 'ENDED', title = ?1, finished_at = ?2, next_poll_at = NULL \
+             WHERE phase = 'watch' AND status = 'PENDING' AND run_id IN \
+             (SELECT id FROM deploy_run WHERE config_name = ?3 AND watch_state = ?4 AND id != COALESCE(?5, -1))",
+            params![why, now, config_name, WatchState::Watching.as_str(), except],
+        )?;
+        tx.execute(
+            "UPDATE deploy_run SET watch_state = ?1 \
+             WHERE config_name = ?2 AND watch_state = ?3 AND id != COALESCE(?4, -1)",
+            params![
+                WatchState::Ended.as_str(),
+                config_name,
+                WatchState::Watching.as_str(),
+                except
+            ],
+        )?;
+        Ok(())
     }
 }
 

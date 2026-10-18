@@ -256,6 +256,14 @@ pub fn migrations() -> Migrations<'static> {
           ALTER TABLE check_result ADD COLUMN deadline_at INTEGER;
           ALTER TABLE check_result ADD COLUMN handle TEXT;
         "#}),
+        // Post-checks split into verify checks (part of deploying) and
+        // watch checks (after a deploy succeeded). MONITORING becomes
+        // VERIFYING, and a run records how its watch went.
+        M::up(indoc! { r#"
+          UPDATE deploy_run SET state = 'VERIFYING' WHERE state = 'MONITORING';
+          UPDATE check_result SET phase = 'verify' WHERE phase = 'post';
+          ALTER TABLE deploy_run ADD COLUMN watch_state TEXT;
+        "#}),
     ])
 }
 

@@ -107,10 +107,17 @@ pub struct DeployChecks {
     /// Checks asked before a deploy is applied; any of them can hold it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pre: Vec<CheckSpec>,
-    /// Checks run once a deploy has rolled out; the worst answer decides
-    /// whether it succeeded, warned or failed.
+    /// Checks run once a deploy has rolled out, as part of deploying: the
+    /// worst answer decides whether it succeeded, warned or failed.
+    /// `post` is read as an older name.
+    #[serde(default, alias = "post", skip_serializing_if = "Vec::is_empty")]
+    pub verify: Vec<CheckSpec>,
+    /// Checks run after a deploy succeeded, for as long as they take (an
+    /// alert window, a slow acceptance test). The run is deployed while
+    /// they run; a failing answer warns unless the check's `onFail` says
+    /// `rollback`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub post: Vec<CheckSpec>,
+    pub watch: Vec<CheckSpec>,
     /// How often a held autodeploy asks its pre-checks again. Default 5m.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_interval: Option<String>,
@@ -129,21 +136,23 @@ pub struct CheckSpec {
     /// The URL the check protocol is POSTed to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http: Option<String>,
-    /// A jobfather JobTemplate, `namespace/name`, run as a post-check: it
+    /// A jobfather JobTemplate, `namespace/name`, run as a verify or watch
+    /// check: it
     /// passes when the job passes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job: Option<String>,
     /// For a pre-check, how long to wait for an answer (default 3s); for a
-    /// post-check, how long it may take to reach a final answer (default
-    /// 10m).
+    /// verify or watch check, how long it may take to reach a final answer
+    /// (default 10m for verify, 1h for watch).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<String>,
-    /// Post-checks only: the most a failing answer counts for. `warn` turns
-    /// a ROLLBACK into a WARN. Default `rollback`.
+    /// Verify and watch checks: the most a failing answer counts for.
+    /// `warn` turns a ROLLBACK into a WARN. Default `rollback` for verify,
+    /// `warn` for watch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_fail: Option<Severity>,
-    /// Post-checks only: what a check that has no final answer by its
-    /// timeout counts as. Default `warn`.
+    /// Verify and watch checks: what a check that has no final answer by
+    /// its timeout counts as. Default `warn`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_timeout: Option<Severity>,
     /// A Secret in the config's namespace whose key is sent as a bearer
@@ -152,7 +161,7 @@ pub struct CheckSpec {
     pub secret_ref: Option<SecretKeyRef>,
 }
 
-/// How bad a post-check's answer is, mildest first.
+/// How bad a verify or watch check's answer is, mildest first.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
