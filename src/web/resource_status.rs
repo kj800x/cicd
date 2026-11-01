@@ -1236,38 +1236,122 @@ pub trait ResourceStatuses {
     fn format_resources_json(&self, namespaced_objs: &[DynamicObject]) -> Vec<Value>;
 }
 
+/// Where a kind sits in the resource tree: workloads first, then
+/// networking, config and storage, RBAC, and anything else last.
+const KIND_ORDER: &[&str] = &[
+    "Deployment",
+    "StatefulSet",
+    "DaemonSet",
+    "CronJob",
+    "Job",
+    "Pod",
+    "Service",
+    "Ingress",
+    "ConfigMap",
+    "Secret",
+    "PersistentVolumeClaim",
+    "ServiceAccount",
+    "Role",
+    "RoleBinding",
+    "ClusterRole",
+    "ClusterRoleBinding",
+];
+
+/// Sort key for a top-level resource: its kind's place in [`KIND_ORDER`]
+/// (unknown kinds after every listed one, alphabetically), then its name.
+fn tree_order_key<'a>(kind: &'a str, name: &'a str) -> (usize, &'a str, &'a str) {
+    let rank = KIND_ORDER
+        .iter()
+        .position(|k| *k == kind)
+        .unwrap_or(KIND_ORDER.len());
+    (rank, kind, name)
+}
+
+fn spec_kind_and_name(spec: &Value) -> (&str, &str) {
+    let kind = spec.get("kind").and_then(Value::as_str).unwrap_or("");
+    let name = spec
+        .pointer("/metadata/name")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    (kind, name)
+}
+
+/// One top-level row of the resource tree: a manifest the config has now,
+/// or a `(kind, name)` the deploy would create.
+enum TreeRow<'a> {
+    Current(&'a Value),
+    Created(&'a str, &'a str),
+}
+
+impl TreeRow<'_> {
+    fn kind_and_name(&self) -> (&str, &str) {
+        match self {
+            TreeRow::Current(spec) => spec_kind_and_name(spec),
+            TreeRow::Created(kind, name) => (kind, name),
+        }
+    }
+}
+
+/// Resources the deploy would create come first, then what exists now;
+/// each group is in [`tree_order_key`] order.
+fn sort_tree_rows(rows: &mut [TreeRow]) {
+    let key = |row: &TreeRow<'_>| {
+        let created_first = !matches!(row, TreeRow::Created(..));
+        let (kind, name) = row.kind_and_name();
+        let (rank, _, _) = tree_order_key(kind, name);
+        (created_first, rank, kind.to_owned(), name.to_owned())
+    };
+    rows.sort_by_cached_key(key);
+}
+
 impl ResourceStatuses for DeployConfig {
     async fn format_resources_planned(
         &self,
         namespaced_objs: &[DynamicObject],
         plan: &ResourcePlan,
     ) -> Markup {
+        let specs = self.resource_specs();
+        let mut rows: Vec<TreeRow> = specs
+            .iter()
+            .map(TreeRow::Current)
+            .chain(
+                plan.created
+                    .iter()
+                    .map(|(k, n)| TreeRow::Created(k.as_str(), n.as_str())),
+            )
+            .collect();
+        sort_tree_rows(&mut rows);
+
         html! {
             ul.deployable-item__child-list {
-                @for resource in &self.resource_specs() {
-                    @match TryInto::<LiteResource>::try_into(resource) {
-                        Ok(resource) => {
-                            @let removed = plan.removed.iter().any(|(k, n)| *k == resource.kind.to_string() && *n == resource.name);
-                            @if removed {
-                                (resource.format_marked(namespaced_objs, "→ removed"))
-                            } @else {
-                                (resource.format(namespaced_objs))
+                @for row in &rows {
+                    @match row {
+                        TreeRow::Current(resource) => {
+                            @match TryInto::<LiteResource>::try_into(*resource) {
+                                Ok(resource) => {
+                                    @let removed = plan.removed.iter().any(|(k, n)| *k == resource.kind.to_string() && *n == resource.name);
+                                    @if removed {
+                                        (resource.format_marked(namespaced_objs, "→ removed"))
+                                    } @else {
+                                        (resource.format(namespaced_objs))
+                                    }
+                                }
+                                Err(e) => {
+                                    li.deployables-tree__item {
+                                        (format!("Kube spec parse error: {}", format_error_chain(&e)))
+                                    }
+                                }
                             }
                         }
-                        Err(e) => {
-                            li.deployables-tree__item {
-                                (format!("Kube spec parse error: {}", format_error_chain(&e)))
+                        TreeRow::Created(kind, name) => {
+                            li.deployables-tree__item.deployables-tree__item--muted {
+                                span {
+                                    b { (kind) }
+                                    ": "
+                                    (name)
+                                    span.m-left-2.deployable-state.deployable-state--muted.deployable-state--will-skip { "(will be created)" }
+                                }
                             }
-                        }
-                    }
-                }
-                @for (kind, name) in &plan.created {
-                    li.deployables-tree__item.deployables-tree__item--muted {
-                        span {
-                            b { (kind) }
-                            ": "
-                            (name)
-                            span.m-left-2.deployable-state.deployable-state--muted.deployable-state--will-skip { "(will be created)" }
                         }
                     }
                 }
@@ -1276,10 +1360,54 @@ impl ResourceStatuses for DeployConfig {
     }
 
     fn format_resources_json(&self, namespaced_objs: &[DynamicObject]) -> Vec<Value> {
-        self.resource_specs()
-            .iter()
-            .filter_map(|spec| LiteResource::try_from(spec).ok())
+        let specs = self.resource_specs();
+        let mut rows: Vec<TreeRow> = specs.iter().map(TreeRow::Current).collect();
+        sort_tree_rows(&mut rows);
+        rows.iter()
+            .filter_map(|row| match row {
+                TreeRow::Current(spec) => LiteResource::try_from(*spec).ok(),
+                TreeRow::Created(..) => None,
+            })
             .map(|r| r.to_json(namespaced_objs))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tree_order_puts_created_first_then_kinds_with_unknown_last() {
+        let created = [
+            ("Ingress".to_string(), "web".to_string()),
+            ("Widget".to_string(), "b".to_string()),
+        ];
+        let specs = [
+            json!({"kind": "Service", "metadata": {"name": "web"}}),
+            json!({"kind": "ConfigMap", "metadata": {"name": "settings"}}),
+            json!({"kind": "Apple", "metadata": {"name": "a"}}),
+            json!({"kind": "Deployment", "metadata": {"name": "worker"}}),
+            json!({"kind": "Deployment", "metadata": {"name": "api"}}),
+        ];
+        let mut rows: Vec<TreeRow> = specs
+            .iter()
+            .map(TreeRow::Current)
+            .chain(created.iter().map(|(k, n)| TreeRow::Created(k, n)))
+            .collect();
+        sort_tree_rows(&mut rows);
+        let order: Vec<(&str, &str)> = rows.iter().map(TreeRow::kind_and_name).collect();
+        assert_eq!(
+            order,
+            vec![
+                ("Ingress", "web"),
+                ("Widget", "b"),
+                ("Deployment", "api"),
+                ("Deployment", "worker"),
+                ("Service", "web"),
+                ("ConfigMap", "settings"),
+                ("Apple", "a"),
+            ]
+        );
     }
 }
