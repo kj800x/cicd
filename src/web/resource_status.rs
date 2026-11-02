@@ -1349,7 +1349,7 @@ impl ResourceStatuses for DeployConfig {
                                     b { (kind) }
                                     ": "
                                     (name)
-                                    span.m-left-2.deployable-state.deployable-state--muted.deployable-state--will-skip { "(will be created)" }
+                                    span.m-left-2.deployable-state.deployable-state--success.deployable-state--will-skip { "(will be created)" }
                                 }
                             }
                         }
