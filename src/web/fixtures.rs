@@ -25,7 +25,8 @@ use crate::db::revision::{NewRevision, Revision, RevisionParameter};
 use crate::db::test_support::migrated_memory_pool;
 use crate::error::AppResult;
 use crate::kubernetes::deploy_config::{
-    DeployConfigSpec, DeployConfigSpecFields, DeployConfigStatus, Template,
+    DeployConfigSpec, DeployConfigSpecFields, DeployConfigStatus, ReconcileError, ReconcileStatus,
+    Template,
 };
 use crate::kubernetes::parameters::{ParameterSource, ParameterValue, SHA_PARAMETER};
 use crate::kubernetes::patches::{ManifestPatch, PatchOp, PatchTarget};
@@ -323,6 +324,26 @@ fn document(body_class: &str, active: &str, strips: Markup, content: Markup) -> 
     .into_string()
 }
 
+/// `config` with the controller's apply rejected, as the strategy 422 was.
+fn apply_failing(config: &DeployConfig) -> DeployConfig {
+    let mut config = config.clone();
+    let name = config.name_any();
+    let status = config.status.get_or_insert_with(Default::default);
+    status.reconcile = Some(ReconcileStatus {
+        render_hash: Some("0".repeat(64)),
+        error: Some(ReconcileError {
+            message: format!(
+                "Deployment/{name}: Deployment.apps \"{name}\" is invalid: spec.strategy.rollingUpdate: \
+                 Forbidden: may not be specified when strategy type is 'Recreate' (422)"
+            ),
+            since: (chrono::Utc::now() - chrono::Duration::minutes(42)).to_rfc3339(),
+            resources: vec![format!("Deployment/{name}")],
+            permanent: true,
+        }),
+    });
+    config
+}
+
 struct Scenario<'a> {
     file: &'a str,
     config: DeployConfig,
@@ -494,6 +515,13 @@ async fn write_pages() -> AppResult<()> {
         Scenario {
             file: "deploy-blocked.html",
             config: grafana,
+            action: Action::DeployLatest,
+            resolved: ok.clone(),
+            objs: Vec::new(),
+        },
+        Scenario {
+            file: "deploy-apply-failing.html",
+            config: apply_failing(&simple),
             action: Action::DeployLatest,
             resolved: ok.clone(),
             objs: Vec::new(),
@@ -881,6 +909,9 @@ async fn write_pages() -> AppResult<()> {
     activity.truncate(6);
     let mut home_configs = all.clone();
     home_configs.push(advanced_state());
+    if let Some(first) = home_configs.first_mut() {
+        *first = apply_failing(first);
+    }
     // A rollout in progress, a verify check running and a watched deploy.
     let rolling = crate::db::deploy_run::DeployRun::unfinished(&conn)?;
     let mut deploying: Vec<home::ActiveRun> = rolling

@@ -27,6 +27,7 @@ use crate::db::git_branch::GitBranch;
 use crate::db::git_commit_build::GitCommitBuild;
 use crate::db::git_repo::GitRepo;
 use crate::kubernetes::api::get_all_deploy_configs;
+use crate::kubernetes::deploy_config::ReconcileError;
 use crate::kubernetes::parameters::{ImageRef, ParameterSource, SHA_PARAMETER};
 use crate::kubernetes::repo::DeploymentState;
 use crate::kubernetes::selections::Mode;
@@ -158,6 +159,17 @@ pub struct HomeData {
 }
 
 impl HomeData {
+    /// Configs the controller cannot apply, oldest failure first.
+    pub fn failing_to_apply(&self) -> Vec<(&DeployConfig, &ReconcileError)> {
+        let mut failing: Vec<_> = self
+            .configs
+            .iter()
+            .filter_map(|c| c.reconcile_error().map(|e| (c, e)))
+            .collect();
+        failing.sort_by(|a, b| a.1.since.cmp(&b.1.since));
+        failing
+    }
+
     pub fn temporary(&self) -> Vec<&DeployConfig> {
         self.configs
             .iter()
@@ -166,7 +178,10 @@ impl HomeData {
     }
 
     pub fn all_quiet(&self) -> bool {
-        self.blockers.is_empty() && self.temporary().is_empty() && self.unhealthy.is_empty()
+        self.blockers.is_empty()
+            && self.temporary().is_empty()
+            && self.unhealthy.is_empty()
+            && self.failing_to_apply().is_empty()
     }
 }
 
@@ -859,6 +874,7 @@ fn summary_line(data: &HomeData) -> String {
     let counts = [
         (data.blockers.len(), "blocked"),
         (data.temporary().len(), "temporary"),
+        (data.failing_to_apply().len(), "failing to apply"),
         (data.unhealthy.len(), "unhealthy"),
         (data.drift.len(), "drifted"),
         (data.building.len(), "building"),
@@ -873,8 +889,26 @@ fn summary_line(data: &HomeData) -> String {
 
 /// Everything below the header: the strips and the content. Polled every
 /// few seconds and morphed into the page so counts and rows stay current.
+/// The first line of a reconcile error: the first failing resource, with a
+/// count of the rest.
+pub fn error_headline(error: &ReconcileError) -> String {
+    let first = error.message.lines().next().unwrap_or_default();
+    match error.resources.len() {
+        0 | 1 => first.to_string(),
+        n => format!("{first} (and {} more)", n - 1),
+    }
+}
+
+/// Milliseconds since the epoch of an RFC 3339 time.
+pub fn rfc3339_ms(time: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(time)
+        .ok()
+        .map(|t| t.timestamp_millis())
+}
+
 pub fn render_home_body(data: &HomeData, strips: Markup, cluster_reachable: bool) -> Markup {
     let temporary = data.temporary();
+    let failing = data.failing_to_apply();
     let quiet = data.all_quiet();
     let summary = summary_line(data);
     let autodeploy_on = data.configs.iter().filter(|c| c.autodeploy()).count();
@@ -969,6 +1003,17 @@ pub fn render_home_body(data: &HomeData, strips: Markup, cluster_reachable: bool
                                 "since " (formatting::format_ago_short(run.created_at))
                                 @if let Some(next) = run.next_check_at { " · asks again " (formatting::format_when(next)) }
                             }
+                        }
+                    }
+                }))
+            }
+            @if !failing.is_empty() {
+                (section(html! { "Failing to apply" }, Some(html! { span.muted { "the controller's last apply was rejected" } }), false, html! {
+                    @for (config, error) in &failing {
+                        div.nag-row.nag-row--fail {
+                            a.nag-row__config href=(format!("/deploy?selected={}", config.name_any())) { (config.name_any()) }
+                            span.nag-row__text { span.status-indicator.status-failure title="Failed" {} " " (error_headline(error)) }
+                            span.nag-row__meta { @if let Some(since) = rfc3339_ms(&error.since) { "since " (formatting::format_when(since)) } }
                         }
                     }
                 }))

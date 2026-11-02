@@ -13,6 +13,7 @@
 //! | cicd-selections   | spec.selections (the whole map)                   |
 //! | cicd-patches      | spec.patches (the whole list)                     |
 //! | cicd-autodeploy   | status.autodeploy                                 |
+//! | cicd-reconcile    | status.reconcile                                  |
 //!
 //! Two rules learned from rehearsing this on a throwaway object:
 //!
@@ -32,7 +33,9 @@ use kube::Client;
 use serde_json::{json, Value};
 
 use crate::error::{AppError, AppResult};
-use crate::kubernetes::deploy_config::{DeployConfigSpecFields, DEPLOY_CONFIG_KIND};
+use crate::kubernetes::deploy_config::{
+    DeployConfigSpecFields, ReconcileStatus, DEPLOY_CONFIG_KIND,
+};
 use crate::kubernetes::parameters::ParameterValues;
 use crate::kubernetes::patches::ManifestPatch;
 use crate::kubernetes::repo::ShaMaybeBranch;
@@ -47,6 +50,7 @@ pub mod manager {
     pub const SELECTIONS: &str = "cicd-selections";
     pub const PATCHES: &str = "cicd-patches";
     pub const AUTODEPLOY: &str = "cicd-autodeploy";
+    pub const RECONCILE: &str = "cicd-reconcile";
 }
 
 /// The apply body: type meta, identity, and exactly the fields the manager
@@ -240,6 +244,23 @@ pub async fn set_autodeploy(
         Some(json!({ "autodeploy": autodeploy })),
     );
     apply(client, namespace, manager::AUTODEPLOY, &body, true).await
+}
+
+/// The controller's report on its last apply. The error key is omitted
+/// when there is none, which removes a previous one.
+pub async fn set_reconcile_status(
+    client: &Client,
+    namespace: &str,
+    name: &str,
+    reconcile: &ReconcileStatus,
+) -> AppResult<()> {
+    let body = body(
+        namespace,
+        name,
+        None,
+        Some(json!({ "reconcile": reconcile })),
+    );
+    apply(client, namespace, manager::RECONCILE, &body, true).await
 }
 
 #[cfg(test)]
