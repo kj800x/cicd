@@ -559,26 +559,48 @@ impl DeployConfig {
         selections.chain(patches).min()
     }
 
+    /// Whether one manifest runs something temporary: it uses a parameter
+    /// whose selection is temporary, or a temporary patch targets it.
+    /// `rendered` is the manifest as rendered from `template`, before
+    /// patches. This is what `CICD_TEMPORARY_DEPLOY` says per workload, so
+    /// a temporary patch on one Deployment does not restart a database in
+    /// the same config, while every workload actually running the
+    /// temporary branch or tag is told so.
+    pub fn manifest_is_temporary(&self, template: &Template, rendered: &serde_json::Value) -> bool {
+        if matches!(self.deployment_state(), DeploymentState::Undeployed) {
+            return false;
+        }
+        let declared = &self.spec.spec.parameters;
+        let uses_temporary_parameter =
+            crate::kubernetes::spec_editing::referenced_parameters(&template.manifest)
+                .iter()
+                .any(|p| declared.contains_key(p) && self.selection(p).is_temporary());
+        uses_temporary_parameter
+            || self
+                .spec
+                .spec
+                .patches
+                .iter()
+                .any(|p| p.is_temporary() && p.matches(template.file.as_deref(), rendered))
+    }
+
     /// The `CICD_*` environment variables injected into every container of
-    /// the deployed workloads: only what identifies the deployment and its
-    /// temporary state, deliberately nothing that changes with every deploy.
-    /// A value that changed on each deploy (the SHA, the config commit)
-    /// would roll every Deployment on every deploy, including one that only
-    /// touched an Ingress or a Secret; a workload's own image tag already
-    /// carries its version.
+    /// a deployed workload: only what identifies the deployment and whether
+    /// the workload is temporary, deliberately nothing that changes with
+    /// every deploy. A value that changed on each deploy (the SHA, the
+    /// config commit) would roll every Deployment on every deploy,
+    /// including one that only touched an Ingress or a Secret; a workload's
+    /// own image tag already carries its version.
     ///
     /// - `CICD_DEPLOY_CONFIG`, `CICD_TEAM`
-    /// - `CICD_TEMPORARY_DEPLOY`: `true` while any temporary override is
-    ///   active. The signal for refusing dangerous work such as schema
-    ///   migrations; a standing pin does not trip it.
-    pub fn deploy_env_vars(&self) -> Vec<(String, String)> {
+    /// - `CICD_TEMPORARY_DEPLOY`: `temporary`, from
+    ///   [`Self::manifest_is_temporary`]. The signal for refusing dangerous
+    ///   work such as schema migrations; a standing pin does not trip it.
+    pub fn deploy_env_vars(&self, temporary: bool) -> Vec<(String, String)> {
         vec![
             ("CICD_DEPLOY_CONFIG".to_string(), self.name_any()),
             ("CICD_TEAM".to_string(), self.team().to_string()),
-            (
-                "CICD_TEMPORARY_DEPLOY".to_string(),
-                self.is_temporary_deployment().to_string(),
-            ),
+            ("CICD_TEMPORARY_DEPLOY".to_string(), temporary.to_string()),
         ]
     }
 
@@ -710,9 +732,18 @@ impl DeployConfig {
         use crate::kubernetes::spec_editing::WithInjectedEnv;
         use crate::kubernetes::test_mode;
         let ns = self.namespace().unwrap_or_else(|| "default".to_string());
-        let deploy_env_vars = self.deploy_env_vars();
+        // `rendered` comes from the templates, one manifest each and in
+        // order; if a caller ever breaks that, fall back to the config as a
+        // whole rather than flag the wrong workload.
+        let templates = self.resource_templates();
+        let paired = templates.len() == rendered.len();
+        let config_temporary = self.is_temporary_deployment();
         let mut objects = Vec::with_capacity(rendered.len());
-        for resource in rendered {
+        for (index, resource) in rendered.into_iter().enumerate() {
+            let temporary = match templates.get(index) {
+                Some(template) if paired => self.manifest_is_temporary(template, &resource),
+                _ => config_temporary,
+            };
             let mut obj: DynamicObject = serde_json::from_value(resource).map_err(|e| {
                 crate::error::AppError::Internal(format!(
                     "JSON didn't look like a Kubernetes object (apiVersion/kind/metadata): {}",
@@ -732,7 +763,7 @@ impl DeployConfig {
                 obj.metadata.namespace = Some(ns.clone());
             }
 
-            obj = obj.with_injected_env(&deploy_env_vars);
+            obj = obj.with_injected_env(&self.deploy_env_vars(temporary));
 
             self.ensure_owner_reference(&mut obj);
             self.ensure_labels(&mut obj);
@@ -1128,7 +1159,7 @@ mod tests {
         dc.status = Some(status);
         // Parameter values are not injected as env vars (see deploy_env_vars).
         assert!(dc
-            .deploy_env_vars()
+            .deploy_env_vars(false)
             .iter()
             .all(|(k, _)| !k.starts_with("CICD_PARAM_")));
     }
@@ -1164,15 +1195,12 @@ mod tests {
 
     #[test]
     fn env_vars_carry_only_identity_and_temporariness() {
-        let base = config(repo("kj800x", "app"), Some(repo("kj800x", "app")));
-        let env = |dc: &DeployConfig| -> std::collections::BTreeMap<String, String> {
-            dc.deploy_env_vars().into_iter().collect()
-        };
-
-        let tracking = env(&with_status(base.clone(), "abc", Some("master")));
-        assert_eq!(tracking["CICD_DEPLOY_CONFIG"], "test");
-        assert_eq!(tracking["CICD_TEAM"], "test");
-        assert_eq!(tracking["CICD_TEMPORARY_DEPLOY"], "false");
+        let dc = config(repo("kj800x", "app"), Some(repo("kj800x", "app")));
+        let env: std::collections::BTreeMap<String, String> =
+            dc.deploy_env_vars(false).into_iter().collect();
+        assert_eq!(env["CICD_DEPLOY_CONFIG"], "test");
+        assert_eq!(env["CICD_TEAM"], "test");
+        assert_eq!(env["CICD_TEMPORARY_DEPLOY"], "false");
         // Nothing that changes with every deploy: it would roll every
         // Deployment on deploys that touch only an Ingress or a Secret.
         for gone in [
@@ -1184,15 +1212,69 @@ mod tests {
             "CICD_ARTIFACT_SHA",
             "CICD_NON_LATEST_DEPLOY",
         ] {
-            assert!(!tracking.contains_key(gone), "{gone} must not be injected");
+            assert!(!env.contains_key(gone), "{gone} must not be injected");
         }
-        assert_eq!(tracking.len(), 3);
+        assert_eq!(env.len(), 3);
+        let temporary: std::collections::BTreeMap<String, String> =
+            dc.deploy_env_vars(true).into_iter().collect();
+        assert_eq!(temporary["CICD_TEMPORARY_DEPLOY"], "true");
+    }
 
-        let branch = env(&with_status(base.clone(), "abc", Some("feature")));
-        assert_eq!(branch["CICD_TEMPORARY_DEPLOY"], "true");
+    #[test]
+    fn only_workloads_a_temporary_override_touches_are_temporary() {
+        use crate::kubernetes::patches::{PatchOp, PatchTarget};
+        let app = Template::stored(
+            "app.yaml",
+            serde_json::json!({"kind": "Deployment", "metadata": {"name": "app"},
+                "spec": {"image": "app:commit-$SHA"}}),
+        );
+        let db = Template::stored(
+            "db.yaml",
+            serde_json::json!({"kind": "StatefulSet", "metadata": {"name": "postgres"},
+                "spec": {"image": "postgres:18.6"}}),
+        );
+        let is_temporary = |dc: &DeployConfig| -> Vec<bool> {
+            dc.resource_templates()
+                .iter()
+                .map(|t| dc.manifest_is_temporary(t, &t.manifest))
+                .collect()
+        };
+        let mut base = config(repo("kj800x", "app"), Some(repo("kj800x", "app")));
+        base.spec.spec.specs = vec![app, db];
 
-        let undeployed = env(&base);
-        assert_eq!(undeployed["CICD_TEMPORARY_DEPLOY"], "false");
+        // Undeployed: nothing is temporary.
+        assert_eq!(is_temporary(&base), vec![false, false]);
+        // Tracking the default branch: nothing is temporary.
+        assert_eq!(
+            is_temporary(&with_status(base.clone(), "abc", Some("master"))),
+            vec![false, false]
+        );
+        // A branch deploy: the workload using $SHA is, the database is not.
+        let branch = with_status(base.clone(), "abc", Some("feature"));
+        assert!(branch.is_temporary_deployment());
+        assert_eq!(is_temporary(&branch), vec![true, false]);
+
+        // A temporary patch: only its target.
+        let mut patched = with_status(base.clone(), "abc", Some("master"));
+        let patch = |kind: &str, name: &str, durability| ManifestPatch {
+            target: PatchTarget {
+                file: None,
+                kind: kind.into(),
+                name: name.into(),
+            },
+            op: PatchOp::Replace,
+            path: "/spec/replicas".into(),
+            value: Some(serde_json::json!(0)),
+            durability,
+            note: None,
+            by: None,
+            since: None,
+        };
+        patched.spec.spec.patches = vec![patch("Deployment", "app", Durability::Temporary)];
+        assert_eq!(is_temporary(&patched), vec![true, false]);
+        // A standing patch is ordinary operation.
+        patched.spec.spec.patches = vec![patch("StatefulSet", "postgres", Durability::Standing)];
+        assert_eq!(is_temporary(&patched), vec![false, false]);
     }
 
     #[test]

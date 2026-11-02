@@ -353,7 +353,7 @@ html! {
 **Selections and durability:**
 - `spec.selections.<PARAM>` records what a parameter follows: `track: {branch}` (an override), `pin: {value}`, or absent (the default channel). Each override has `durability: temporary | standing`, plus optional `note`, `by`, `since`
 - Written by the deploy handler on branch and commit deploys and by the advanced form; config sync never touches it. "Latest" resolves through the selection; choosing "Track default" for `SHA` on the advanced form clears it (writing an explicit empty selection when the current one was derived from status)
-- A config with any temporary override is a *temporary deployment*: badge, strip at the top of `/deploy`, and `CICD_TEMPORARY_DEPLOY=true`
+- A config with any temporary override is a *temporary deployment*: badge, strip at the top of `/deploy`, and `CICD_TEMPORARY_DEPLOY=true` on the workloads the override touches (see below)
 
 **The deploy page (`/deploy`):**
 - Simple mode is the config picker, the action chooser (End temporary deployment · Deploy · Deploy advanced · Redeploy previous · autodeploy toggle · Bounce · Execute job · Undeploy) and one button. "Deploy advanced" is an action: it unfolds one selector per parameter (track default / track another channel / pin), the patch list and a durability toggle that applies to every override made in that deploy. Only choices that differ from the current selection are recorded (`deploys::selection_changes`), so re-submitting a standing pin does not rewrite its durability
@@ -406,7 +406,8 @@ html! {
 - `cargo test --features test-crd -- --ignored live_writers` rehearses every writer against the cluster on a TestDeployConfig and asserts ownership and removal
 
 **Environment variables injected into every container:**
-- `CICD_DEPLOY_CONFIG`, `CICD_TEAM`, and `CICD_TEMPORARY_DEPLOY` (`true` while any temporary override or patch is active; the signal for refusing dangerous work such as schema migrations)
+- `CICD_DEPLOY_CONFIG`, `CICD_TEAM`, and `CICD_TEMPORARY_DEPLOY`: the signal for refusing dangerous work such as schema migrations
+- `CICD_TEMPORARY_DEPLOY` is per workload (`DeployConfig::manifest_is_temporary`): `true` when the manifest uses a parameter whose selection is temporary (`$SHA` on a branch deploy, a temporary tag) or a temporary patch targets it. A temporary change to one workload does not flip it on the others, so it does not restart, say, the database next to an app under test
 - Deliberately nothing that changes with every deploy: the parameter values and the config commit used to be injected too, which rolled every Deployment on every deploy, including deploys that only touched an Ingress or a Secret. A workload's image tag already carries its version
 
 **Controller pattern:**
