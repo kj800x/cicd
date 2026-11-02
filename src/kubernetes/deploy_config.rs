@@ -744,6 +744,10 @@ impl DeployConfig {
                 Some(template) if paired => self.manifest_is_temporary(template, &resource),
                 _ => config_temporary,
             };
+            // Own the update-strategy defaults so a later switch to
+            // Recreate/OnDelete can remove them (see strategy_defaults).
+            let mut resource = resource;
+            crate::kubernetes::strategy_defaults::own_strategy_defaults(&mut resource);
             let mut obj: DynamicObject = serde_json::from_value(resource).map_err(|e| {
                 crate::error::AppError::Internal(format!(
                     "JSON didn't look like a Kubernetes object (apiVersion/kind/metadata): {}",

@@ -12,6 +12,7 @@ pub mod repo;
 pub mod rollout;
 pub mod selections;
 pub mod spec_editing;
+pub mod strategy_defaults;
 pub mod tags;
 pub mod test_mode;
 pub mod webhook_handlers;
