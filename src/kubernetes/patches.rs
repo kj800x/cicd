@@ -121,7 +121,8 @@ impl ManifestPatch {
         }
     }
 
-    fn matches(&self, file: Option<&str>, manifest: &serde_json::Value) -> bool {
+    /// Whether this patch targets `manifest`, which came from template `file`.
+    pub fn matches(&self, file: Option<&str>, manifest: &serde_json::Value) -> bool {
         let kind = manifest.get("kind").and_then(|k| k.as_str());
         let name = manifest
             .get("metadata")
