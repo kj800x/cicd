@@ -129,15 +129,29 @@ pub async fn set_orphaned(
     apply(client, namespace, manager::CONFIG_SYNC, &body, true).await
 }
 
+/// Names the config commit `spec.specs` came from. Written in the same
+/// apply as the specs; see [`DeployConfig::deploy_in_flight`].
+pub const SPECS_CONFIG_ANNOTATION: &str = "cicd.coolkev.com/specs-config";
+
 /// Replace the manifest templates. Owned by the deploy manager together
 /// with the deployed status, since a deploy writes both.
+///
+/// The specs and the status cannot go in one write (status is a
+/// subresource), so `config_sha` stamps the specs with the config commit
+/// they came from. Until the status names the same commit the controller
+/// leaves the children alone instead of rendering new manifests with the
+/// previous deploy's values. `None` (undeploy) releases the annotation.
 pub async fn set_specs(
     client: &Client,
     namespace: &str,
     name: &str,
     specs: &[Value],
+    config_sha: Option<&str>,
 ) -> AppResult<()> {
-    let body = body(namespace, name, Some(json!({ "specs": specs })), None);
+    let mut body = body(namespace, name, Some(json!({ "specs": specs })), None);
+    if let Some(sha) = config_sha {
+        body["metadata"]["annotations"] = json!({ SPECS_CONFIG_ANNOTATION: sha });
+    }
     apply(client, namespace, manager::DEPLOY, &body, false).await
 }
 
@@ -425,9 +439,15 @@ mod live {
             NS,
             NAME,
             &[json!({"file": "d.yaml", "manifest": {"kind": "Deployment"}})],
+            Some("ccc"),
         )
         .await
         .unwrap();
+        let obj = get(&client).await;
+        assert_eq!(
+            obj["metadata"]["annotations"][SPECS_CONFIG_ANNOTATION],
+            "ccc"
+        );
         let mut parameters = ParameterValues::default();
         parameters.insert(
             SHA_PARAMETER.into(),
@@ -560,11 +580,17 @@ mod live {
             .is_none_or(|a| a.is_empty()));
 
         // 6. Undeploy, then orphan.
-        set_specs(&client, NS, NAME, &[]).await.unwrap();
+        set_specs(&client, NS, NAME, &[], None).await.unwrap();
         set_deployed_status(&client, NS, NAME, &DeployedStatus::undeployed())
             .await
             .unwrap();
         let obj = get(&client).await;
+        assert!(
+            obj["metadata"]["annotations"]
+                .get(SPECS_CONFIG_ANNOTATION)
+                .is_none(),
+            "undeploy releases the specs stamp"
+        );
         assert!(obj["status"].get("parameters").is_none());
         assert!(obj["status"].get("config").is_none());
         assert_eq!(obj["status"]["autodeploy"], true);

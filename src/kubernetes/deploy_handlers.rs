@@ -106,8 +106,17 @@ impl DeployAction {
                 }
 
                 let namespace = desired_config.namespace().unwrap_or_default();
-                cr_writers::set_specs(client, &namespace, name, &desired_config.spec.spec.specs)
-                    .await?;
+                // The specs carry the config commit; the controller waits for
+                // the status below to name it before rendering (see
+                // `DeployConfig::deploy_in_flight`).
+                cr_writers::set_specs(
+                    client,
+                    &namespace,
+                    name,
+                    &desired_config.spec.spec.specs,
+                    Some(&config.sha),
+                )
+                .await?;
 
                 let mut parameters = values.clone();
                 if let Some(artifact) = artifact {
@@ -136,7 +145,7 @@ impl DeployAction {
                     .ok_or(AppError::NotFound("Current config not found".to_owned()))?;
 
                 let namespace = current_config.namespace().unwrap_or_default();
-                cr_writers::set_specs(client, &namespace, name, &[]).await?;
+                cr_writers::set_specs(client, &namespace, name, &[], None).await?;
                 cr_writers::set_deployed_status(
                     client,
                     &namespace,
