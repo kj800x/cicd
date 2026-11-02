@@ -54,6 +54,10 @@
   color: #8a6d00; /* dark amber for visibility on white */
   font-weight: 600;
 }
+.deployable-state--success {
+  color: #2e7d32; /* accessible green on white */
+  font-weight: 600;
+}
 .deployable-state--neutral {
   color: inherit; /* rely on parent color for fully healthy states */
 }
