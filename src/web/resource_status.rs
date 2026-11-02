@@ -1292,14 +1292,14 @@ impl TreeRow<'_> {
     }
 }
 
-/// Resources the deploy would create come first, then what exists now;
-/// each group is in [`tree_order_key`] order.
+/// Rows are in [`tree_order_key`] order, except that within each kind the
+/// resources the deploy would create come before the ones that exist now.
 fn sort_tree_rows(rows: &mut [TreeRow]) {
     let key = |row: &TreeRow<'_>| {
-        let created_first = !matches!(row, TreeRow::Created(..));
+        let existing = !matches!(row, TreeRow::Created(..));
         let (kind, name) = row.kind_and_name();
         let (rank, _, _) = tree_order_key(kind, name);
-        (created_first, rank, kind.to_owned(), name.to_owned())
+        (rank, kind.to_owned(), existing, name.to_owned())
     };
     rows.sort_by_cached_key(key);
 }
@@ -1378,9 +1378,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tree_order_puts_created_first_then_kinds_with_unknown_last() {
+    fn tree_order_is_by_kind_with_created_first_within_each_kind() {
         let created = [
             ("Ingress".to_string(), "web".to_string()),
+            ("Deployment".to_string(), "zeta".to_string()),
             ("Widget".to_string(), "b".to_string()),
         ];
         let specs = [
@@ -1400,13 +1401,14 @@ mod tests {
         assert_eq!(
             order,
             vec![
-                ("Ingress", "web"),
-                ("Widget", "b"),
+                ("Deployment", "zeta"),
                 ("Deployment", "api"),
                 ("Deployment", "worker"),
                 ("Service", "web"),
+                ("Ingress", "web"),
                 ("ConfigMap", "settings"),
                 ("Apple", "a"),
+                ("Widget", "b"),
             ]
         );
     }
