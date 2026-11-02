@@ -430,6 +430,27 @@ impl DeployConfig {
         })
     }
 
+    /// A deploy is half-written: the specs are stamped with a config commit
+    /// the deployed status does not name yet. A deploy writes the specs and
+    /// then the status, and rendering in between would apply the new
+    /// manifests with the previous deploy's values (a new Postgres
+    /// StatefulSet started once on the old image this way). Objects from
+    /// before the stamp existed have no annotation and are never in flight.
+    pub fn deploy_in_flight(&self) -> bool {
+        let Some(specs_from) = self
+            .annotations()
+            .get(crate::kubernetes::cr_writers::SPECS_CONFIG_ANNOTATION)
+        else {
+            return false;
+        };
+        let deployed = self
+            .status
+            .as_ref()
+            .and_then(|s| s.config.as_ref())
+            .map(|c| c.sha.as_str());
+        deployed != Some(specs_from.as_str())
+    }
+
     pub fn deployment_state(&self) -> DeploymentState {
         if let Some(config) = self.status.as_ref().and_then(|s| s.config.as_ref()) {
             if let Some(artifact) = self.sha_value() {
@@ -879,6 +900,31 @@ mod tests {
                 },
             },
         )
+    }
+
+    #[test]
+    fn deploy_in_flight_until_status_names_the_specs_commit() {
+        use crate::kubernetes::cr_writers::SPECS_CONFIG_ANNOTATION;
+        let mut dc = config(repo("kj800x", "app"), None);
+        // No stamp: objects from before it existed render as before.
+        assert!(!dc.deploy_in_flight());
+
+        dc.annotations_mut()
+            .insert(SPECS_CONFIG_ANNOTATION.to_string(), "new".to_string());
+        // Stamped, nothing deployed yet: the status write is still coming.
+        assert!(dc.deploy_in_flight());
+
+        let deployed = |sha: &str| DeployConfigStatus {
+            config: Some(ShaMaybeBranch {
+                sha: sha.to_string(),
+                branch: Some("master".to_string()),
+            }),
+            ..Default::default()
+        };
+        dc.status = Some(deployed("old"));
+        assert!(dc.deploy_in_flight());
+        dc.status = Some(deployed("new"));
+        assert!(!dc.deploy_in_flight());
     }
 
     #[test]
