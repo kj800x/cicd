@@ -328,6 +328,8 @@ struct Scenario<'a> {
     config: DeployConfig,
     action: Action,
     resolved: TagResolutions,
+    /// Live objects in the config's namespace.
+    objs: Vec<kube::api::DynamicObject>,
 }
 
 async fn render_deploy(
@@ -350,9 +352,15 @@ async fn render_deploy(
         &scenario.resolved,
         conn,
     );
-    let body =
-        preview::render_preview_content(&prepared, conn, None, &[], &typed, &scenario.resolved)
-            .await;
+    let body = preview::render_preview_content(
+        &prepared,
+        conn,
+        None,
+        &scenario.objs,
+        &typed,
+        &scenario.resolved,
+    )
+    .await;
     let strips = html! {
         (crate::web::blockers::render_held_strip(&Blocker::all_active(conn).unwrap_or_default()))
         (crate::web::selections::render_temporary_strip(all_configs))
@@ -462,6 +470,7 @@ async fn write_pages() -> AppResult<()> {
             config: simple.clone(),
             action: Action::DeployLatest,
             resolved: ok.clone(),
+            objs: Vec::new(),
         },
         Scenario {
             file: "deploy-advanced.html",
@@ -480,32 +489,82 @@ async fn write_pages() -> AppResult<()> {
                 patches: pending,
             },
             resolved: pinned,
+            objs: Vec::new(),
         },
         Scenario {
             file: "deploy-blocked.html",
             config: grafana,
             action: Action::DeployLatest,
             resolved: ok.clone(),
+            objs: Vec::new(),
         },
         Scenario {
             file: "deploy-watchtower-down.html",
             config: simple.clone(),
             action: Action::DeployLatest,
             resolved: down,
+            objs: Vec::new(),
         },
         Scenario {
             file: "deploy-undeploy.html",
             config: simple.clone(),
             action: Action::Undeploy,
             resolved: TagResolutions::new(),
+            objs: Vec::new(),
         },
         Scenario {
             file: "deploy-temporary.html",
             config: paperless,
             action: Action::DeployLatest,
             resolved: ok,
+            objs: Vec::new(),
         },
     ];
+    // Bounce: a web Deployment, a StatefulSet that rolls one pod at a
+    // time and one with OnDelete that is skipped.
+    let mut bounced = simple.clone();
+    bounced.spec.spec.specs.push(Template::stored(
+        "db.yaml",
+        serde_json::json!({"apiVersion": "apps/v1", "kind": "StatefulSet", "metadata": {"name": "postgres", "namespace": "alldex"}}),
+    ));
+    bounced.spec.spec.specs.push(Template::stored(
+        "cache.yaml",
+        serde_json::json!({"apiVersion": "apps/v1", "kind": "StatefulSet", "metadata": {"name": "redis", "namespace": "alldex"}}),
+    ));
+    let live = |kind: &str, name: &str, spec: serde_json::Value| {
+        serde_json::from_value::<kube::api::DynamicObject>(serde_json::json!({
+            "apiVersion": "apps/v1", "kind": kind,
+            "metadata": {"name": name, "namespace": "alldex"}, "spec": spec,
+        }))
+        .ok()
+    };
+    let bounce_objs = [
+        live(
+            "Deployment",
+            "alldex-rs",
+            serde_json::json!({"replicas": 2}),
+        ),
+        live(
+            "StatefulSet",
+            "postgres",
+            serde_json::json!({"replicas": 3, "updateStrategy": {"type": "RollingUpdate"}}),
+        ),
+        live(
+            "StatefulSet",
+            "redis",
+            serde_json::json!({"replicas": 1, "updateStrategy": {"type": "OnDelete"}}),
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let scenarios = scenarios.into_iter().chain([Scenario {
+        file: "deploy-bounce.html",
+        config: bounced,
+        action: Action::Bounce,
+        resolved: TagResolutions::new(),
+        objs: bounce_objs,
+    }]);
     for scenario in scenarios {
         let file = scenario.file.to_string();
         let html = render_deploy(&conn, &all, scenario).await;
@@ -744,6 +803,7 @@ async fn write_pages() -> AppResult<()> {
             config: simple.clone(),
             action: Action::RedeployPrevious { revision: None },
             resolved: TagResolutions::new(),
+            objs: Vec::new(),
         },
     )
     .await;

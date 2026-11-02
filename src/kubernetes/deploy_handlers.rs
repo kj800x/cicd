@@ -1,5 +1,5 @@
 use chrono::Utc;
-use k8s_openapi::api::apps::v1::Deployment;
+use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
 use k8s_openapi::api::batch::v1::{CronJob, Job};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use kube::api::{ObjectMeta, PostParams};
@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::crab_ext::Octocrabs;
 use crate::kubernetes::api::{delete_deploy_config, get_deploy_config};
+use crate::kubernetes::bounce;
 use crate::kubernetes::cr_writers::{self, DeployedStatus};
 use crate::kubernetes::parameters::{ParameterValue, SHA_PARAMETER};
 use crate::webhooks::config_sync::fetch_deploy_config_by_sha;
@@ -173,27 +174,58 @@ impl DeployAction {
             }
 
             DeployAction::Bounce { name } => {
-                log::debug!("Bounce action: name={}", name);
                 let current_config = get_deploy_config(client, name)
                     .await?
                     .ok_or(AppError::NotFound("Current config not found".to_owned()))?;
-
                 let namespace = current_config.namespace().unwrap_or_default();
-                log::debug!("Bouncing deployments in namespace: {}", namespace);
-                let deployments: Api<Deployment> = Api::namespaced(client.clone(), &namespace);
 
-                let specs = current_config.resource_specs();
-                let deployments_vec = specs
-                    .iter()
-                    .filter(|spec| spec.get("kind").and_then(|k| k.as_str()) == Some("Deployment"))
-                    .map(|spec| serde_json::from_value(spec.clone()).unwrap_or_default())
-                    .collect::<Vec<Deployment>>();
+                let mut restarted = 0;
+                let mut skipped = Vec::new();
+                for (kind, workload) in current_config.bounce_targets() {
+                    let live = match kind.as_str() {
+                        "Deployment" => {
+                            live_json::<Deployment>(client, &namespace, &workload).await?
+                        }
+                        "StatefulSet" => {
+                            live_json::<StatefulSet>(client, &namespace, &workload).await?
+                        }
+                        "DaemonSet" => {
+                            live_json::<DaemonSet>(client, &namespace, &workload).await?
+                        }
+                        _ => continue,
+                    };
+                    match bounce::plan(&kind, live.as_ref()) {
+                        bounce::Outcome::Skip(why) => {
+                            log::info!("Not restarting {kind} {namespace}/{workload}: {why}");
+                            skipped.push(format!("{kind} {workload}: {why}"));
+                        }
+                        bounce::Outcome::Restart { note } => {
+                            log::info!(
+                                "Restarting {kind} {namespace}/{workload}{}",
+                                note.map(|n| format!(" ({n})")).unwrap_or_default()
+                            );
+                            match kind.as_str() {
+                                "Deployment" => {
+                                    restart::<Deployment>(client, &namespace, &workload).await?
+                                }
+                                "StatefulSet" => {
+                                    restart::<StatefulSet>(client, &namespace, &workload).await?
+                                }
+                                _ => restart::<DaemonSet>(client, &namespace, &workload).await?,
+                            }
+                            restarted += 1;
+                        }
+                    }
+                }
 
-                log::debug!("Found {} deployments to bounce", deployments_vec.len());
-                for deployment in deployments_vec {
-                    let deployment_name = deployment.name_any();
-                    log::info!("Restarting deployment {}", deployment_name);
-                    deployments.restart(&deployment_name).await?;
+                // Reporting success when nothing restarted would hide an
+                // OnDelete StatefulSet or a scaled-down config.
+                if restarted == 0 {
+                    return Err(AppError::InvalidInput(if skipped.is_empty() {
+                        format!("{name} has no workloads to restart")
+                    } else {
+                        format!("Nothing restarted: {}", skipped.join("; "))
+                    }));
                 }
 
                 Ok(())
@@ -329,4 +361,36 @@ impl CronJobExt for CronJob {
             status: None,
         })
     }
+}
+
+/// The live workload `name` as JSON, for [`bounce::plan`].
+async fn live_json<K>(
+    client: &Client,
+    namespace: &str,
+    name: &str,
+) -> AppResult<Option<serde_json::Value>>
+where
+    K: kube::Resource<Scope = k8s_openapi::NamespaceResourceScope, DynamicType = ()>
+        + Clone
+        + std::fmt::Debug
+        + serde::de::DeserializeOwned
+        + serde::Serialize,
+{
+    let api: Api<K> = Api::namespaced(client.clone(), namespace);
+    let live = api.get_opt(name).await?;
+    Ok(live.and_then(|obj| serde_json::to_value(obj).ok()))
+}
+
+/// `kubectl rollout restart` for one workload.
+async fn restart<K>(client: &Client, namespace: &str, name: &str) -> AppResult<()>
+where
+    K: kube::Resource<Scope = k8s_openapi::NamespaceResourceScope, DynamicType = ()>
+        + kube::core::util::Restart
+        + Clone
+        + std::fmt::Debug
+        + serde::de::DeserializeOwned,
+{
+    let api: Api<K> = Api::namespaced(client.clone(), namespace);
+    api.restart(name).await?;
+    Ok(())
 }
