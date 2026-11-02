@@ -39,7 +39,13 @@ impl Style {
     fn apply_sgr(&mut self, params: &str) {
         let mut nums = params
             .split(';')
-            .map(|p| if p.is_empty() { 0 } else { p.parse::<u16>().unwrap_or(0) })
+            .map(|p| {
+                if p.is_empty() {
+                    0
+                } else {
+                    p.parse::<u16>().unwrap_or(0)
+                }
+            })
             .peekable();
 
         if params.is_empty() {
