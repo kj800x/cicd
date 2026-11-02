@@ -42,6 +42,18 @@ async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<ControllerContext>) -> AppRes
         // Continue anyway - namespace might already exist
     }
 
+    // A deploy writes the specs, then the status. Rendering in between would
+    // apply the new manifests with the old values (and pruning would act
+    // on them); the status write reconciles again through the watch.
+    if dc.deploy_in_flight() {
+        log::info!(
+            "DeployConfig {}/{}: deploy in progress (specs are ahead of the status); not rendering yet",
+            ns,
+            name
+        );
+        return Ok(Action::requeue(Duration::from_secs(5)));
+    }
+
     // Undeployed means "run nothing": apply no manifests and let the prune
     // step below remove anything still owned. Manifest templates can be
     // present without a deployed version for a moment during a deploy (they
