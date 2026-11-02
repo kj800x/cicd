@@ -878,6 +878,23 @@ pub fn to_deploy_action(
 /// The GitHub deployment mirror and the revision are bookkeeping: their
 /// failures are logged, not returned, because the cluster change has already
 /// happened by then and reporting it as a failure would mislead.
+/// The config commit a deploy to `state` applies.
+fn deployed_config_sha(state: &DeploymentState) -> Option<&str> {
+    match state {
+        DeploymentState::DeployedOnlyConfig { config }
+        | DeploymentState::DeployedWithArtifact { config, .. } => Some(config.sha.as_str()),
+        DeploymentState::Undeployed => None,
+    }
+}
+
+/// Take the parameter declarations and checks from the config as defined
+/// at the commit being deployed. Intent (selections, patches) and
+/// everything deployed stay as they are.
+fn adopt_declarations(effective: &mut DeployConfig, at_commit: &DeployConfig) {
+    effective.spec.spec.parameters = at_commit.spec.spec.parameters.clone();
+    effective.spec.spec.checks = at_commit.spec.spec.checks.clone();
+}
+
 pub async fn run_action(
     action: &Action,
     config: &DeployConfig,
@@ -979,14 +996,11 @@ pub async fn run_action(
     }
 
     let state = DeploymentState::from_action(action, &effective, &conn)?;
-    let mut values = match action.replayed_revision() {
-        Some(revision) => values_from_revision(&conn, revision)?,
-        None => effective.resolve_value_parameters(),
+    let replayed = match action.replayed_revision() {
+        Some(revision) => Some(values_from_revision(&conn, revision)?),
+        None => None,
     };
     drop(conn);
-    // Tag parameters resolve through watchtower, after the connection is
-    // released (the lookup is an await). A replayed revision already
-    // carries them.
     let deploys = !matches!(
         action,
         Action::Rollback { .. }
@@ -996,6 +1010,35 @@ pub async fn run_action(
             | Action::ExecuteJob
             | Action::ToggleAutodeploy
     );
+    // Parameters resolve against the declarations in the config commit this
+    // deploy applies, the same commit its manifests come from. The
+    // DeployConfig's copy is written by config sync only once it has
+    // fetched a pushed commit, so a deploy seconds after a push read the
+    // old ranges with the new manifests (grafana 12.4.14 under ^12.4.10
+    // with the ^13.3.0 config, 2026-11-02).
+    if deploys && replayed.is_none() {
+        if let Some(sha) = deployed_config_sha(&state) {
+            match crate::webhooks::config_sync::fetch_deploy_config_cached(
+                octocrabs,
+                config.config_repository(),
+                sha,
+                &name,
+            )
+            .await?
+            {
+                Some(at_commit) => adopt_declarations(&mut effective, &at_commit),
+                None => log::warn!(
+                    "{name} is not defined at config commit {sha}; resolving parameters against the DeployConfig"
+                ),
+            }
+        }
+    }
+    let mut values = match replayed {
+        Some(values) => values,
+        None => effective.resolve_value_parameters(),
+    };
+    // Tag parameters resolve through watchtower. A replayed revision
+    // already carries them.
     if deploys && effective.spec.spec.parameters.values().any(|s| s.is_tag()) {
         values.extend(
             resolve_tag_parameters(Watchtower::global(), &effective, &intent.values).await?,
@@ -1516,6 +1559,53 @@ mod tests {
             DeployAction::ToggleAutodeploy { .. }
         ));
     }
+    #[test]
+    fn declarations_come_from_the_deployed_commit() {
+        use crate::kubernetes::parameters::ParameterSource;
+        use crate::kubernetes::selections::Selection;
+        let tag = |pattern: &str| ParameterSource::Tag {
+            image: "docker.io/grafana/grafana".into(),
+            pattern: pattern.into(),
+            variant: None,
+        };
+        // The DeployConfig still has the old range; the commit has the new.
+        let mut effective = bare_config();
+        effective
+            .spec
+            .spec
+            .parameters
+            .insert("GRAFANA".into(), tag("^12.4.10"));
+        effective
+            .spec
+            .spec
+            .selections
+            .insert("SHA".into(), Selection::pin("abc", Durability::Standing));
+        let mut at_commit = bare_config();
+        at_commit
+            .spec
+            .spec
+            .parameters
+            .insert("GRAFANA".into(), tag("^13.3.0"));
+
+        adopt_declarations(&mut effective, &at_commit);
+        assert_eq!(
+            effective.spec.spec.parameters["GRAFANA"].default_channel(),
+            Some("^13.3.0")
+        );
+        // Intent is the DeployConfig's, not the commit's.
+        assert!(effective.spec.spec.selections.contains_key("SHA"));
+
+        let config = ShaMaybeBranch {
+            sha: "c0ffee".into(),
+            branch: Some("master".into()),
+        };
+        assert_eq!(
+            deployed_config_sha(&DeploymentState::DeployedOnlyConfig { config }),
+            Some("c0ffee")
+        );
+        assert_eq!(deployed_config_sha(&DeploymentState::Undeployed), None);
+    }
+
     fn bare_config() -> DeployConfig {
         use crate::kubernetes::deploy_config::{DeployConfigSpec, DeployConfigSpecFields};
         use crate::kubernetes::parameters::ParameterSource;
