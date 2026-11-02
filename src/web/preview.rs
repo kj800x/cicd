@@ -28,6 +28,7 @@ use crate::deploys::{normalize_action, resolve_tag_parameter};
 use crate::error::AppResult;
 use crate::kubernetes::api::get_namespace_uid;
 use crate::kubernetes::bounce;
+use crate::kubernetes::deploy_config::ReconcileError;
 use crate::kubernetes::parameters::{ParameterSource, ParameterValue, SHA_PARAMETER};
 use crate::kubernetes::repo::DeploymentState;
 use crate::kubernetes::selections::{Durability, Mode};
@@ -720,6 +721,27 @@ fn render_active_run(
     ))
 }
 
+/// The controller's apply of this config is failing. Shown whatever render
+/// it is about: an error on an older render still means the cluster is not
+/// running what the page says is deployed.
+fn render_apply_error(error: &ReconcileError) -> Markup {
+    let since = crate::web::home::rfc3339_ms(&error.since)
+        .map(crate::web::formatting::format_when)
+        .unwrap_or_else(|| error.since.clone());
+    render_alert(
+        "danger",
+        html! { i class="fa fa-exclamation-triangle" {} " The controller cannot apply this config" },
+        html! {
+            div { "Failing since " (since) "."
+                @if error.permanent { " The API server rejected the manifests; retrying will not help until the config changes." }
+                @else { " The controller keeps retrying." }
+                @if !error.resources.is_empty() { " Nothing is pruned until every resource applies." }
+            }
+            pre.mono style="white-space: pre-wrap; margin: 0.5em 0 0;" { (error.message) }
+        },
+    )
+}
+
 pub(crate) fn render_alert(tone: &str, title: Markup, body: Markup) -> Markup {
     html! {
         div class=(format!("alert alert-{tone}")) {
@@ -894,6 +916,9 @@ pub async fn render_preview_content(
             html! { "Orphaned" },
             html! { "The manifests are gone from the config repo. Only undeploy is offered." },
         ));
+    }
+    if let Some(error) = config.reconcile_error() {
+        alerts.push(render_apply_error(error));
     }
     if let Some(line) = render_active_run(conn, &name) {
         alerts.push(line);

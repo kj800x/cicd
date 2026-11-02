@@ -307,6 +307,7 @@ mod tests {
             }),
             autodeploy: Some(autodeploy),
             orphaned: Some(false),
+            reconcile: None,
         });
         dc
     }

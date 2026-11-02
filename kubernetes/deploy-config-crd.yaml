@@ -348,6 +348,31 @@ spec:
                       type: string
                     branch:
                       type: string
+                reconcile:
+                  type: object
+                  description: "The controller's last attempt to apply the config."
+                  properties:
+                    renderHash:
+                      type: string
+                      description: "Hash of the children the controller last tried to apply."
+                    error:
+                      type: object
+                      description: "Present while the controller cannot apply the config."
+                      required:
+                        - message
+                        - since
+                      properties:
+                        message:
+                          type: string
+                        since:
+                          type: string
+                          format: date-time
+                        resources:
+                          type: array
+                          items:
+                            type: string
+                        permanent:
+                          type: boolean
 
       additionalPrinterColumns:
         - name: Team
@@ -377,6 +402,10 @@ spec:
         - name: Orphaned
           jsonPath: .status.orphaned
           type: boolean
+        - name: Apply Error
+          jsonPath: .status.reconcile.error.since
+          type: date
+          priority: 1
       subresources:
         status: {}
   scope: Namespaced

@@ -12,6 +12,7 @@ use crate::db::revision::Revision;
 use crate::kubernetes::api::{
     get_all_deploy_configs, get_deploy_config, list_namespace_objects, ListMode,
 };
+use crate::kubernetes::deploy_config::{ApplyState, ReconcileError};
 use crate::kubernetes::parameters::SHA_PARAMETER;
 use crate::kubernetes::repo::DeploymentState;
 use crate::kubernetes::selections::{Durability, Mode};
@@ -456,6 +457,7 @@ async fn handle_list_deploy_configs(
                 "artifact_branch": artifact_branch,
                 "config_sha": config_sha,
                 "config_branch": config_branch,
+                "apply_error": config.reconcile_error().map(reconcile_error_json),
             })
         })
         .collect();
@@ -558,6 +560,7 @@ async fn handle_get_deploy_config(
         "artifact_branch": artifact_branch,
         "config_sha": config_sha,
         "config_branch": config_branch,
+        "apply": apply_json(&config),
         "resources": resources,
     });
 
@@ -628,6 +631,51 @@ async fn handle_get_build_status(
     });
 
     ToolCallResult::text(serde_json::to_string_pretty(&result).unwrap_or_default())
+}
+
+fn reconcile_error_json(error: &ReconcileError) -> Value {
+    json!({
+        "message": error.message,
+        "since": error.since,
+        "resources": error.resources,
+        "permanent": error.permanent,
+    })
+}
+
+/// Whether the controller has applied the config as it stands, and its
+/// last error. `state` is `applied`, `failing` or `pending` (the controller
+/// has not reported on this render yet); `error` may be about an older
+/// render while pending.
+fn apply_json(config: &DeployConfig) -> Value {
+    let children = config.desired_children().ok();
+    let state = config.apply_state(children.as_deref());
+    json!({
+        "state": state.as_str(),
+        "error": config.reconcile_error().map(reconcile_error_json),
+    })
+}
+
+/// How long `deploy` waits for the controller's first apply. The watch
+/// reconciles a written deploy at once; applying takes a second or two.
+const FIRST_APPLY_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Wait for the controller to report on the config's new render.
+async fn first_apply(client: &Client, namespace: &str, name: &str) -> ApplyState {
+    let api: kube::Api<DeployConfig> = kube::Api::namespaced(client.clone(), namespace);
+    let deadline = tokio::time::Instant::now() + FIRST_APPLY_WAIT;
+    loop {
+        if let Ok(config) = api.get(name).await {
+            let children = config.desired_children().ok();
+            let state = config.apply_state(children.as_deref());
+            if state != ApplyState::Pending {
+                return state;
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return ApplyState::Pending;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
 }
 
 async fn handle_deploy(
@@ -1119,8 +1167,32 @@ async fn execute_deploy_action_with(
         Action::ToggleAutodeploy => "Toggle autodeploy".to_string(),
     };
 
-    ToolCallResult::text(format!(
-        "Successfully executed: {} on {}",
-        action_desc, name
-    ))
+    if !action.changes_deployment() {
+        return ToolCallResult::text(format!(
+            "Successfully executed: {} on {}",
+            action_desc, name
+        ));
+    }
+    let namespace = config.namespace().unwrap_or_else(|| "default".to_string());
+    match first_apply(client, &namespace, name).await {
+        ApplyState::Applied => ToolCallResult::text(format!(
+            "Successfully executed: {action_desc} on {name}. The controller applied it; \
+             the deploy run tracks the rollout (get_deploy_config, list_revisions)."
+        )),
+        ApplyState::Failing(error) => ToolCallResult::error(format!(
+            "Executed {action_desc} on {name} and recorded the revision, but the controller \
+             could not apply it (failing since {}):\n{}\n{}",
+            error.since,
+            error.message,
+            if error.permanent {
+                "The API server rejected the manifests; this will not apply until the config changes."
+            } else {
+                "The controller keeps retrying."
+            }
+        )),
+        ApplyState::Pending => ToolCallResult::text(format!(
+            "Successfully executed: {action_desc} on {name}. The controller has not reported \
+             applying it yet; check `apply` in get_deploy_config."
+        )),
+    }
 }

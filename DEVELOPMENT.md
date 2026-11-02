@@ -399,7 +399,7 @@ html! {
 - Events: `src/webhooks/tag_events.rs` polls `GET /api/events?after=<cursor>` every 30 s (cursor in the `watchtower_cursor` table; a first run starts from now) and runs the autodeploy gates for each added or moved tag
 
 **Writers to the DeployConfig (server-side apply):**
-- Every write to the custom resource goes through `src/kubernetes/cr_writers.rs` as a server-side apply under the manager that owns those keys: `cicd-config-sync` (parameters, config, kind, team, checks; `status.orphaned`), `cicd-deploy` (`spec.specs`; `status.parameters`, `status.config`), `cicd-selections` (the whole selection map), `cicd-patches` (the patch list), `cicd-autodeploy` (`status.autodeploy`)
+- Every write to the custom resource goes through `src/kubernetes/cr_writers.rs` as a server-side apply under the manager that owns those keys: `cicd-config-sync` (parameters, config, kind, team, checks; `status.orphaned`), `cicd-deploy` (`spec.specs`; `status.parameters`, `status.config`), `cicd-selections` (the whole selection map), `cicd-patches` (the patch list), `cicd-autodeploy` (`status.autodeploy`), `cicd-reconcile` (`status.reconcile`, written by the controller)
 - A manager sends the complete set it owns every time; a key it stops sending is removed by the server. Never add a writer that sends part of what a manager owns
 - Clear a map by omitting the key: the server rejects an owned empty map as null. Lists are atomic, so an empty list is fine
 - A field set by anything else (`kubectl patch`, the merge-patch writers before this) stays until that owner releases it. `kubernetes/migration/adopt-field-managers.sh` rewrites `managedFields` once so existing objects belong to these managers; and a hand-set field must be removed by hand
@@ -410,16 +410,14 @@ html! {
 - `CICD_TEMPORARY_DEPLOY` is per workload (`DeployConfig::manifest_is_temporary`): `true` when the manifest uses a parameter whose selection is temporary (`$SHA` on a branch deploy, a temporary tag) or a temporary patch targets it. A temporary change to one workload does not flip it on the others, so it does not restart, say, the database next to an app under test
 - Deliberately nothing that changes with every deploy: the parameter values and the config commit used to be injected too, which rolled every Deployment on every deploy, including deploys that only touched an Ingress or a Secret. A workload's image tag already carries its version
 
-**Controller pattern:**
-```rust
-async fn reconcile(dc: Arc<DeployConfig>, ctx: Arc<Context>) -> Result<Action> {
-    // 1. Read desired state from CRD
-    // 2. Apply resources to cluster
-    // 3. Prune old resources
-    // 4. Update status
-    Ok(Action::requeue(Duration::from_secs(5)))
-}
-```
+**Controller pattern** (`src/kubernetes/controller.rs`):
+1. Render the children (`DeployConfig::desired_children`); a config that does not render applies and prunes nothing
+2. Apply every child with server-side apply, continuing past failures so one rejected manifest does not hold back the rest. The render fills in the API server's update-strategy defaults so the controller owns them and a switch to `Recreate` / `OnDelete` can drop them (`src/kubernetes/strategy_defaults.rs`)
+3. Record the outcome on `status.reconcile` (`renderHash` of what was applied, and `error` with message, `since`, failing resources and whether it is `permanent`), only when it changes, since every write is a watch event
+4. Prune stale children, unless any apply failed: a failed child still carries the old deploy's annotations and would look stale
+5. Requeue after 5 minutes (60 s after a rejected apply, 5 s after a transient one)
+
+Readers compare `status.reconcile.renderHash` with their own render (`DeployConfig::apply_state`) to know whether the report is about what is deployed now. The deploy page and home show the error, `get_deploy_config` has an `apply` field, `deploy` over MCP waits up to 20 s for the first apply and reports a failure, and a deploy run fails at once on a permanent apply error. Live tests: `cargo test -- --ignored live_strategy` and `cargo test --features test-crd -- --ignored live_reconcile`.
 
 ## Development Workflow
 

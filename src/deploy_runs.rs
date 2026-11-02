@@ -43,6 +43,7 @@ use crate::deploys::SelectionIntent;
 use crate::discord;
 use crate::error::{AppError, AppResult};
 use crate::kubernetes::api::ListMode;
+use crate::kubernetes::deploy_config::ApplyState;
 use crate::kubernetes::deploy_config::{
     parse_duration_ms, CheckSpec, DeployChecks, OnFailure, Severity,
 };
@@ -241,6 +242,9 @@ async fn judge(client: &Client, config: &DeployConfig) -> Rollout {
         // deadline decides when to give up.
         Err(e) => return Rollout::Waiting(format!("the config does not render: {e}")),
     };
+    if let Some(verdict) = apply_verdict(config.apply_state(Some(&desired))) {
+        return verdict;
+    }
     // Only namespaced objects are in the namespace listing; a cluster-scoped
     // one would wait forever. Without discovery, judge everything.
     let desired: Vec<_> = match discovery_cache::namespaced_kinds(client).await {
@@ -260,6 +264,24 @@ async fn judge(client: &Client, config: &DeployConfig) -> Rollout {
     match list_namespace_objects(client, &ns, ListMode::All).await {
         Ok(live) => rollout::evaluate(&desired, &live),
         Err(e) => Rollout::Waiting(format!("could not list objects in {ns}: {e}")),
+    }
+}
+
+/// What the controller's report on this render says about the run, before
+/// the objects are looked at. A rejected apply will not fix itself, so it
+/// fails the run (and, through it, the revision's badge and the Discord
+/// notice) at once instead of leaving it waiting for its deadline.
+fn apply_verdict(state: ApplyState) -> Option<Rollout> {
+    match state {
+        ApplyState::Failing(error) if error.permanent => Some(Rollout::Failed(format!(
+            "the controller cannot apply it: {}",
+            error.message
+        ))),
+        ApplyState::Failing(error) => Some(Rollout::Waiting(format!(
+            "the controller's apply is failing (since {}): {}",
+            error.since, error.message
+        ))),
+        ApplyState::Applied | ApplyState::Pending => None,
     }
 }
 
@@ -875,6 +897,29 @@ mod tests {
         }
         println!("{} configs judged, {} not done", configs.len(), not_done);
         Ok(())
+    }
+
+    #[test]
+    fn a_rejected_apply_fails_the_run_and_a_transient_one_waits() {
+        use crate::kubernetes::deploy_config::ReconcileError;
+        let error = |permanent| ReconcileError {
+            message: "Deployment/postgres: forbidden (422)".into(),
+            since: "2026-11-01T00:00:00Z".into(),
+            resources: vec!["Deployment/postgres".into()],
+            permanent,
+        };
+        assert_eq!(
+            apply_verdict(ApplyState::Failing(error(true))),
+            Some(Rollout::Failed(
+                "the controller cannot apply it: Deployment/postgres: forbidden (422)".into()
+            ))
+        );
+        assert!(matches!(
+            apply_verdict(ApplyState::Failing(error(false))),
+            Some(Rollout::Waiting(_))
+        ));
+        assert_eq!(apply_verdict(ApplyState::Applied), None);
+        assert_eq!(apply_verdict(ApplyState::Pending), None);
     }
 
     #[test]

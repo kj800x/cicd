@@ -39,6 +39,69 @@ pub struct DeployConfigStatus {
     /// Whether the deploy config is orphaned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orphaned: Option<bool>,
+
+    /// What the controller last tried to apply and whether it failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconcile: Option<ReconcileStatus>,
+}
+
+/// The controller's last attempt to apply a config, written by the
+/// reconciler only when it changes (a write is a watch event, and so
+/// another reconcile). Deliberately no "last attempted at" time: it would
+/// change on every reconcile.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReconcileStatus {
+    /// [`DeployConfig::render_hash`] of the children the controller last
+    /// tried to apply. Absent when the config did not render. Readers
+    /// compare it with their own render to tell whether this outcome is
+    /// about what is deployed now or an older render.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render_hash: Option<String>,
+
+    /// Present while the controller cannot apply the config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<ReconcileError>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReconcileError {
+    /// One line per failing resource (`Kind/name: message`), or the render
+    /// error.
+    pub message: String,
+    /// RFC 3339: when reconciles started failing, kept while they go on
+    /// failing.
+    pub since: String,
+    /// `Kind/name` of each resource that failed to apply.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<String>,
+    /// The API server rejected the objects themselves (a 4xx other than a
+    /// conflict or throttling, or a render error): retrying the same
+    /// render cannot succeed. Transient failures (timeouts, 5xx) are not.
+    #[serde(default)]
+    pub permanent: bool,
+}
+
+/// Whether the controller has applied a config's current render.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ApplyState {
+    /// The current render was applied without errors.
+    Applied,
+    /// The current render failed to apply.
+    Failing(ReconcileError),
+    /// The controller has not reported on the current render yet.
+    Pending,
+}
+
+impl ApplyState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ApplyState::Applied => "applied",
+            ApplyState::Failing(_) => "failing",
+            ApplyState::Pending => "pending",
+        }
+    }
 }
 
 /// DeployConfig spec fields represent the desired state for a deployment
@@ -716,6 +779,59 @@ impl DeployConfig {
         // Patches apply after substitution, and a patch that no longer fits
         // fails the whole render rather than being skipped.
         apply_patches(&templates, rendered, &self.spec.spec.patches)
+    }
+
+    /// The children the controller applies for the config as it stands:
+    /// none while undeployed, otherwise the render. Errors when the config
+    /// does not render.
+    pub fn desired_children(&self) -> crate::error::AppResult<Vec<DynamicObject>> {
+        // Undeployed means "run nothing". Manifest templates can be present
+        // without a deployed version for a moment during a deploy (they are
+        // written before the status), and rendering them then would put
+        // `$SHA` literally into an image that does not exist.
+        if self.deployment_state() == DeploymentState::Undeployed {
+            return Ok(vec![]);
+        }
+        self.child_objects(self.render_manifests()?)
+    }
+
+    /// A stable hash of a set of children, recorded by the controller in
+    /// `status.reconcile.renderHash` so readers can tell which render an
+    /// apply outcome is about.
+    pub fn render_hash(children: &[DynamicObject]) -> String {
+        let mut hasher = Sha256::new();
+        for child in children {
+            hasher.update(serde_json::to_vec(child).unwrap_or_default());
+            hasher.update(b"\n");
+        }
+        format!("{:x}", hasher.finalize())
+    }
+
+    pub fn reconcile_status(&self) -> Option<&ReconcileStatus> {
+        self.status.as_ref().and_then(|s| s.reconcile.as_ref())
+    }
+
+    /// The controller's last reported error, whatever render it was for.
+    pub fn reconcile_error(&self) -> Option<&ReconcileError> {
+        self.reconcile_status().and_then(|r| r.error.as_ref())
+    }
+
+    /// Whether the controller has applied `children` (normally
+    /// [`Self::desired_children`]): its last report must be about this
+    /// render. `None` means the config did not render, which the
+    /// controller reports with no hash.
+    pub fn apply_state(&self, children: Option<&[DynamicObject]>) -> ApplyState {
+        let Some(status) = self.reconcile_status() else {
+            return ApplyState::Pending;
+        };
+        let current = children.map(Self::render_hash);
+        if status.render_hash != current {
+            return ApplyState::Pending;
+        }
+        match &status.error {
+            Some(error) => ApplyState::Failing(error.clone()),
+            None => ApplyState::Applied,
+        }
     }
 
     /// Turn rendered manifests into the child objects the controller applies:
