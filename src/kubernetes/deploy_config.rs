@@ -403,12 +403,21 @@ impl DeployConfig {
             .and_then(ParameterValue::as_sha_maybe_branch)
     }
 
+    /// `(kind, name)` of every workload a bounce restarts: the
+    /// Deployments, StatefulSets and DaemonSets in the rendered manifests,
+    /// or in the templates when the config cannot render.
+    pub fn bounce_targets(&self) -> Vec<(String, String)> {
+        let manifests = self
+            .render_manifests()
+            .unwrap_or_else(|_| self.resource_specs());
+        crate::kubernetes::bounce::targets(&manifests)
+    }
+
     pub fn supports_bounce(&self) -> bool {
         self.resource_specs().iter().any(|spec| {
             spec.get("kind")
                 .and_then(|k| k.as_str())
-                .unwrap_or_default()
-                == "Deployment"
+                .is_some_and(crate::kubernetes::bounce::restarts_kind)
         })
     }
 

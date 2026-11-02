@@ -27,6 +27,7 @@ use crate::db::revision::Revision;
 use crate::deploys::{normalize_action, resolve_tag_parameter};
 use crate::error::AppResult;
 use crate::kubernetes::api::get_namespace_uid;
+use crate::kubernetes::bounce;
 use crate::kubernetes::parameters::{ParameterSource, ParameterValue, SHA_PARAMETER};
 use crate::kubernetes::repo::DeploymentState;
 use crate::kubernetes::selections::{Durability, Mode};
@@ -734,6 +735,55 @@ pub(crate) fn render_strip(tone: &str, body: Markup) -> Markup {
     }
 }
 
+/// What a bounce does to each workload the config owns, judged from the
+/// live objects.
+fn bounce_plan(
+    config: &DeployConfig,
+    namespaced_objs: &[DynamicObject],
+) -> Vec<(String, String, bounce::Outcome)> {
+    config
+        .bounce_targets()
+        .into_iter()
+        .map(|(kind, name)| {
+            let live = namespaced_objs
+                .iter()
+                .find(|o| {
+                    o.name_any() == name
+                        && o.types.as_ref().map(|t| t.kind.as_str()) == Some(kind.as_str())
+                })
+                .and_then(|o| serde_json::to_value(o).ok());
+            let outcome = bounce::plan(&kind, live.as_ref());
+            (kind, name, outcome)
+        })
+        .collect()
+}
+
+fn render_bounce_plan(planned: &[(String, String, bounce::Outcome)]) -> Markup {
+    html! {
+        @if planned.is_empty() {
+            "This config owns no Deployments, StatefulSets or DaemonSets to restart."
+        } @else {
+            "Restarts each workload this config owns:"
+            ul.bounce-plan {
+                @for (kind, name, outcome) in planned {
+                    li {
+                        b { (kind) } ": " (name)
+                        @match outcome {
+                            bounce::Outcome::Restart { note: Some(note) } => {
+                                span.m-left-2 { "(" (note) ")" }
+                            }
+                            bounce::Outcome::Restart { note: None } => {}
+                            bounce::Outcome::Skip(why) => {
+                                span.m-left-2.deployable-state.deployable-state--warn { "(skipped: " (why) ")" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// `(kind, name)` of every manifest in a config's templates.
 fn manifest_names(config: &DeployConfig) -> Vec<(String, String)> {
     config
@@ -900,10 +950,17 @@ pub async fn render_preview_content(
                 (render_autodeploy_badge(!config.autodeploy()))
             },
         )),
-        Action::Bounce => Some(render_strip(
-            "neutral",
-            html! { "Restarts every Deployment this config owns." },
-        )),
+        Action::Bounce => {
+            let planned = bounce_plan(config, namespaced_objs);
+            if !planned.is_empty() && !planned.iter().any(|(_, _, o)| o.restarts()) {
+                alerts.push(render_alert(
+                    "warning",
+                    html! { "Nothing would restart" },
+                    html! { "Every workload this config owns is skipped; see below." },
+                ));
+            }
+            Some(render_strip("neutral", render_bounce_plan(&planned)))
+        }
         Action::ExecuteJob => Some(render_strip(
             "neutral",
             html! { "Creates a Job from each CronJob this config owns." },

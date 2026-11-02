@@ -162,7 +162,7 @@ pub fn tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "bounce".to_string(),
-            description: "Restart all deployments owned by a deploy config".to_string(),
+            description: "Restart the Deployments, StatefulSets and DaemonSets a deploy config owns (kubectl rollout restart). Workloads scaled to zero or with the OnDelete update strategy are skipped; if nothing restarts the call fails and says why.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

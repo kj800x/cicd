@@ -1,4 +1,5 @@
 pub mod api;
+pub mod bounce;
 pub mod controller;
 pub mod cr_writers;
 pub mod deploy_config;
