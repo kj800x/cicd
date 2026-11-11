@@ -76,7 +76,12 @@ pub enum Knob {
     Resources,
     Image,
     Args,
+    Node,
 }
+
+/// The node label the node knob selects on. Every kubelet sets it to the
+/// node's name, so it pins pods to exactly one node.
+pub const HOSTNAME_LABEL: &str = "kubernetes.io/hostname";
 
 impl Knob {
     pub fn id(self) -> &'static str {
@@ -86,6 +91,7 @@ impl Knob {
             Knob::Resources => "resources",
             Knob::Image => "image",
             Knob::Args => "args",
+            Knob::Node => "node",
         }
     }
 
@@ -96,6 +102,7 @@ impl Knob {
             "resources" => Some(Knob::Resources),
             "image" => Some(Knob::Image),
             "args" => Some(Knob::Args),
+            "node" => Some(Knob::Node),
             _ => None,
         }
     }
@@ -107,6 +114,7 @@ impl Knob {
             Knob::Resources => "Requests and limits",
             Knob::Image => "Image",
             Knob::Args => "Args",
+            Knob::Node => "Pin to a node",
         }
     }
 
@@ -118,11 +126,12 @@ impl Knob {
             Knob::Resources => "/…/resources",
             Knob::Image => "/…/image",
             Knob::Args => "/…/args",
+            Knob::Node => "/…/nodeSelector",
         }
     }
 
     fn needs_container(self) -> bool {
-        self != Knob::Replicas
+        !matches!(self, Knob::Replicas | Knob::Node)
     }
 }
 
@@ -147,6 +156,9 @@ pub fn knobs_for(manifest: &serde_json::Value) -> Vec<Knob> {
     }
     if pod_spec_pointer(kind).is_some() {
         knobs.extend([Knob::Env, Knob::Resources, Knob::Image, Knob::Args]);
+        if kind != "Pod" {
+            knobs.push(Knob::Node);
+        }
     }
     knobs
 }
@@ -279,6 +291,33 @@ pub fn build_knob_patch(
             let path = format!("{base}/args");
             (op_for(&path), path, Some(serde_json::json!(args)))
         }
+        Knob::Node => {
+            let node = field(form, "node");
+            if node.is_empty() {
+                return Err("Pick a node".to_string());
+            }
+            let pod = pod_spec_pointer(&kind)
+                .ok_or_else(|| format!("{kind} has no pod spec to patch"))?;
+            let selector = format!("{pod}/nodeSelector");
+            // Add the one label into an existing selector so its other
+            // labels still apply; `add` on a present key replaces it.
+            if pointer_get(manifest, &selector).is_some_and(|s| s.is_object()) {
+                (
+                    PatchOp::Add,
+                    format!(
+                        "{selector}/{}",
+                        HOSTNAME_LABEL.replace('~', "~0").replace('/', "~1")
+                    ),
+                    Some(serde_json::json!(node)),
+                )
+            } else {
+                (
+                    PatchOp::Add,
+                    selector,
+                    Some(serde_json::json!({ HOSTNAME_LABEL: node })),
+                )
+            }
+        }
         Knob::Resources => {
             let mut resources = serde_json::Map::new();
             for (section, keys) in [
@@ -401,6 +440,9 @@ fn encode(s: &str) -> String {
 struct Flow<'a> {
     config: &'a DeployConfig,
     return_url: String,
+    /// The cluster's node names, for the node knob; empty when not needed
+    /// or not listable, and the knob falls back to a text box.
+    nodes: &'a [String],
 }
 
 impl Flow<'_> {
@@ -579,6 +621,29 @@ impl Flow<'_> {
                             label.patch-flow__label { "Args" }
                             input class=(format!("mono {err_class}")) type="text" name="args" value=(typed_or("args", current(&format!("{base}/args")))) placeholder="[\"--verbose\"] or space separated" hx-get=(refresh_url) hx-include="closest form" hx-target="#patch-flow" hx-swap="innerHTML" hx-trigger="change";
                         }
+                        Knob::Node => {
+                            @let label_pointer = format!("{pod}/nodeSelector/{}", HOSTNAME_LABEL.replace('/', "~1"));
+                            @let chosen = typed_or("node", current(&label_pointer));
+                            label.patch-flow__label { "Node" }
+                            @if self.nodes.is_empty() {
+                                input class=(format!("mono {err_class}")) type="text" name="node" value=(chosen) placeholder="node name" hx-get=(refresh_url) hx-include="closest form" hx-target="#patch-flow" hx-swap="innerHTML" hx-trigger="change";
+                            } @else {
+                                select class=(err_class) name="node" hx-get=(refresh_url) hx-include="closest form" hx-target="#patch-flow" hx-swap="innerHTML" hx-trigger="change" {
+                                    option value="" selected[chosen.is_empty()] disabled { "Pick a node" }
+                                    @if !chosen.is_empty() && !self.nodes.contains(&chosen) {
+                                        option value=(chosen) selected { (chosen) " (not in the cluster)" }
+                                    }
+                                    @for node in self.nodes {
+                                        option value=(node) selected[*node == chosen] { (node) }
+                                    }
+                                }
+                            }
+                            @if let Some(now) = current(&label_pointer) { div.faint { "manifest already pins " code { (now) } } }
+                            div.patch-flow__hint {
+                                "Sets the " code { (HOSTNAME_LABEL) } " node selector. Pods move on the rollout; "
+                                "if the node is down, full or tainted they stay Pending."
+                            }
+                        }
                         Knob::Resources => {
                             @let res = |section: &str, kind: &str| current(&format!("{base}/resources/{section}/{kind}"));
                             div.patch-flow__grid {
@@ -687,11 +752,13 @@ fn action_of(page_url: &str) -> Action {
 fn render_step(
     config: &DeployConfig,
     query: &HashMap<String, String>,
+    nodes: &[String],
     error: Option<&str>,
 ) -> Markup {
     let flow = Flow {
         config,
         return_url: return_url_of(query, &config.name_any()),
+        nodes,
     };
     let step = field(query, "step");
     if step == "closed"
@@ -730,6 +797,26 @@ fn render_step(
     }
 }
 
+/// The cluster's node names, sorted, when the form is on the node knob;
+/// empty otherwise or when they cannot be listed.
+async fn nodes_for(client: &Client, form: &HashMap<String, String>) -> Vec<String> {
+    if Knob::parse(field(form, "knob")) != Some(Knob::Node) {
+        return vec![];
+    }
+    let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(client.clone());
+    match api.list(&Default::default()).await {
+        Ok(list) => {
+            let mut names: Vec<String> = list.items.iter().map(|n| n.name_any()).collect();
+            names.sort();
+            names
+        }
+        Err(e) => {
+            log::warn!("cannot list nodes for the node knob: {e}");
+            vec![]
+        }
+    }
+}
+
 #[get("/fragments/patch-flow/{name}")]
 pub async fn patch_flow(
     path: web::Path<String>,
@@ -747,9 +834,10 @@ pub async fn patch_flow(
             return HttpResponse::NotFound().body(format!("DeployConfig {name} not found."));
         }
     };
+    let nodes = nodes_for(&client, &query).await;
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
-        .body(render_step(&config, &query, None).into_string())
+        .body(render_step(&config, &query, &nodes, None).into_string())
 }
 
 /// A value typed into the form: JSON if it parses, otherwise the raw string.
@@ -823,6 +911,7 @@ fn refuse(
     req: &HttpRequest,
     config: &DeployConfig,
     form: &HashMap<String, String>,
+    nodes: &[String],
     message: &str,
 ) -> HttpResponse {
     if !is_htmx(req) {
@@ -839,7 +928,7 @@ fn refuse(
     );
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
-        .body(render_step(config, &query, Some(message)).into_string())
+        .body(render_step(config, &query, nodes, Some(message)).into_string())
 }
 
 /// The flow's last step: build the patch, check it against the cluster on
@@ -865,7 +954,10 @@ pub async fn patch_flow_add(
     };
     let patch = match patch_from_request(&config, &form) {
         Ok(p) => p,
-        Err(message) => return refuse(&req, &config, &form, &message),
+        Err(message) => {
+            let nodes = nodes_for(&client, &form).await;
+            return refuse(&req, &config, &form, &nodes, &message);
+        }
     };
     let return_url = return_url_of(&form, &name);
     let action = action_of(&return_url);
@@ -881,7 +973,8 @@ pub async fn patch_flow_add(
     };
     let effective = action.effective_config(&config);
     if let Err(e) = crate::deploys::validate_patches(&effective, &client).await {
-        return refuse(&req, &config, &form, &e.to_string());
+        let nodes = nodes_for(&client, &form).await;
+        return refuse(&req, &config, &form, &nodes, &e.to_string());
     }
     let next = page_url(&config, &action);
     if is_htmx(&req) {
@@ -960,14 +1053,22 @@ mod tests {
                 Knob::Env,
                 Knob::Resources,
                 Knob::Image,
-                Knob::Args
+                Knob::Args,
+                Knob::Node
             ]
         );
         let cron = json!({"kind": "CronJob"});
         assert_eq!(
             knobs_for(&cron),
-            vec![Knob::Env, Knob::Resources, Knob::Image, Knob::Args]
+            vec![
+                Knob::Env,
+                Knob::Resources,
+                Knob::Image,
+                Knob::Args,
+                Knob::Node
+            ]
         );
+        assert!(!knobs_for(&json!({"kind": "Pod"})).contains(&Knob::Node));
         assert!(knobs_for(&json!({"kind": "Service"})).is_empty());
         assert_eq!(
             containers(&deployment()),
@@ -1137,6 +1238,61 @@ mod tests {
             Knob::Resources,
             &form(&[]),
             Durability::Standing
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn node_knob_sets_the_hostname_selector() {
+        let fresh = build_knob_patch(
+            &deployment(),
+            target(),
+            Knob::Node,
+            &form(&[("node", "worker-2")]),
+            Durability::Temporary,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(fresh.op, PatchOp::Add);
+        assert_eq!(fresh.path, "/spec/template/spec/nodeSelector");
+        assert_eq!(
+            fresh.value,
+            Some(json!({"kubernetes.io/hostname": "worker-2"}))
+        );
+
+        // An existing selector keeps its other labels.
+        let mut selected = deployment();
+        selected["spec"]["template"]["spec"]["nodeSelector"] = json!({"disk": "ssd"});
+        let merged = build_knob_patch(
+            &selected,
+            target(),
+            Knob::Node,
+            &form(&[("node", "worker-2")]),
+            Durability::Temporary,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(merged.op, PatchOp::Add);
+        assert_eq!(
+            merged.path,
+            "/spec/template/spec/nodeSelector/kubernetes.io~1hostname"
+        );
+        assert_eq!(merged.value, Some(json!("worker-2")));
+        let mut patched = selected.clone();
+        json_patch::patch(
+            &mut patched,
+            &json_patch::Patch(vec![merged.operation().unwrap_or_else(|e| panic!("{e}"))]),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            patched["spec"]["template"]["spec"]["nodeSelector"],
+            json!({"disk": "ssd", "kubernetes.io/hostname": "worker-2"})
+        );
+
+        assert!(build_knob_patch(
+            &deployment(),
+            target(),
+            Knob::Node,
+            &form(&[("node", " ")]),
+            Durability::Temporary
         )
         .is_err());
     }

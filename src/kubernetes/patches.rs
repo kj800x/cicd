@@ -133,7 +133,7 @@ impl ManifestPatch {
             && self.target.file.as_deref().is_none_or(|f| Some(f) == file)
     }
 
-    fn operation(&self) -> AppResult<json_patch::PatchOperation> {
+    pub(crate) fn operation(&self) -> AppResult<json_patch::PatchOperation> {
         let mut op = serde_json::json!({ "op": match self.op {
             PatchOp::Add => "add",
             PatchOp::Replace => "replace",
