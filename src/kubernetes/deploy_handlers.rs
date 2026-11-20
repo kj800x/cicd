@@ -11,7 +11,7 @@ use crate::kubernetes::api::{delete_deploy_config, get_deploy_config};
 use crate::kubernetes::bounce;
 use crate::kubernetes::cr_writers::{self, DeployedStatus};
 use crate::kubernetes::parameters::{ParameterValue, SHA_PARAMETER};
-use crate::webhooks::config_sync::fetch_deploy_config_by_sha;
+use crate::webhooks::config_sync::fetch_deploy_config_cached;
 use crate::{
     crab_ext::IRepo,
     error::{AppError, AppResult},
@@ -92,7 +92,7 @@ impl DeployAction {
                 );
 
                 let desired_config =
-                    fetch_deploy_config_by_sha(octocrabs, repository, &config.sha, name)
+                    fetch_deploy_config_cached(octocrabs, repository, &config.sha, name)
                         .await?
                         .ok_or(AppError::NotFound("Desired config not found".to_owned()))?;
 

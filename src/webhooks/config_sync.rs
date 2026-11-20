@@ -115,6 +115,8 @@ pub async fn sync_deploy_configs_for_commit(
 
     let deploy_configs =
         fetch_deploy_configs_by_sha(octocrabs, repository.clone(), commit_sha).await?;
+    // Deploys and previews of this commit read it from the memo.
+    remember_deploy_configs(&repository, commit_sha, &deploy_configs);
 
     // Get connection after async work is done
     let conn = pool.get()?;
@@ -334,47 +336,201 @@ impl GitHubDeployConfig {
     }
 }
 
+/// Whether a GitHub call failed because the path does not exist at the ref.
+fn is_not_found(e: &octocrab::Error) -> bool {
+    matches!(e, octocrab::Error::GitHub { source, .. } if source.status_code.as_u16() == 404)
+}
+
+/// The decoded text of one file at a commit.
+async fn read_file(
+    crab: &octocrab::Octocrab,
+    owner: &str,
+    repo: &str,
+    sha: &str,
+    path: &str,
+) -> AppResult<String> {
+    let Ok(mut content) = crab
+        .repos(owner, repo)
+        .get_content()
+        .r#ref(sha)
+        .path(path)
+        .send()
+        .await
+    else {
+        log::error!("Failed to read {}", path);
+        return Err(AppError::NotFound(format!("Failed to read {}", path)));
+    };
+    let items = content.take_items();
+    let Some(text) = items.first().and_then(|c| c.decoded_content()) else {
+        log::error!("Failed to decode {}", path);
+        return Err(AppError::Internal(format!("Failed to decode {}", path)));
+    };
+    if text.is_empty() {
+        log::warn!("  WARNING: File {} is empty!", path);
+    }
+    Ok(text)
+}
+
+/// The files of `.deploy/<name>/`, read in parallel, in listing order.
+async fn read_config_dir(
+    crab: &octocrab::Octocrab,
+    owner: &str,
+    repo: &str,
+    sha: &str,
+    config_name: &str,
+    files: Vec<Content>,
+) -> AppResult<Vec<(String, String)>> {
+    let reads = files.iter().map(|file| {
+        let path = format!(".deploy/{}/{}", config_name, file.name);
+        async move { read_file(crab, owner, repo, sha, &path).await }
+    });
+    let texts = futures_util::future::join_all(reads).await;
+    files
+        .into_iter()
+        .zip(texts)
+        .map(|(file, text)| Ok((file.name, text?)))
+        .collect()
+}
+
+/// A DeployConfig from its `.deploy/<name>.yaml` and the files beside it.
+fn build_deploy_config(
+    owner: &str,
+    repo: &str,
+    config_name: &str,
+    config_content: &str,
+    child_files: Vec<(String, String)>,
+) -> AppResult<DeployConfig> {
+    let config: GitHubDeployConfig =
+        serde_yaml::from_str(config_content).map_err(AppError::Yaml)?;
+    let child_files: Vec<Value> = child_files
+        .into_iter()
+        .map(|(file_name, file)| {
+            let parsed: Value = serde_yaml::from_str(&file).map_err(AppError::Yaml)?;
+            if parsed.is_null() {
+                log::warn!(
+                    "  WARNING: Child file {} parsed as null! Content was: {}",
+                    file_name,
+                    file
+                );
+            }
+            Ok(Template::stored(&file_name, parsed))
+        })
+        .collect::<Result<Vec<Value>, AppError>>()?;
+    let parameters = config.parameter_sources()?;
+    Ok(DeployConfig {
+        spec: DeployConfigSpec {
+            spec: DeployConfigSpecFields {
+                checks: config.checks.clone(),
+                parameters,
+                // Selections are user intent, owned by the deploy handler;
+                // empty here means "leave whatever is on the object".
+                selections: Default::default(),
+                patches: vec![],
+                config: Repository {
+                    owner: owner.to_owned(),
+                    repo: repo.to_owned(),
+                },
+                kind: config.kind,
+                specs: child_files,
+                team: config.team.clone(),
+            },
+        },
+        metadata: ObjectMeta {
+            name: Some(config_name.to_owned()),
+            namespace: Some(test_mode::deploy_namespace(&config.namespace)),
+            ..ObjectMeta::default()
+        },
+        status: None,
+    })
+}
+
+/// One config's definition at a commit, reading only its own files:
+/// `.deploy/<name>.yaml` and `.deploy/<name>/`, a handful of GitHub calls
+/// instead of the whole tree. `None` when the commit does not define it.
 pub async fn fetch_deploy_config_by_sha(
     octocrabs: &Octocrabs,
     repository: impl IRepo,
     sha: &str,
     config_name: &str,
 ) -> AppResult<Option<DeployConfig>> {
-    log::debug!(
-        "fetch_deploy_config_by_sha: repo={}/{}, sha={}, config_name={}",
-        repository.owner(),
-        repository.repo(),
-        sha,
-        config_name
-    );
-    let configs = fetch_deploy_configs_by_sha(octocrabs, repository, sha).await?;
-    log::debug!("Found {} deploy configs total", configs.len());
-    for config in &configs {
-        log::debug!(
-            "  - config '{}': {} specs",
-            config.name_any(),
-            config.spec.spec.specs.len()
-        );
-    }
-    let config = configs
-        .into_iter()
-        .find(|config| config.name_any() == config_name);
-    if config.is_some() {
-        log::debug!("Found matching config for '{}'", config_name);
-    } else {
-        log::warn!("No matching config found for '{}'", config_name);
-    }
-    Ok(config)
+    let Some(crab) = octocrabs.crab_for(&repository).await else {
+        return Err(AppError::NotFound(
+            "No octocrab found for this repo".to_owned(),
+        ));
+    };
+    let owner = repository.owner().to_string();
+    let repo = repository.repo().to_string();
+    let yaml_path = format!(".deploy/{}.yaml", config_name);
+    let dir_path = format!(".deploy/{}", config_name);
+    let get = |path: String| {
+        let crab = crab.clone();
+        let (owner, repo) = (owner.clone(), repo.clone());
+        async move {
+            crab.repos(&owner, &repo)
+                .get_content()
+                .r#ref(sha)
+                .path(path)
+                .send()
+                .await
+        }
+    };
+    let (yaml, dir) =
+        futures_util::future::join(get(yaml_path.clone()), get(dir_path.clone())).await;
+    let config_content = match yaml {
+        Ok(mut content) => match content
+            .take_items()
+            .first()
+            .and_then(|c| c.decoded_content())
+        {
+            Some(text) => text,
+            None => {
+                return Err(AppError::Internal(format!(
+                    "Failed to decode {}",
+                    yaml_path
+                )));
+            }
+        },
+        Err(e) if is_not_found(&e) => {
+            log::warn!(
+                "{} is not defined at {}/{}@{}",
+                config_name,
+                owner,
+                repo,
+                sha
+            );
+            return Ok(None);
+        }
+        Err(e) => {
+            log::error!("Failed to read {}: {:?}", yaml_path, e);
+            return Err(AppError::NotFound(format!("Failed to read {}", yaml_path)));
+        }
+    };
+    let files = match dir {
+        Ok(content) => content.items,
+        Err(e) if is_not_found(&e) => vec![],
+        Err(e) => {
+            log::error!("Failed to read {}: {:?}", dir_path, e);
+            return Err(AppError::NotFound(format!("Failed to read {}", dir_path)));
+        }
+    };
+    let child_files = read_config_dir(&crab, &owner, &repo, sha, config_name, files).await?;
+    build_deploy_config(&owner, &repo, config_name, &config_content, child_files).map(Some)
 }
 
-/// Process-wide memo of what `.deploy/` held at a commit, for the pages
-/// that preview a deploy: the content at a full sha never changes, so one
-/// GitHub fetch per (repo, sha) serves every poll after it. Only settled
-/// answers are kept (a fetch that failed is retried next time), and the map
-/// is emptied when it grows past a few hundred commits.
+/// Process-wide memos of what `.deploy/` held at a commit: the content at
+/// a full sha never changes, so one GitHub fetch per (repo, sha) serves
+/// every preview poll and deploy after it. Config sync fills the whole-tree
+/// memo as it reads each pushed commit; a deploy that finds nothing there
+/// reads just its own config into the per-config memo. Only settled
+/// answers are kept (a fetch that failed, or found no configs, is retried
+/// next time), and each map is emptied when it grows past a few hundred
+/// entries.
 type CommitKey = (String, String, String);
 type ConfigsAtCommit = std::sync::Mutex<HashMap<CommitKey, Vec<DeployConfig>>>;
 static CONFIGS_AT_COMMIT: std::sync::OnceLock<ConfigsAtCommit> = std::sync::OnceLock::new();
+type ConfigKey = (String, String, String, String);
+type ConfigAtCommit = std::sync::Mutex<HashMap<ConfigKey, DeployConfig>>;
+static CONFIG_AT_COMMIT: std::sync::OnceLock<ConfigAtCommit> = std::sync::OnceLock::new();
 
 const CONFIG_CACHE_LIMIT: usize = 256;
 
@@ -386,45 +542,77 @@ fn cache_key(repository: &impl IRepo, sha: &str) -> CommitKey {
     )
 }
 
-/// [`fetch_deploy_configs_by_sha`] through the memo. Abbreviated shas are
-/// not cached: only a full sha names one immutable tree.
-pub async fn fetch_deploy_configs_cached(
-    octocrabs: &Octocrabs,
-    repository: impl IRepo,
-    sha: &str,
-) -> AppResult<Vec<DeployConfig>> {
-    let cacheable = sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit());
-    let key = cache_key(&repository, sha);
-    if cacheable {
-        let cache = CONFIGS_AT_COMMIT.get_or_init(Default::default);
-        if let Some(found) = cache.lock().ok().and_then(|c| c.get(&key).cloned()) {
-            return Ok(found);
-        }
-    }
-    let configs = fetch_deploy_configs_by_sha(octocrabs, repository, sha).await?;
-    if cacheable {
-        let cache = CONFIGS_AT_COMMIT.get_or_init(Default::default);
-        if let Ok(mut c) = cache.lock() {
-            if c.len() >= CONFIG_CACHE_LIMIT {
-                c.clear();
-            }
-            c.insert(key, configs.clone());
-        }
-    }
-    Ok(configs)
+/// Only a full sha names one immutable tree.
+fn is_full_sha(sha: &str) -> bool {
+    sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// One config's definition at a commit, through the memo.
+fn memo_insert<K: std::hash::Hash + Eq, V>(
+    memo: &std::sync::OnceLock<std::sync::Mutex<HashMap<K, V>>>,
+    key: K,
+    value: V,
+) {
+    if let Ok(mut c) = memo.get_or_init(Default::default).lock() {
+        if c.len() >= CONFIG_CACHE_LIMIT {
+            c.clear();
+        }
+        c.insert(key, value);
+    }
+}
+
+/// Record a whole-tree read made elsewhere (config sync), so the previews
+/// and deploys of that commit need no GitHub calls of their own.
+pub fn remember_deploy_configs(repository: &impl IRepo, sha: &str, configs: &[DeployConfig]) {
+    if is_full_sha(sha) && !configs.is_empty() {
+        memo_insert(
+            &CONFIGS_AT_COMMIT,
+            cache_key(repository, sha),
+            configs.to_vec(),
+        );
+    }
+}
+
+/// One config's definition at a commit, through the memos: the whole-tree
+/// read config sync made of that commit, else this config's own files.
 pub async fn fetch_deploy_config_cached(
     octocrabs: &Octocrabs,
     repository: impl IRepo,
     sha: &str,
     config_name: &str,
 ) -> AppResult<Option<DeployConfig>> {
-    Ok(fetch_deploy_configs_cached(octocrabs, repository, sha)
-        .await?
-        .into_iter()
-        .find(|config| config.name_any() == config_name))
+    if !is_full_sha(sha) {
+        return fetch_deploy_config_by_sha(octocrabs, repository, sha, config_name).await;
+    }
+    let (owner, repo, sha_key) = cache_key(&repository, sha);
+    let config_key = (owner, repo, sha_key, config_name.to_owned());
+    if let Some(found) = CONFIGS_AT_COMMIT
+        .get_or_init(Default::default)
+        .lock()
+        .ok()
+        .and_then(|c| {
+            c.get(&cache_key(&repository, sha)).map(|configs| {
+                configs
+                    .iter()
+                    .find(|c| c.name_any() == config_name)
+                    .cloned()
+            })
+        })
+    {
+        return Ok(found);
+    }
+    if let Some(found) = CONFIG_AT_COMMIT
+        .get_or_init(Default::default)
+        .lock()
+        .ok()
+        .and_then(|c| c.get(&config_key).cloned())
+    {
+        return Ok(Some(found));
+    }
+    let config = fetch_deploy_config_by_sha(octocrabs, repository, sha, config_name).await?;
+    if let Some(config) = &config {
+        memo_insert(&CONFIG_AT_COMMIT, config_key, config.clone());
+    }
+    Ok(config)
 }
 
 pub async fn fetch_deploy_configs_by_sha(
@@ -432,15 +620,7 @@ pub async fn fetch_deploy_configs_by_sha(
     repository: impl IRepo,
     sha: &str,
 ) -> AppResult<Vec<DeployConfig>> {
-    log::debug!(
-        "fetch_deploy_configs_by_sha: repo={}/{}, sha={}",
-        repository.owner(),
-        repository.repo(),
-        sha
-    );
-    let result = octocrabs.crab_for(&repository).await;
-
-    let Some(crab) = result else {
+    let Some(crab) = octocrabs.crab_for(&repository).await else {
         log::error!(
             "No octocrab found for repo {}/{}",
             repository.owner(),
@@ -454,12 +634,6 @@ pub async fn fetch_deploy_configs_by_sha(
     let owner = repository.owner().to_string();
     let repo = repository.repo().to_string();
 
-    log::debug!(
-        "Fetching .deploy directory from {}/{} at {}",
-        owner,
-        repo,
-        sha
-    );
     let content = match crab
         .repos(&owner, &repo)
         .get_content()
@@ -476,9 +650,6 @@ pub async fn fetch_deploy_configs_by_sha(
         }
     };
 
-    log::debug!("Found {} items in .deploy directory", content.items.len());
-
-    // create a map from name to Content
     let entries: HashMap<String, Content> = content
         .items
         .into_iter()
@@ -486,16 +657,13 @@ pub async fn fetch_deploy_configs_by_sha(
         .collect();
     let configs: Vec<&str> = entries
         .keys()
-        .filter(|name| name.ends_with(".yaml"))
         .filter_map(|name| name.strip_suffix(".yaml"))
         .collect();
 
     let mut final_deploy_configs: Vec<DeployConfig> = vec![];
 
     for config_name in configs {
-        log::debug!("Processing config: {}", config_name);
         let child_files = if entries.contains_key(config_name) {
-            log::debug!("Found directory .deploy/{}", config_name);
             let Ok(content_items) = crab
                 .repos(&owner, &repo)
                 .get_content()
@@ -510,137 +678,25 @@ pub async fn fetch_deploy_configs_by_sha(
                     config_name
                 )));
             };
-
-            let files = content_items.items;
-            log::debug!("Found {} files in .deploy/{}", files.len(), config_name);
-
-            let mut result: Vec<(String, String)> = vec![];
-
-            for file in files {
-                log::debug!("  Reading file: {}", file.name);
-                let Ok(mut content) = crab
-                    .repos(&owner, &repo)
-                    .get_content()
-                    .r#ref(sha)
-                    .path(format!(".deploy/{}/{}", config_name, file.name))
-                    .send()
-                    .await
-                else {
-                    log::error!("Failed to read .deploy/{}/{}", config_name, file.name);
-                    return Err(AppError::NotFound(format!(
-                        "Failed to read .deploy/{}/{}",
-                        config_name, file.name
-                    )));
-                };
-
-                let contents = content.take_items();
-                let c = &contents[0];
-                let Some(decoded_content) = c.decoded_content() else {
-                    log::error!("Failed to decode .deploy/{}/{}", config_name, file.name);
-                    return Err(AppError::Internal(
-                        "Failed to decode child file content".to_owned(),
-                    ));
-                };
-                log::debug!(
-                    "  File {} content length: {} bytes",
-                    file.name,
-                    decoded_content.len()
-                );
-                if decoded_content.is_empty() {
-                    log::warn!("  WARNING: File {} is empty!", file.name);
-                }
-                result.push((file.name.clone(), decoded_content));
-            }
-
-            result
+            read_config_dir(&crab, &owner, &repo, sha, config_name, content_items.items).await?
         } else {
-            log::debug!(
-                "No directory found for .deploy/{}, using only .yaml file",
-                config_name
-            );
             vec![]
         };
-
-        let Ok(mut config_content) = crab
-            .repos(&owner, &repo)
-            .get_content()
-            .r#ref(sha)
-            .path(format!(".deploy/{}.yaml", config_name))
-            .send()
-            .await
-        else {
-            return Err(AppError::NotFound(format!(
-                "Failed to read .deploy/{}.yaml",
-                config_name
-            )));
-        };
-
-        let config_content = config_content.take_items();
-        let c = &config_content[0];
-        let Some(config_content) = c.decoded_content() else {
-            return Err(AppError::Internal(
-                "Failed to decode config content".to_owned(),
-            ));
-        };
-
-        let config: GitHubDeployConfig =
-            serde_yaml::from_str(&config_content).map_err(AppError::Yaml)?;
-
-        log::debug!(
-            "Parsing {} child YAML files for config {}",
-            child_files.len(),
-            config_name
-        );
-        let child_files: Vec<Value> = child_files
-            .into_iter()
-            .map(|(file_name, file)| {
-                log::debug!("  Parsing child file {}", file_name);
-                let parsed: Value = serde_yaml::from_str(&file).map_err(AppError::Yaml)?;
-                log::debug!("  Parsed child file {}: {}", file_name, parsed);
-                if parsed.is_null() {
-                    log::warn!(
-                        "  WARNING: Child file {} parsed as null! Content was: {}",
-                        file_name,
-                        file
-                    );
-                }
-                Ok(Template::stored(&file_name, parsed))
-            })
-            .collect::<Result<Vec<Value>, AppError>>()?;
-
-        log::debug!(
-            "Creating DeployConfig {} with {} specs",
+        let config_content = read_file(
+            &crab,
+            &owner,
+            &repo,
+            sha,
+            &format!(".deploy/{}.yaml", config_name),
+        )
+        .await?;
+        final_deploy_configs.push(build_deploy_config(
+            &owner,
+            &repo,
             config_name,
-            child_files.len()
-        );
-        let parameters = config.parameter_sources()?;
-        let dc = DeployConfig {
-            spec: DeployConfigSpec {
-                spec: DeployConfigSpecFields {
-                    checks: config.checks.clone(),
-                    parameters,
-                    // Selections are user intent, owned by the deploy handler;
-                    // empty here means "leave whatever is on the object".
-                    selections: Default::default(),
-                    patches: vec![],
-                    config: Repository {
-                        owner: owner.clone(),
-                        repo: repo.clone(),
-                    },
-                    kind: config.kind,
-                    specs: child_files,
-                    team: config.team.clone(),
-                },
-            },
-            metadata: ObjectMeta {
-                name: Some(config_name.to_owned()),
-                namespace: Some(test_mode::deploy_namespace(&config.namespace)),
-                ..ObjectMeta::default()
-            },
-            status: None,
-        };
-
-        final_deploy_configs.push(dc);
+            &config_content,
+            child_files,
+        )?);
     }
 
     Ok(final_deploy_configs)
